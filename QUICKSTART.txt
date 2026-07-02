@@ -1,0 +1,19 @@
+SIGMOND APPLIANCE — QUICK START
+================================
+1. Write the image to a USB stick (>=8 GB):
+     sudo dd if=usb-final-v2-release.img of=/dev/sdX bs=4M oflag=direct status=progress
+2. Boot the target machine from the USB.
+   Proxmox VE installs AUTOMATICALLY — this ERASES the machine's NVMe disk.
+3. When the machine POWERS ITSELF OFF (~3 min), that is your cue:
+     REMOVE THE USB STICK, then power the machine back on.
+   (The power-off is deliberate: it prevents the installer from
+    running again on firmwares that always boot USB first.)
+4. The machine boots Proxmox from its own disk. When the console says
+   "plug in the Sigmond install USB", insert the SAME stick again.
+   The decoder VM installs itself (~2 min); the console tells you when
+   to remove the stick.
+5. The site setup wizard appears on the console: enter your reporter
+   ID (e.g. AC0G/B4), grid square, optional antenna and RAC credentials.
+   Rerun any time with:  sigmond-setup --reconfigure
+6. Web GUI: https://<machine-ip>:8006   (root / changeme-at-firstrun —
+   change this password!)

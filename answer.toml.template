@@ -1,0 +1,20 @@
+[global]
+reboot-mode = "power-off"
+keyboard = "en-us"
+country = "us"
+fqdn = "sigmond-appliance.local"
+mailto = "root@localhost"
+timezone = "UTC"
+root-password = "changeme-at-firstrun"
+
+[network]
+source = "from-dhcp"
+
+[disk-setup]
+filesystem = "ext4"
+filter-match = "any"
+filter.DEVNAME = "/dev/nvme*"
+
+[first-boot]
+source = "from-iso"
+ordering = "fully-up"

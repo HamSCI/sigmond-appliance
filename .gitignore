@@ -1,0 +1,10 @@
+*.img
+*.img.zst
+*.qcow2
+*.iso
+*.ext4
+*.log
+*.fd
+*.sha256
+sigmond-rac/
+sigmond-rac.tar.gz
