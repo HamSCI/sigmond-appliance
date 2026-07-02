@@ -69,8 +69,11 @@ done
 read -r -p "Antenna description (optional, Enter to skip): " ANTENNA
 
 echo ""
-echo "Remote access (RAC) lets the WsprDaemon admins reach this station."
-read -r -p "RAC user (optional, from your WD admin — Enter to skip): " RAC_USER
+echo "Remote access (RAC) is a reverse tunnel to the WsprDaemon gateway so the"
+echo "fleet admin can reach this station for support. The username + token are"
+echo "issued by the WsprDaemon admin. No credentials? Just press Enter to skip"
+echo "— you can add them any time with:  sigmond-setup --reconfigure"
+read -r -p "RAC user (Enter to skip): " RAC_USER
 RAC_TOKEN=""
 if [ -n "$RAC_USER" ]; then
     read -r -p "RAC token: " RAC_TOKEN
@@ -111,6 +114,20 @@ gexec 600 "smd config render" \
     || say "WARN: smd config render reported issues (continuing; rerun inside VM)"
 
 # ── host RAC (optional) ─────────────────────────────────────────────────────
+# ── operator access to the decoder VM ──────────────────────────────
+# Give the VM's root the SAME password as this host's root (hash copy —
+# one password for the whole appliance) and authorize this host's SSH key.
+say "setting decoder VM root credentials (same password as this host's root)"
+HASH=$(getent shadow root | cut -d: -f2)
+if [ -n "$HASH" ] && [ "$HASH" != "*" ] && [ "$HASH" != "!" ]; then
+    gexec 30 "usermod -p '$HASH' root" || say "WARN: could not set VM root password"
+fi
+[ -f /root/.ssh/id_ed25519 ] || ssh-keygen -q -t ed25519 -N "" -f /root/.ssh/id_ed25519
+PUB=$(cat /root/.ssh/id_ed25519.pub)
+gexec 30 "mkdir -p /root/.ssh && chmod 700 /root/.ssh && grep -qF '$PUB' /root/.ssh/authorized_keys 2>/dev/null || echo '$PUB' >> /root/.ssh/authorized_keys && chmod 600 /root/.ssh/authorized_keys" \
+    || say "WARN: could not install host ssh key in VM"
+VMIP=$(qm guest exec "$VMID" --timeout 15 -- bash -lc "ip -4 -br addr show scope global" 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+
 RAC_STATE="skipped"
 if [ -n "$RAC_USER" ]; then
     say "activating host RAC tunnel"
@@ -136,6 +153,9 @@ echo "$REPORTER $GRID $(date -u +%F)" > "$CONF_MARK"
 say "──────────────────────────────────────────────────────"
 say "  Station configured: $REPORTER @ $GRID"
 say "  Decoder VM:  $VMID (personalized; decode chain will start per hardware)"
+say "  VM login:    root — SAME password as this host's root"
+say "               ssh root@${VMIP:-<vm-ip>}   (key installed for this host)"
+say "               or from this console:  qm terminal $VMID   (Ctrl+O exits)"
 say "  RAC:         $RAC_STATE"
 say "  Proxmox GUI: https://<this-host>:8006    Rerun wizard: sigmond-setup --reconfigure"
 say "──────────────────────────────────────────────────────"
