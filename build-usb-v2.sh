@@ -53,18 +53,20 @@ sudo mount -o loop payload-v2.ext4 /tmp/sigpay.$$
 sudo cp "$TPL" sigmond-wizard.sh sigmond-rac.tar.gz QUICKSTART.txt /tmp/sigpay.$$/
 sudo umount /tmp/sigpay.$$; rmdir /tmp/sigpay.$$
 
-say "assemble USB image (pristine ISO + payload at aligned volsize offset)"
+STAMP="$(date +%Y%m%d-%H%M)"
+IMG="sigmond-appliance-${STAMP}$( [ "$RELEASE" = 1 ] && echo -release ).img"
+say "assemble USB image (pristine ISO + payload at aligned volsize offset) -> $IMG"
 VB=$(od -An -tu4 -j $((16*2048+80)) -N4 pve-sc-v2.iso | tr -d ' ')
 OFF=$(( VB*2048 )); OFF=$(( (OFF+1048575)/1048576*1048576 ))
 say "iso volsize=$((VB*2048)) bytes → payload offset=$OFF"
-rm -f usb-final-v2.img
-cp pve-sc-v2.iso usb-final-v2.img
-truncate -s "$OFF" usb-final-v2.img
-cat payload-v2.ext4 >> usb-final-v2.img
+rm -f $IMG
+cp pve-sc-v2.iso $IMG
+truncate -s "$OFF" $IMG
+cat payload-v2.ext4 >> $IMG
 
 say "compress + checksum"
-rm -f usb-final-v2.img.zst
-zstd -T0 -9 -q usb-final-v2.img -o usb-final-v2.img.zst
-sha256sum usb-final-v2.img usb-final-v2.img.zst | tee usb-final-v2.sha256
-ls -la usb-final-v2.img usb-final-v2.img.zst
+rm -f "$IMG.zst"
+zstd -T0 -9 -q "$IMG" -o "$IMG.zst"
+sha256sum $IMG $IMG.zst | tee ${IMG%.img}.sha256
+ls -la $IMG $IMG.zst
 say "USB IMAGE BUILD COMPLETE"
