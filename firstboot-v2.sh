@@ -85,14 +85,20 @@ ConditionPathExists=!/etc/sigmond-appliance/.configured
 Conflicts=getty@tty1.service
 [Service]
 Type=idle
+# make VT1 the visible console before we draw on it
+ExecStartPre=-/usr/bin/chvt 1
 ExecStart=/usr/local/sbin/sigmond-setup
 StandardInput=tty
 StandardOutput=tty
+# bash read -p writes its prompts to STDERR — without this the wizard
+# waits on invisible questions (observed as a black screen, 2026-07-02)
+StandardError=tty
 TTYPath=/dev/tty1
 TTYReset=yes
 TTYVHangup=yes
-Restart=on-failure
-RestartSec=10
+# no auto-restart: a crash-loop re-clears the tty every cycle (black
+# screen); on any exit hand the console back to a login prompt instead
+Restart=no
 ExecStopPost=/bin/systemctl --no-block start getty@tty1.service
 [Install]
 WantedBy=multi-user.target
