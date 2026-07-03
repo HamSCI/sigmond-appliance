@@ -8,8 +8,14 @@
 # Prompts: reporter ID (required)   e.g. AC0G/B4 — drives ALL upload paths
 #          grid square (required)   e.g. EM38ww
 #          antenna     (optional)   free text
-#          RAC user + token (optional; from the WsprDaemon admin) — activates
-#                                   the HOST tunnel (host SSH + Proxmox GUI)
+#          RAC number  (optional; assigned by the WsprDaemon admin) —
+#              self-registers with the gw2 registrar and brings up ONE
+#              host-side frpc carrying FOUR channels: VM ssh (35800+n),
+#              VM ka9q-web (45800+n), host ssh (50800+n), Proxmox UI
+#              (55800+n). The vm-* channels go through local relays that
+#              ask the guest agent for the VM's CURRENT IP per connection,
+#              so they survive DHCP changes AND the host stays reachable
+#              even when the VM is down.
 set -u
 VMID="${SIGMOND_VMID:-120}"
 MARK_DIR=/etc/sigmond-appliance
@@ -70,19 +76,26 @@ read -r -p "Antenna description (optional, Enter to skip): " ANTENNA
 
 echo ""
 echo "Remote access (RAC) is a reverse tunnel to the WsprDaemon gateway so the"
-echo "fleet admin can reach this station for support. The username + token are"
-echo "issued by the WsprDaemon admin. No credentials? Just press Enter to skip"
-echo "— you can add them any time with:  sigmond-setup --reconfigure"
-read -r -p "RAC user (Enter to skip): " RAC_USER
-RAC_TOKEN=""
-if [ -n "$RAC_USER" ]; then
-    read -r -p "RAC token: " RAC_TOKEN
-fi
+echo "fleet admin can reach this station for support. All you need is the RAC"
+echo "number the admin assigned to this station — keys, credentials and ports"
+echo "are handled automatically. No number yet? Press Enter to skip — add it"
+echo "any time with:  sigmond-setup --reconfigure"
+RAC_NUM=""
+while :; do
+    read -r -p "RAC number (Enter to skip): " RAC_NUM
+    RAC_NUM=$(echo "$RAC_NUM" | tr -d ' ')
+    [ -z "$RAC_NUM" ] && break
+    if echo "$RAC_NUM" | grep -qE '^[0-9]{1,3}$' \
+       && { [ "$RAC_NUM" -lt 200 ] || [ "$RAC_NUM" -gt 299 ]; }; then
+        break
+    fi
+    echo "  ✗ RAC number is 0-199 or 300-999 (200-299 is the HamSCI range)"
+done
 
 echo ""
 echo "  Reporter: $REPORTER   Grid: $GRID"
 [ -n "$ANTENNA" ]  && echo "  Antenna:  $ANTENNA"
-[ -n "$RAC_USER" ] && echo "  RAC:      $RAC_USER (host tunnel will be activated)"
+[ -n "$RAC_NUM" ] && echo "  RAC:      #$RAC_NUM — VM ssh/web + host ssh + Proxmox UI (auto-registered)"
 read -r -p "Apply? [Y/n] " OK
 case "${OK:-Y}" in [Nn]*) say "aborted by operator"; exit 1;; esac
 
@@ -219,23 +232,210 @@ if [ -n "$VMIP" ]; then
 fi
 
 RAC_STATE="skipped"
-if [ -n "$RAC_USER" ]; then
-    say "activating host RAC tunnel"
-    TPL=/etc/sigmond/frpc-host.toml.template
-    if [ ! -f "$TPL" ] && [ -x /root/sigmond-appliance/sigmond-rac/install-host.sh ]; then
+if [ -n "$RAC_NUM" ]; then
+    say "activating RAC #$RAC_NUM — registering with the gateway"
+    # frpc binary, TLS CA and the host unit come from the sigmond-rac payload
+    if [ ! -x /usr/local/sbin/frpc ] && [ -x /root/sigmond-appliance/sigmond-rac/install-host.sh ]; then
         (cd /root/sigmond-appliance/sigmond-rac && ./install-host.sh) >>"$LOG" 2>&1
     fi
-    if [ -f "$TPL" ]; then
-        sed -e "s|<RAC_USER_FROM_WD_ADMIN>|$RAC_USER|" \
-            -e "s|<RAC_TOKEN_FROM_WD_ADMIN>|$RAC_TOKEN|" "$TPL" \
-            > /etc/sigmond/frpc-host.toml
-        chmod 600 /etc/sigmond/frpc-host.toml
-        systemctl enable --now sigmond-rac-host.service >>"$LOG" 2>&1 \
-            || systemctl enable --now wd-rac.service >>"$LOG" 2>&1
-        RAC_STATE="activated as $RAC_USER (host SSH + Proxmox GUI via gw2)"
-    else
-        RAC_STATE="FAILED — sigmond-rac payload missing; run install-host.sh manually"
+    if [ ! -x /usr/local/sbin/frpc ] || [ ! -f /etc/sigmond/frps-ca.crt ]; then
+        RAC_STATE="FAILED — sigmond-rac payload missing (frpc/CA); run install-host.sh, then sigmond-setup --reconfigure"
         say "WARN: $RAC_STATE"
+    else
+        # One POST does what used to be a copy-paste ritual: gw2's registrar
+        # creates the station account, files our pubkey (that IS the auth —
+        # the frps plugin only admits registered keys), claims the RAC
+        # number, and returns user/token/ports for the frpc config.
+        SITE=$(echo "$REPORTER" | tr '[:lower:]' '[:upper:]' | tr '/' '_' | tr -cd 'A-Z0-9_-')
+        REG=$(python3 - "$SITE" "$RAC_NUM" "$(cat /root/.ssh/id_ed25519.pub)" <<'PYEOF' 2>>"$LOG"
+import json, re, sys, urllib.error, urllib.request
+site, rac, pub = sys.argv[1], int(sys.argv[2]), sys.argv[3]
+req = urllib.request.Request(
+    "http://gw2.wsprdaemon.org:35737/register",
+    data=json.dumps({"site": site, "rac": rac, "pubkey": pub}).encode(),
+    headers={"Content-Type": "application/json"})
+try:
+    r = json.load(urllib.request.urlopen(req, timeout=30))
+except urllib.error.HTTPError as e:
+    try: msg = json.load(e)["error"]
+    except Exception: msg = str(e)
+    sys.exit("gateway refused registration: %s" % msg)
+except Exception as e:
+    sys.exit("cannot reach the gateway registrar: %s" % e)
+ok = (re.fullmatch(r"[0-9a-f]{16}", str(r.get("user", "")))
+      and re.fullmatch(r"[0-9a-zA-Z]{8,64}", str(r.get("token", "")))
+      and re.fullmatch(r"[a-z0-9.-]+", str(r.get("server_addr", "")))
+      and all(isinstance(r.get("ports", {}).get(k), int)
+              for k in ("vm_ssh", "vm_web", "host_ssh", "host_ui")))
+if not ok:
+    sys.exit("gateway returned a malformed registration")
+print("RUSER=%s RTOKEN=%s P_VMSSH=%d P_VMWEB=%d P_HSSH=%d P_HUI=%d SRV=%s SPORT=%d" % (
+    r["user"], r["token"], r["ports"]["vm_ssh"], r["ports"]["vm_web"],
+    r["ports"]["host_ssh"], r["ports"]["host_ui"],
+    r["server_addr"], int(r["server_port"])))
+PYEOF
+)
+        if [ -z "$REG" ]; then
+            RAC_STATE="FAILED — could not register with the gateway (see $LOG), rerun: sigmond-setup --reconfigure"
+            say "WARN: $RAC_STATE"
+        else
+            eval "$REG"
+            # DHCP-proof relays: frpc needs a fixed local target, but the
+            # VM's address can change — so the vm-* channels point at local
+            # sockets whose per-connection handler asks the guest agent for
+            # the VM's CURRENT IP (same trick as sigmond-vm).
+            say "installing the VM port relays (ssh, ka9q-web)"
+            install -d /usr/local/lib/sigmond
+            cat > /usr/local/lib/sigmond/vm-port-relay.py <<'RLEOF'
+#!/usr/bin/env python3
+# vm-port-relay.py <vm-port> — inetd-style relay for ONE accepted connection
+# (systemd socket with Accept=yes): stdin/stdout is the client socket.
+# Resolves the decoder VM's CURRENT IPv4 via the qemu guest agent on every
+# connection, so the relay keeps working when DHCP moves the VM.
+import os, re, select, socket, subprocess, sys
+
+port = int(sys.argv[1])
+vmid = os.environ.get("SIGMOND_VMID", "120")
+try:
+    out = subprocess.run(["qm", "agent", vmid, "network-get-interfaces"],
+                         capture_output=True, text=True, timeout=10).stdout
+except Exception:
+    sys.exit(1)
+ips = [ip for ip in re.findall(r'"ip-address"\s*:\s*"(\d+\.\d+\.\d+\.\d+)"', out)
+       if not ip.startswith("127.")]
+if not ips:
+    sys.exit(1)
+try:
+    vm = socket.create_connection((ips[0], port), timeout=10)
+except OSError:
+    sys.exit(1)
+vm.settimeout(None)
+client_open, vm_open = True, True
+try:
+    while client_open or vm_open:
+        watch = ([0] if client_open else []) + ([vm] if vm_open else [])
+        r, _, _ = select.select(watch, [], [], 900)
+        if not r:
+            break  # idle 15 min
+        if 0 in r:
+            d = os.read(0, 65536)
+            if d:
+                vm.sendall(d)
+            else:
+                client_open = False
+                try: vm.shutdown(socket.SHUT_WR)
+                except OSError: pass
+                if not vm_open: break
+        if vm in r:
+            try: d = vm.recv(65536)
+            except OSError: d = b""
+            if d:
+                os.write(1, d)
+            else:
+                vm_open = False
+                if not client_open: break
+except (BrokenPipeError, ConnectionResetError):
+    pass
+finally:
+    vm.close()
+RLEOF
+            chmod 755 /usr/local/lib/sigmond/vm-port-relay.py
+            for spec in "ssh:12222:22" "web:12223:8081"; do
+                IFS=: read -r RNAME RLPORT RVPORT <<<"$spec"
+                cat > "/etc/systemd/system/sigmond-vm-$RNAME-relay.socket" <<SOCKEOF
+[Unit]
+Description=Relay 127.0.0.1:$RLPORT → decoder VM :$RVPORT (IP via guest agent)
+[Socket]
+ListenStream=127.0.0.1:$RLPORT
+Accept=yes
+[Install]
+WantedBy=sockets.target
+SOCKEOF
+                cat > "/etc/systemd/system/sigmond-vm-$RNAME-relay@.service" <<SVCEOF
+[Unit]
+Description=decoder-VM $RNAME relay (%i)
+CollectMode=inactive-or-failed
+[Service]
+Type=simple
+Environment=SIGMOND_VMID=$VMID
+StandardInput=socket
+StandardOutput=socket
+StandardError=journal
+ExecStart=/usr/local/lib/sigmond/vm-port-relay.py $RVPORT
+SVCEOF
+            done
+            systemctl daemon-reload
+            systemctl enable --now sigmond-vm-ssh-relay.socket sigmond-vm-web-relay.socket >>"$LOG" 2>&1
+
+            say "writing /etc/sigmond/frpc-host.toml (4 channels, one tunnel)"
+            cat > /etc/sigmond/frpc-host.toml <<TOMLEOF
+# Written by sigmond-setup $(date -u +%F) — RAC #$RAC_NUM, site $SITE.
+# ONE frpc on the Proxmox host carries all four channels; the vm-*
+# channels ride the local relays (12222/12223) that resolve the VM's
+# current IP per connection, so this file never needs the VM's address.
+serverAddr = "$SRV"
+serverPort = $SPORT
+user = "$RUSER"
+
+[auth]
+method = "token"
+token = "$RTOKEN"
+
+[transport.tls]
+enable = true
+trustedCaFile = "/etc/sigmond/frps-ca.crt"
+
+[webServer]
+addr = "127.0.0.1"
+port = 7500
+
+[[proxies]]
+name = "$SITE-vm-ssh"
+type = "tcp"
+localIP = "127.0.0.1"
+localPort = 12222
+remotePort = $P_VMSSH
+
+[[proxies]]
+name = "$SITE-vm-web"
+type = "tcp"
+localIP = "127.0.0.1"
+localPort = 12223
+remotePort = $P_VMWEB
+
+[[proxies]]
+name = "$SITE-host-ssh"
+type = "tcp"
+localIP = "127.0.0.1"
+localPort = 22
+remotePort = $P_HSSH
+
+[[proxies]]
+name = "$SITE-host-ui"
+type = "tcp"
+localIP = "127.0.0.1"
+localPort = 8006
+remotePort = $P_HUI
+TOMLEOF
+            chmod 600 /etc/sigmond/frpc-host.toml
+            systemctl enable sigmond-rac-host.service >>"$LOG" 2>&1
+            systemctl restart sigmond-rac-host.service >>"$LOG" 2>&1
+
+            # PROVE the tunnel (don't just claim it): frpc's local admin API
+            # reports per-proxy status once the server has accepted them.
+            RUNNING=0
+            for i in $(seq 1 12); do
+                RUNNING=$(curl -s http://127.0.0.1:7500/api/status 2>/dev/null | grep -c '"status":"running"')
+                [ "$RUNNING" -ge 4 ] && break
+                sleep 5
+            done
+            if [ "$RUNNING" -ge 4 ]; then
+                RAC_STATE="#$RAC_NUM live on $SRV — VM ssh :$P_VMSSH · VM web :$P_VMWEB · host ssh :$P_HSSH · Proxmox UI :$P_HUI"
+            else
+                RAC_STATE="FAILED — registered, but only $RUNNING/4 channels came up; journalctl -u sigmond-rac-host"
+                say "WARN: $RAC_STATE"
+            fi
+        fi
     fi
 fi
 
