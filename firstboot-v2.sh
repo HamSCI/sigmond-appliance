@@ -45,7 +45,7 @@ say "import: copying template to $STORE"
 cp "/mnt/sig-media/$TPL_NAME" /tmp/decoder.qcow2; CPRC=$?
 umount /mnt/sig-media 2>/dev/null; losetup -d "$LO" 2>/dev/null
 [ $CPRC -ne 0 ] && { say "import: copy failed rc=$CPRC"; rm -f /tmp/decoder.qcow2; exit 1; }
-qm create "$VMID" --name sigmond-decoder --memory 8192 --cores 4 --cpu host --net0 virtio,bridge=vmbr0 --ostype l26 --scsihw virtio-scsi-single --agent 1
+qm create "$VMID" --name sigmond-decoder --memory 8192 --cores 4 --cpu host --net0 virtio,bridge=vmbr0 --ostype l26 --scsihw virtio-scsi-single --agent 1 --serial0 socket
 qm importdisk "$VMID" /tmp/decoder.qcow2 "$STORE"
 DISK="$(qm config "$VMID"|awk -F': ' '/^unused0:/{print $2;exit}')"
 [ -z "$DISK" ] && { say "import: no unused0"; qm destroy "$VMID" --purge 2>/dev/null; rm -f /tmp/decoder.qcow2; exit 1; }

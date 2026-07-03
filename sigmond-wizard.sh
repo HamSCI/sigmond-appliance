@@ -126,6 +126,7 @@ fi
 PUB=$(cat /root/.ssh/id_ed25519.pub)
 gexec 30 "mkdir -p /root/.ssh && chmod 700 /root/.ssh && grep -qF '$PUB' /root/.ssh/authorized_keys 2>/dev/null || echo '$PUB' >> /root/.ssh/authorized_keys && chmod 600 /root/.ssh/authorized_keys" \
     || say "WARN: could not install host ssh key in VM"
+gexec 30 "systemctl enable --now serial-getty@ttyS0.service" || true
 VMIP=$(qm guest exec "$VMID" --timeout 15 -- bash -lc "ip -4 -br addr show scope global" 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' | head -1)
 
 RAC_STATE="skipped"
