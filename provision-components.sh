@@ -29,6 +29,10 @@ smd list 2>&1 | head -30 || true
 echo "### COMPONENTS DONE (rc=$RC) $(date -u)"
 
 echo "### stage 3: capture-prep (scrub identity/secrets/data for golden image)"
+sudo mkdir -p /etc/systemd/network
+printf '[Match]\nName=en*\n\n[Network]\nDHCP=yes\n' | sudo tee /etc/systemd/network/99-dhcp-en.network >/dev/null
+sudo systemctl enable systemd-networkd >/dev/null 2>&1
+echo "### catch-all DHCP network config baked (en*)"
 sudo cloud-init clean --logs 2>/dev/null; echo "### cloud-init cleaned"
 smd admin capture-prep --yes
 echo "### capture-prep exit=$?"
