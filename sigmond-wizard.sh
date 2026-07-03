@@ -132,7 +132,16 @@ gexec 30 "systemctl enable --now serial-getty@ttyS0.service" || true
 say "ensuring decoder VM networking (DHCP on any ethernet NIC)"
 gexec 90 "mkdir -p /etc/systemd/network && { echo '[Match]'; echo 'Name=en*'; echo; echo '[Network]'; echo 'DHCP=yes'; } > /etc/systemd/network/99-dhcp-en.network && systemctl enable --now systemd-networkd && networkctl reload && for l in /sys/class/net/en*; do ip link set \$(basename \$l) up 2>/dev/null; done; sleep 8" \
     || say "WARN: could not configure VM networking"
-VMIP=$(qm guest exec "$VMID" --timeout 15 -- bash -lc "ip -4 -br addr show scope global" 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+# DHCP can take a while after networkctl reload — poll up to ~90 s for a
+# lease instead of a single grab (one-shot came up empty on real hardware).
+say "waiting for the decoder VM to get an IP address (DHCP)..."
+VMIP=""
+for i in $(seq 1 18); do
+    VMIP=$(qm guest exec "$VMID" --timeout 15 -- bash -lc "ip -4 -br addr show scope global" 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+    [ -n "$VMIP" ] && break
+    sleep 5
+done
+[ -z "$VMIP" ] && say "WARN: VM has no IPv4 address yet — check cabling/DHCP, then: qm guest exec $VMID -- ip -4 -br addr"
 
 RAC_STATE="skipped"
 if [ -n "$RAC_USER" ]; then
@@ -156,13 +165,42 @@ if [ -n "$RAC_USER" ]; then
 fi
 
 echo "$REPORTER $GRID $(date -u +%F)" > "$CONF_MARK"
-say "──────────────────────────────────────────────────────"
-say "  Station configured: $REPORTER @ $GRID"
-say "  Decoder VM:  $VMID (personalized; decode chain will start per hardware)"
-say "  VM login:    root — SAME password as this host's root"
-say "               ssh root@${VMIP:-<vm-ip>}   (key installed for this host)"
-say "               or from this console:  qm terminal $VMID   (Ctrl+O exits)"
-say "  RAC:         $RAC_STATE"
-say "  Proxmox GUI: https://<this-host>:8006    Rerun wizard: sigmond-setup --reconfigure"
-say "──────────────────────────────────────────────────────"
+
+# ── final summary ───────────────────────────────────────────────────────────
+# Print it, save it (/root/sigmond-setup-summary.txt), pin it above the tty1
+# login prompt (/etc/issue) and after ssh login (/etc/motd), and HOLD the
+# console until the operator acknowledges — getty resets the tty the moment
+# we exit, which used to erase everything (observed 2026-07-03).
+HOSTIP=$(hostname -I 2>/dev/null | awk '{print $1}')
+SUMMARY=$(cat <<SEOF
+──────────────────────────────────────────────────────
+ Sigmond station configured: $REPORTER @ $GRID
+ Host (Proxmox):
+   login:   root — password set at install (image default:
+            hamsci-sigmond — CHANGE IT: run 'passwd')
+   ssh:     ssh root@${HOSTIP:-<host-ip>}
+   web GUI: https://${HOSTIP:-<host-ip>}:8006
+ Decoder VM $VMID:
+   IP:      ${VMIP:-none yet — check: qm guest exec $VMID -- ip -4 -br addr}
+   login:   root — SAME password as this host's root
+   ssh:     ssh root@${VMIP:-<vm-ip>}   (this host's key installed)
+            or from this console:  qm terminal $VMID  (Ctrl+O exits)
+ RAC:       $RAC_STATE
+ Rerun wizard:  sigmond-setup --reconfigure
+ This summary is saved in /root/sigmond-setup-summary.txt
+──────────────────────────────────────────────────────
+SEOF
+)
+echo "$SUMMARY" | tee -a "$LOG"
+echo "$SUMMARY" > /root/sigmond-setup-summary.txt
+# /etc/issue is rewritten by pvebanner.service at boot, so this only needs to
+# survive until then; /etc/motd persists. Markered so re-runs don't stack.
+for f in /etc/issue /etc/motd; do
+    sed -i '/^─* Sigmond setup ─*$/,/^─* end Sigmond setup ─*$/d' "$f" 2>/dev/null
+    { echo "────── Sigmond setup ──────"
+      echo "$SUMMARY"
+      echo "────── end Sigmond setup ──────"; } >> "$f"
+done
+echo ""
+read -r -p "Press Enter to finish (this summary stays on the login screen)... " _ 2>/dev/null || true
 exit 0
