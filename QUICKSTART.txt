@@ -15,5 +15,5 @@ SIGMOND APPLIANCE — QUICK START
 5. The site setup wizard appears on the console: enter your reporter
    ID (e.g. AC0G/B4), grid square, optional antenna and RAC credentials.
    Rerun any time with:  sigmond-setup --reconfigure
-6. Web GUI: https://<machine-ip>:8006   (root / changeme-at-firstrun —
+6. Web GUI: https://<machine-ip>:8006   (root / hamsci-sigmond —
    change this password!)

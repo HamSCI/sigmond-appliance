@@ -5,7 +5,7 @@ country = "us"
 fqdn = "sigmond-appliance.local"
 mailto = "root@localhost"
 timezone = "UTC"
-root-password = "changeme-at-firstrun"
+root-password = "hamsci-sigmond"
 
 [network]
 source = "from-dhcp"
