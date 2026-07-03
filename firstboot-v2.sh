@@ -59,7 +59,7 @@ if qm start "$VMID"; then
   say "─────────────────────────────────────────────────────────"
   mkdir -p /etc/sigmond-appliance; touch /etc/sigmond-appliance/.vm-imported
   systemctl daemon-reload; systemctl enable sigmond-wizard.service 2>/dev/null
-  systemctl restart sigmond-wizard.service 2>/dev/null
+  systemctl --no-block restart sigmond-wizard.service 2>/dev/null
   say "site wizard starting on the console (also: run 'sigmond-setup' any time)"
 else
   say "import: qm start failed"; exit 1
@@ -79,12 +79,16 @@ SVCEOF
 cat > /etc/systemd/system/sigmond-wizard.service <<'WIZEOF'
 [Unit]
 Description=Sigmond first-boot site wizard (console)
-After=multi-user.target sigmond-import.service
+# NO After=sigmond-import.service: the importer starts us synchronously,
+# so that ordering deadlocks (job queued forever, black console —
+# observed on real hardware 2026-07-02). The .vm-imported Condition
+# already guarantees we only run post-import.
+After=multi-user.target
 ConditionPathExists=/etc/sigmond-appliance/.vm-imported
 ConditionPathExists=!/etc/sigmond-appliance/.configured
 Conflicts=getty@tty1.service
 [Service]
-Type=idle
+Type=simple
 # make VT1 the visible console before we draw on it
 ExecStartPre=-/usr/bin/chvt 1
 ExecStart=/usr/local/sbin/sigmond-setup
