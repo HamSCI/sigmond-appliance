@@ -8,14 +8,19 @@
 # Prompts: reporter ID (required)   e.g. AC0G/B4 — drives ALL upload paths
 #          grid square (required)   e.g. EM38ww
 #          antenna     (optional)   free text
-#          RAC number  (optional; assigned by the WsprDaemon admin) —
-#              self-registers with the gw2 registrar and brings up ONE
+#          remote access (RAC) — just Y/n. The gw2 registrar auto-assigns
+#              a free RAC number (sites are identified by reporter ID;
+#              the number is plumbing) and the wizard brings up ONE
 #              host-side frpc carrying FOUR channels: VM ssh (35800+n),
 #              VM ka9q-web (45800+n), host ssh (50800+n), Proxmox UI
 #              (55800+n). The vm-* channels go through local relays that
 #              ask the guest agent for the VM's CURRENT IP per connection,
 #              so they survive DHCP changes AND the host stays reachable
 #              even when the VM is down.
+#
+# Subcommands: --reconfigure   rerun the wizard (RAC number is sticky)
+#              --rac-off       drop the remote-access tunnel (config kept)
+#              --rac-on        bring it back up
 set -u
 VMID="${SIGMOND_VMID:-120}"
 MARK_DIR=/etc/sigmond-appliance
@@ -24,6 +29,27 @@ LOG=/var/log/sigmond-wizard.log
 say(){ echo "[wizard] $*" | tee -a "$LOG"; }
 
 mkdir -p "$MARK_DIR"
+
+# ── RAC on/off switches (no wizard rerun needed) ────────────────────────────
+case "${1:-}" in
+    --rac-off)
+        systemctl disable --now sigmond-rac-host.service \
+            sigmond-vm-ssh-relay.socket sigmond-vm-web-relay.socket 2>/dev/null
+        say "remote access (RAC) disabled — tunnel is down, config kept."
+        say "re-enable any time:  sigmond-setup --rac-on"
+        exit 0;;
+    --rac-on)
+        if [ ! -f /etc/sigmond/frpc-host.toml ]; then
+            say "no RAC config on this host yet — run: sigmond-setup --reconfigure"
+            exit 1
+        fi
+        systemctl enable --now sigmond-vm-ssh-relay.socket \
+            sigmond-vm-web-relay.socket 2>/dev/null
+        systemctl enable --now sigmond-rac-host.service
+        say "remote access (RAC) re-enabled$( [ -s "$MARK_DIR/rac-number" ] && echo " (RAC #$(cat "$MARK_DIR/rac-number"))" )"
+        exit 0;;
+esac
+
 if [ -e "$CONF_MARK" ] && [ "${1:-}" != "--reconfigure" ]; then
     say "already configured ($(cat "$CONF_MARK")). Run 'sigmond-setup --reconfigure' to redo."
     exit 0
@@ -76,26 +102,17 @@ read -r -p "Antenna description (optional, Enter to skip): " ANTENNA
 
 echo ""
 echo "Remote access (RAC) is a reverse tunnel to the WsprDaemon gateway so the"
-echo "fleet admin can reach this station for support. All you need is the RAC"
-echo "number the admin assigned to this station — keys, credentials and ports"
-echo "are handled automatically. No number yet? Press Enter to skip — add it"
-echo "any time with:  sigmond-setup --reconfigure"
+echo "fleet admin can reach this station for support. Everything — keys,"
+echo "credentials, channel numbers — is handled automatically, and you can"
+echo "turn it off any time with:  sigmond-setup --rac-off"
+read -r -p "Enable remote access? [Y/n] " RAC_EN
 RAC_NUM=""
-while :; do
-    read -r -p "RAC number (Enter to skip): " RAC_NUM
-    RAC_NUM=$(echo "$RAC_NUM" | tr -d ' ')
-    [ -z "$RAC_NUM" ] && break
-    if echo "$RAC_NUM" | grep -qE '^[0-9]{1,3}$' \
-       && { [ "$RAC_NUM" -lt 200 ] || [ "$RAC_NUM" -gt 299 ]; }; then
-        break
-    fi
-    echo "  ✗ RAC number is 0-199 or 300-999 (200-299 is the HamSCI range)"
-done
+case "${RAC_EN:-Y}" in [Nn]*) ;; *) RAC_NUM="auto";; esac
 
 echo ""
 echo "  Reporter: $REPORTER   Grid: $GRID"
 [ -n "$ANTENNA" ]  && echo "  Antenna:  $ANTENNA"
-[ -n "$RAC_NUM" ] && echo "  RAC:      #$RAC_NUM — VM ssh/web + host ssh + Proxmox UI (auto-registered)"
+[ -n "$RAC_NUM" ] && echo "  RAC:      enabled — VM ssh/web + host ssh + Proxmox UI (number auto-assigned)"
 read -r -p "Apply? [Y/n] " OK
 case "${OK:-Y}" in [Nn]*) say "aborted by operator"; exit 1;; esac
 
@@ -238,7 +255,7 @@ fi
 
 RAC_STATE="skipped"
 if [ -n "$RAC_NUM" ]; then
-    say "activating RAC #$RAC_NUM — registering with the gateway"
+    say "activating remote access — registering with the gateway"
     # frpc binary, TLS CA and the host unit come from the sigmond-rac payload
     if [ ! -x /usr/local/sbin/frpc ] && [ -x /root/sigmond-appliance/sigmond-rac/install-host.sh ]; then
         (cd /root/sigmond-appliance/sigmond-rac && ./install-host.sh) >>"$LOG" 2>&1
@@ -249,15 +266,16 @@ if [ -n "$RAC_NUM" ]; then
     else
         # One POST does what used to be a copy-paste ritual: gw2's registrar
         # creates the station account, files our pubkey (that IS the auth —
-        # the frps plugin only admits registered keys), claims the RAC
-        # number, and returns user/token/ports for the frpc config.
+        # the frps plugin only admits registered keys), auto-assigns a free
+        # RAC number (sticky per site, so reconfigure keeps it), and
+        # returns user/token/ports for the frpc config.
         SITE=$(echo "$REPORTER" | tr '[:lower:]' '[:upper:]' | tr '/' '_' | tr -cd 'A-Z0-9_-')
-        REG=$(python3 - "$SITE" "$RAC_NUM" "$(cat /root/.ssh/id_ed25519.pub)" <<'PYEOF' 2>>"$LOG"
+        REG=$(python3 - "$SITE" "$(cat /root/.ssh/id_ed25519.pub)" <<'PYEOF' 2>>"$LOG"
 import json, re, sys, urllib.error, urllib.request
-site, rac, pub = sys.argv[1], int(sys.argv[2]), sys.argv[3]
+site, pub = sys.argv[1], sys.argv[2]
 req = urllib.request.Request(
     "http://gw2.wsprdaemon.org:35737/register",
-    data=json.dumps({"site": site, "rac": rac, "pubkey": pub}).encode(),
+    data=json.dumps({"site": site, "pubkey": pub}).encode(),
     headers={"Content-Type": "application/json"})
 try:
     r = json.load(urllib.request.urlopen(req, timeout=30))
@@ -270,12 +288,13 @@ except Exception as e:
 ok = (re.fullmatch(r"[0-9a-f]{16}", str(r.get("user", "")))
       and re.fullmatch(r"[0-9a-zA-Z]{8,64}", str(r.get("token", "")))
       and re.fullmatch(r"[a-z0-9.-]+", str(r.get("server_addr", "")))
+      and isinstance(r.get("rac"), int)
       and all(isinstance(r.get("ports", {}).get(k), int)
               for k in ("vm_ssh", "vm_web", "host_ssh", "host_ui")))
 if not ok:
     sys.exit("gateway returned a malformed registration")
-print("RUSER=%s RTOKEN=%s P_VMSSH=%d P_VMWEB=%d P_HSSH=%d P_HUI=%d SRV=%s SPORT=%d" % (
-    r["user"], r["token"], r["ports"]["vm_ssh"], r["ports"]["vm_web"],
+print("RACN=%d RUSER=%s RTOKEN=%s P_VMSSH=%d P_VMWEB=%d P_HSSH=%d P_HUI=%d SRV=%s SPORT=%d" % (
+    r["rac"], r["user"], r["token"], r["ports"]["vm_ssh"], r["ports"]["vm_web"],
     r["ports"]["host_ssh"], r["ports"]["host_ui"],
     r["server_addr"], int(r["server_port"])))
 PYEOF
@@ -374,7 +393,7 @@ SVCEOF
 
             say "writing /etc/sigmond/frpc-host.toml (4 channels, one tunnel)"
             cat > /etc/sigmond/frpc-host.toml <<TOMLEOF
-# Written by sigmond-setup $(date -u +%F) — RAC #$RAC_NUM, site $SITE.
+# Written by sigmond-setup $(date -u +%F) — RAC #$RACN (auto-assigned), site $SITE.
 # ONE frpc on the Proxmox host carries all four channels; the vm-*
 # channels ride the local relays (12222/12223) that resolve the VM's
 # current IP per connection, so this file never needs the VM's address.
@@ -437,7 +456,8 @@ TOMLEOF
                 sleep 5
             done
             if [ "$RUNNING" -ge 4 ]; then
-                RAC_STATE="#$RAC_NUM live on $SRV — VM ssh :$P_VMSSH · VM web :$P_VMWEB · host ssh :$P_HSSH · Proxmox UI :$P_HUI"
+                RAC_STATE="#$RACN live on $SRV — VM ssh :$P_VMSSH · VM web :$P_VMWEB · host ssh :$P_HSSH · Proxmox UI :$P_HUI (off: sigmond-setup --rac-off)"
+                echo "$RACN" > "$MARK_DIR/rac-number"
             else
                 RAC_STATE="FAILED — registered, but only $RUNNING/4 channels came up; journalctl -u sigmond-rac-host"
                 say "WARN: $RAC_STATE"
