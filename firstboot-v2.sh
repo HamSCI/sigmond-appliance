@@ -112,8 +112,11 @@ cat > /etc/udev/rules.d/99-sigmond-import.rules <<'UDEVEOF'
 ACTION=="add", SUBSYSTEM=="block", ENV{DEVTYPE}=="disk", ENV{ID_FS_TYPE}=="iso9660", ENV{ID_FS_LABEL}=="PVE", RUN+="/usr/bin/systemctl start --no-block sigmond-import.service"
 UDEVEOF
 udevadm control --reload-rules 2>/dev/null; systemctl daemon-reload 2>/dev/null
+HOSTIP=$(hostname -I 2>/dev/null | awk '{print $1}')
 say "─────────────────────────────────────────────────────────"
 say " Sigmond appliance: Proxmox is installed and running."
+say "   console/SSH login: root / hamsci-sigmond  (CHANGE IT: 'passwd')"
+say "   ssh root@${HOSTIP:-<host-ip>}    web GUI: https://${HOSTIP:-<host-ip>}:8006"
 say " NEXT STEP: plug in the Sigmond install USB stick."
 say " The decoder VM will then install itself automatically."
 say "─────────────────────────────────────────────────────────"
