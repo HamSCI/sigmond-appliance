@@ -161,13 +161,54 @@ for i in $(seq 1 18); do
 done
 [ -z "$VMIP" ] && say "WARN: VM has no IPv4 address yet — check cabling/DHCP, then: qm guest exec $VMID -- ip -4 -br addr"
 
+# ── sigmond-vm: shell into the VM without knowing its (DHCP) address ────────
+# The operator shouldn't have to hunt for an IP that DHCP can change —
+# this helper asks the guest agent for the CURRENT address every time.
+say "installing the sigmond-vm helper (ssh to the VM, IP auto-discovered)"
+cat > /usr/local/bin/sigmond-vm <<'VMEOF'
+#!/bin/bash
+# sigmond-vm — shell into the Sigmond decoder VM as 'sigmond'; the VM's
+# current IP is discovered live via the qemu guest agent (DHCP-proof).
+# Installed by sigmond-setup.
+#   sigmond-vm             interactive shell
+#   sigmond-vm <cmd...>    run a command in the VM
+#   sigmond-vm --ip        just print the VM's current IPv4
+VMID="${SIGMOND_VMID:-120}"
+if ! qm status "$VMID" >/dev/null 2>&1; then
+    echo "sigmond-vm: VM $VMID does not exist" >&2; exit 1
+fi
+if ! qm status "$VMID" | grep -q running; then
+    echo "sigmond-vm: VM $VMID is not running — try: qm start $VMID" >&2; exit 1
+fi
+IP=""
+for i in 1 2 3; do
+    IP=$(qm agent "$VMID" network-get-interfaces 2>/dev/null \
+         | grep -oE '"ip-address" *: *"[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+"' \
+         | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' | grep -v '^127\.' | head -1)
+    [ -n "$IP" ] && break
+    sleep 2
+done
+if [ -z "$IP" ]; then
+    echo "sigmond-vm: the guest agent reports no IPv4 yet — check the VM's network" >&2; exit 1
+fi
+if [ "${1:-}" = "--ip" ]; then echo "$IP"; exit 0; fi
+# dedicated known_hosts: sigmond-setup clears it when it regenerates the
+# VM's host keys, so operators never see a MITM warning for their own VM
+exec ssh -o StrictHostKeyChecking=accept-new \
+         -o UserKnownHostsFile=/etc/sigmond-appliance/vm-known_hosts \
+         sigmond@"$IP" "$@"
+VMEOF
+chmod +x /usr/local/bin/sigmond-vm
+
 # ── PROVE the operator login works (don't just claim it) ───────────────────
-# Key login, host→VM. Fresh known_hosts each time: personalize regenerates
-# the VM's host keys, so the cached entry from a previous run always clashes.
+# Key login, host→VM, via the same helper path the operator will use.
+# Fresh known_hosts each run: personalize regenerates the VM's host keys,
+# so a cached entry from a previous run always clashes — clear + re-seed.
+rm -f "$MARK_DIR/vm-known_hosts"
 SSH_STATE="not verified — VM had no IP during setup"
 if [ -n "$VMIP" ]; then
-    if ssh -o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=no \
-           -o UserKnownHostsFile=/dev/null sigmond@"$VMIP" true 2>>"$LOG"; then
+    if ssh -o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=accept-new \
+           -o UserKnownHostsFile="$MARK_DIR/vm-known_hosts" sigmond@"$VMIP" true 2>>"$LOG"; then
         SSH_STATE="verified from this host ✓"
     else
         SSH_STATE="FAILED — key login from this host was refused; see $LOG"
@@ -218,7 +259,10 @@ SUMMARY=$(cat <<SEOF
    IP:      ${VMIP:-none yet — check: qm guest exec $VMID -- ip -4 -br addr}
    login:   sigmond — SAME password as this host's root
             (remote root ssh login is disabled)
-   ssh:     ssh sigmond@${VMIP:-<vm-ip>}   [$SSH_STATE]
+   shell:   sigmond-vm   ← run this on the host: finds the VM's
+            current IP and logs you in as sigmond ($SSH_STATE)
+   ssh:     ssh sigmond@${VMIP:-<vm-ip>}   (from other machines;
+            sigmond-vm --ip prints the current address)
    console: qm terminal $VMID  (Ctrl+O exits; sigmond or root)
  RAC:       $RAC_STATE
  Rerun wizard:  sigmond-setup --reconfigure
