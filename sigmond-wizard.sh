@@ -115,17 +115,24 @@ gexec 600 "smd config render" \
 
 # ── host RAC (optional) ─────────────────────────────────────────────────────
 # ── operator access to the decoder VM ──────────────────────────────
-# Give the VM's root the SAME password as this host's root (hash copy —
-# one password for the whole appliance) and authorize this host's SSH key.
-say "setting decoder VM root credentials (same password as this host's root)"
+# The operator account is the 'sigmond' user — remote root ssh login is
+# DISABLED (root stays usable on the console / qm terminal for recovery).
+# sigmond gets the SAME password as this host's root (hash copy — one
+# password for the whole appliance), this host's SSH key, and sudo.
+say "setting up VM operator account 'sigmond' (same password as this host's root)"
+gexec 30 "id sigmond >/dev/null 2>&1 || useradd -m sigmond; usermod -s /bin/bash sigmond; mkdir -p /home/sigmond; usermod -aG sudo sigmond" \
+    || say "WARN: could not ensure sigmond operator user in VM"
 HASH=$(getent shadow root | cut -d: -f2)
 if [ -n "$HASH" ] && [ "$HASH" != "*" ] && [ "$HASH" != "!" ]; then
-    gexec 30 "usermod -p '$HASH' root" || say "WARN: could not set VM root password"
+    gexec 30 "usermod -p '$HASH' sigmond && usermod -p '$HASH' root" \
+        || say "WARN: could not set VM account passwords"
 fi
 [ -f /root/.ssh/id_ed25519 ] || ssh-keygen -q -t ed25519 -N "" -f /root/.ssh/id_ed25519
 PUB=$(cat /root/.ssh/id_ed25519.pub)
-gexec 30 "mkdir -p /root/.ssh && chmod 700 /root/.ssh && grep -qF '$PUB' /root/.ssh/authorized_keys 2>/dev/null || echo '$PUB' >> /root/.ssh/authorized_keys && chmod 600 /root/.ssh/authorized_keys" \
-    || say "WARN: could not install host ssh key in VM"
+gexec 30 "install -d -m 700 -o sigmond -g sigmond /home/sigmond/.ssh && { grep -qF '$PUB' /home/sigmond/.ssh/authorized_keys 2>/dev/null || echo '$PUB' >> /home/sigmond/.ssh/authorized_keys; } && chown sigmond:sigmond /home/sigmond/.ssh/authorized_keys && chmod 600 /home/sigmond/.ssh/authorized_keys" \
+    || say "WARN: could not install host ssh key for sigmond"
+gexec 30 "install -d /etc/ssh/sshd_config.d && printf 'PermitRootLogin no\n' > /etc/ssh/sshd_config.d/50-sigmond-no-root.conf && { systemctl reload ssh 2>/dev/null || systemctl reload sshd 2>/dev/null || systemctl restart ssh 2>/dev/null || systemctl restart sshd; }" \
+    || say "WARN: could not disable remote root login in VM"
 gexec 30 "systemctl enable --now serial-getty@ttyS0.service" || true
 # Catch-all DHCP: the template's build-time NIC name never matches the
 # deployed VM's (observed: no IP on real hardware) — match en* instead.
@@ -182,9 +189,10 @@ SUMMARY=$(cat <<SEOF
    web GUI: https://${HOSTIP:-<host-ip>}:8006
  Decoder VM $VMID:
    IP:      ${VMIP:-none yet — check: qm guest exec $VMID -- ip -4 -br addr}
-   login:   root — SAME password as this host's root
-   ssh:     ssh root@${VMIP:-<vm-ip>}   (this host's key installed)
-            or from this console:  qm terminal $VMID  (Ctrl+O exits)
+   login:   sigmond — SAME password as this host's root
+            (remote root ssh login is disabled)
+   ssh:     ssh sigmond@${VMIP:-<vm-ip>}   (this host's key installed)
+   console: qm terminal $VMID  (Ctrl+O exits; sigmond or root)
  RAC:       $RAC_STATE
  Rerun wizard:  sigmond-setup --reconfigure
  This summary is saved in /root/sigmond-setup-summary.txt
