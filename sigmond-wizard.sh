@@ -155,7 +155,12 @@ gexec 30 "H=\$(getent passwd sigmond | cut -d: -f6); case \"\$H\" in ''|/|/nonex
 # group-writable+setgid), which StrictModes rightly distrusts — so keys
 # also live in root-owned /etc/ssh/authorized_keys.d/%u (observed
 # 2026-07-03: key refused from ~/.ssh, password fine).
-gexec 30 "install -d -m 755 /etc/ssh/authorized_keys.d && printf '%s\n' '$PUB' > /etc/ssh/authorized_keys.d/sigmond && chmod 644 /etc/ssh/authorized_keys.d/sigmond && install -d /etc/ssh/sshd_config.d && printf 'PasswordAuthentication yes\nPermitRootLogin no\nAuthorizedKeysFile .ssh/authorized_keys /etc/ssh/authorized_keys.d/%%u\n' > /etc/ssh/sshd_config.d/10-sigmond-operator.conf && rm -f /etc/ssh/sshd_config.d/50-sigmond-no-root.conf && { systemctl reload ssh 2>/dev/null || systemctl reload sshd 2>/dev/null || systemctl restart ssh 2>/dev/null || systemctl restart sshd; }" \
+# StrictModes no: operators add THEIR keys with plain ssh-copy-id, which
+# only knows ~/.ssh/authorized_keys — under the group-writable home,
+# StrictModes silently ignored those keys (observed: ssr/ssh-copy-id
+# looped forever re-adding a key sshd refused to trust). The 'offending'
+# group is sigmond's own private group, so this is safe here.
+gexec 30 "install -d -m 755 /etc/ssh/authorized_keys.d && printf '%s\n' '$PUB' > /etc/ssh/authorized_keys.d/sigmond && chmod 644 /etc/ssh/authorized_keys.d/sigmond && install -d /etc/ssh/sshd_config.d && printf 'PasswordAuthentication yes\nPermitRootLogin no\nStrictModes no\nAuthorizedKeysFile .ssh/authorized_keys /etc/ssh/authorized_keys.d/%%u\n' > /etc/ssh/sshd_config.d/10-sigmond-operator.conf && rm -f /etc/ssh/sshd_config.d/50-sigmond-no-root.conf && { systemctl reload ssh 2>/dev/null || systemctl reload sshd 2>/dev/null || systemctl restart ssh 2>/dev/null || systemctl restart sshd; }" \
     || say "WARN: could not set VM ssh policy (password on / remote root off)"
 gexec 30 "systemctl enable --now serial-getty@ttyS0.service" || true
 # Catch-all DHCP: the template's build-time NIC name never matches the
