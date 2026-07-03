@@ -80,7 +80,14 @@ for i in $(seq 1 40); do $SSHN "qm agent 120 ping" >/dev/null 2>&1 && break; sle
 $SSHN "qm agent 120 ping" >/dev/null 2>&1 || { say "FATAL: guest agent never answered"; exit 1; }
 say "guest agent up; running wizard with piped answers"
 printf 'N0CALL/T1\nEM00aa\nTier2 test dipole\n\nY\n' | $SSHN "sigmond-setup" 2>&1 | tail -12
-$SSHN "test -f /etc/sigmond-appliance/.configured" && say "configured marker present: $($SSHN cat /etc/sigmond-appliance/.configured)" || { say "FATAL: wizard did not complete"; exit 1; }
+# the guest's first DHCP through slirp can blip the ssh forward for
+# ~15s — retry before judging (observed 2026-07-02, two false FATALs)
+MARK_OK=0
+for i in $(seq 1 12); do
+    $SSHN "test -f /etc/sigmond-appliance/.configured" 2>/dev/null && { MARK_OK=1; break; }
+    sleep 10
+done
+[ "$MARK_OK" = 1 ] && say "configured marker present: $($SSHN cat /etc/sigmond-appliance/.configured)" || { say "FATAL: wizard did not complete"; exit 1; }
 say "verifying identity inside decoder VM"
 $SSHN "qm guest exec 120 --timeout 60 -- bash -lc 'grep -E \"reporter_id|callsign|grid\" /etc/sigmond/site-profile.toml; grep REPORTER /etc/sigmond/coordination.env; hostname'" 2>&1 | tail -8
 say "PHASE D PASS — NESTED TEST COMPLETE"
