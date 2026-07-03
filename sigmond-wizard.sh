@@ -425,7 +425,9 @@ TOMLEOF
             # reports per-proxy status once the server has accepted them.
             RUNNING=0
             for i in $(seq 1 12); do
-                RUNNING=$(curl -s http://127.0.0.1:7500/api/status 2>/dev/null | grep -c '"status":"running"')
+                # grep -o|wc -l, NOT grep -c: the API is one line of JSON and
+                # grep -c counts LINES — it reported 1/4 with all 4 running.
+                RUNNING=$(curl -s http://127.0.0.1:7500/api/status 2>/dev/null | grep -o '"status":"running"' | wc -l)
                 [ "$RUNNING" -ge 4 ] && break
                 sleep 5
             done
