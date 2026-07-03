@@ -120,7 +120,7 @@ gexec 600 "smd config render" \
 # sigmond gets the SAME password as this host's root (hash copy — one
 # password for the whole appliance), this host's SSH key, and sudo.
 say "setting up VM operator account 'sigmond' (same password as this host's root)"
-gexec 30 "id sigmond >/dev/null 2>&1 || useradd -m sigmond; usermod -s /bin/bash sigmond; mkdir -p /home/sigmond; usermod -aG sudo sigmond" \
+gexec 30 "id sigmond >/dev/null 2>&1 || useradd -m -s /bin/bash sigmond; usermod -s /bin/bash sigmond; getent group sudo >/dev/null && usermod -aG sudo sigmond || true" \
     || say "WARN: could not ensure sigmond operator user in VM"
 HASH=$(getent shadow root | cut -d: -f2)
 if [ -n "$HASH" ] && [ "$HASH" != "*" ] && [ "$HASH" != "!" ]; then
@@ -129,10 +129,17 @@ if [ -n "$HASH" ] && [ "$HASH" != "*" ] && [ "$HASH" != "!" ]; then
 fi
 [ -f /root/.ssh/id_ed25519 ] || ssh-keygen -q -t ed25519 -N "" -f /root/.ssh/id_ed25519
 PUB=$(cat /root/.ssh/id_ed25519.pub)
-gexec 30 "install -d -m 700 -o sigmond -g sigmond /home/sigmond/.ssh && { grep -qF '$PUB' /home/sigmond/.ssh/authorized_keys 2>/dev/null || echo '$PUB' >> /home/sigmond/.ssh/authorized_keys; } && chown sigmond:sigmond /home/sigmond/.ssh/authorized_keys && chmod 600 /home/sigmond/.ssh/authorized_keys" \
+# Install the key in sigmond's REAL home — the template's service account
+# may not live in /home/sigmond (hardcoding that put the key where sshd
+# never looks: observed 'Permission denied (publickey)' 2026-07-03).
+# Ownership/modes matter too: sshd StrictModes rejects root-owned homes.
+gexec 30 "H=\$(getent passwd sigmond | cut -d: -f6); case \"\$H\" in ''|/|/nonexistent) usermod -d /home/sigmond sigmond; H=/home/sigmond;; esac; G=\$(id -gn sigmond); mkdir -p \"\$H\"; chown sigmond:\"\$G\" \"\$H\"; install -d -m 700 -o sigmond -g \"\$G\" \"\$H/.ssh\"; grep -qF '$PUB' \"\$H/.ssh/authorized_keys\" 2>/dev/null || echo '$PUB' >> \"\$H/.ssh/authorized_keys\"; chown sigmond:\"\$G\" \"\$H/.ssh/authorized_keys\"; chmod 600 \"\$H/.ssh/authorized_keys\"" \
     || say "WARN: could not install host ssh key for sigmond"
-gexec 30 "install -d /etc/ssh/sshd_config.d && printf 'PermitRootLogin no\n' > /etc/ssh/sshd_config.d/50-sigmond-no-root.conf && { systemctl reload ssh 2>/dev/null || systemctl reload sshd 2>/dev/null || systemctl restart ssh 2>/dev/null || systemctl restart sshd; }" \
-    || say "WARN: could not disable remote root login in VM"
+# ssh policy: password login ON, remote root OFF. Cloud-init images ship
+# PasswordAuthentication no in 50-cloud-init.conf; OpenSSH takes the FIRST
+# value it sees and reads sshd_config.d alphabetically — 10- beats 50-.
+gexec 30 "install -d /etc/ssh/sshd_config.d && printf 'PasswordAuthentication yes\nPermitRootLogin no\n' > /etc/ssh/sshd_config.d/10-sigmond-operator.conf && rm -f /etc/ssh/sshd_config.d/50-sigmond-no-root.conf && { systemctl reload ssh 2>/dev/null || systemctl reload sshd 2>/dev/null || systemctl restart ssh 2>/dev/null || systemctl restart sshd; }" \
+    || say "WARN: could not set VM ssh policy (password on / remote root off)"
 gexec 30 "systemctl enable --now serial-getty@ttyS0.service" || true
 # Catch-all DHCP: the template's build-time NIC name never matches the
 # deployed VM's (observed: no IP on real hardware) — match en* instead.
@@ -149,6 +156,22 @@ for i in $(seq 1 18); do
     sleep 5
 done
 [ -z "$VMIP" ] && say "WARN: VM has no IPv4 address yet — check cabling/DHCP, then: qm guest exec $VMID -- ip -4 -br addr"
+
+# ── PROVE the operator login works (don't just claim it) ───────────────────
+# Key login, host→VM. Fresh known_hosts each time: personalize regenerates
+# the VM's host keys, so the cached entry from a previous run always clashes.
+SSH_STATE="not verified — VM had no IP during setup"
+if [ -n "$VMIP" ]; then
+    if ssh -o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=no \
+           -o UserKnownHostsFile=/dev/null sigmond@"$VMIP" true 2>>"$LOG"; then
+        SSH_STATE="verified from this host ✓"
+    else
+        SSH_STATE="FAILED — key login from this host was refused; see $LOG"
+        say "WARN: ssh sigmond@$VMIP verification FAILED"
+        qm guest exec "$VMID" --timeout 15 -- bash -lc \
+            "sshd -T 2>/dev/null | grep -Ei '^(passwordauthentication|permitrootlogin|pubkeyauthentication)'; getent passwd sigmond; ls -la \$(getent passwd sigmond | cut -d: -f6)/.ssh/ 2>&1" >>"$LOG" 2>&1
+    fi
+fi
 
 RAC_STATE="skipped"
 if [ -n "$RAC_USER" ]; then
@@ -191,7 +214,7 @@ SUMMARY=$(cat <<SEOF
    IP:      ${VMIP:-none yet — check: qm guest exec $VMID -- ip -4 -br addr}
    login:   sigmond — SAME password as this host's root
             (remote root ssh login is disabled)
-   ssh:     ssh sigmond@${VMIP:-<vm-ip>}   (this host's key installed)
+   ssh:     ssh sigmond@${VMIP:-<vm-ip>}   [$SSH_STATE]
    console: qm terminal $VMID  (Ctrl+O exits; sigmond or root)
  RAC:       $RAC_STATE
  Rerun wizard:  sigmond-setup --reconfigure
