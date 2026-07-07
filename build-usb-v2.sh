@@ -54,7 +54,9 @@ sudo cp "$TPL" sigmond-wizard.sh sigmond-rac.tar.gz QUICKSTART.txt /tmp/sigpay.$
 sudo umount /tmp/sigpay.$$; rmdir /tmp/sigpay.$$
 
 STAMP="$(date +%Y%m%d-%H%M)"
-IMG="sigmond-appliance-${STAMP}$( [ "$RELEASE" = 1 ] && echo -release ).img"
+SUFFIX=""
+if [ "$RELEASE" = 1 ]; then SUFFIX="-release"; fi
+IMG="sigmond-appliance-${STAMP}${SUFFIX}.img"
 say "assemble USB image (pristine ISO + payload at aligned volsize offset) -> $IMG"
 VB=$(od -An -tu4 -j $((16*2048+80)) -N4 pve-sc-v2.iso | tr -d ' ')
 OFF=$(( VB*2048 )); OFF=$(( (OFF+1048575)/1048576*1048576 ))
