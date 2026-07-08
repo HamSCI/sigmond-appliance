@@ -79,7 +79,9 @@ say "════ PHASE D: drive the wizard (test identity N0CALL/T1 @ EM00aa) �
 for i in $(seq 1 40); do $SSHN "qm agent 120 ping" >/dev/null 2>&1 && break; sleep 10; done
 $SSHN "qm agent 120 ping" >/dev/null 2>&1 || { say "FATAL: guest agent never answered"; exit 1; }
 say "guest agent up; running wizard with piped answers"
-printf 'N0CALL/T1\nEM00aa\nTier2 test dipole\n\nY\n' | $SSHN "sigmond-setup" 2>&1 | tail -12
+# answers: reporter, grid, antenna, RAC(default Y), PSWS station id,
+#          grape instrument id, mag device id, Apply
+printf 'N0CALL/T1\nEM00aa\nTier2 test dipole\n\nS000999\n172\nRM3100\nY\n' | $SSHN "sigmond-setup" 2>&1 | tail -12
 # the guest's first DHCP through slirp can blip the ssh forward for
 # ~15s — retry before judging (observed 2026-07-02, two false FATALs)
 MARK_OK=0
@@ -90,6 +92,14 @@ done
 [ "$MARK_OK" = 1 ] && say "configured marker present: $($SSHN cat /etc/sigmond-appliance/.configured)" || { say "FATAL: wizard did not complete"; exit 1; }
 say "verifying identity inside decoder VM"
 $SSHN "qm guest exec 120 --timeout 60 -- bash -lc 'grep -E \"reporter_id|callsign|grid\" /etc/sigmond/site-profile.toml; grep REPORTER /etc/sigmond/coordination.env; hostname'" 2>&1 | tail -8
+say "verifying two-phase PSWS enrollment in decoder VM"
+PSWS_OUT=$($SSHN "qm guest exec 120 --timeout 60 -- bash -lc 'grep -A3 \"\\[psws\\]\" /etc/sigmond/site-profile.toml; smd psws status; test -x /etc/update-motd.d/70-sigmond-psws && echo MOTD-HOOK-OK; test -f /etc/hs-uploader/keys/id_ed25519_host.pub && echo STATION-KEY-OK; smd psws motd'" 2>&1)
+echo "$PSWS_OUT" | tail -20
+echo "$PSWS_OUT" | grep -q 'S000999'        || { say "FATAL: PSWS station id missing from site profile"; exit 1; }
+echo "$PSWS_OUT" | grep -q 'MOTD-HOOK-OK'   || { say "FATAL: PSWS motd hook not installed"; exit 1; }
+echo "$PSWS_OUT" | grep -q 'STATION-KEY-OK' || { say "FATAL: station key not generated"; exit 1; }
+echo "$PSWS_OUT" | grep -qi 'not finished\|NOT YET\|verify' || { say "FATAL: pending-enrollment banner missing"; exit 1; }
+say "PSWS: ids recorded, key generated, banner armed — pending verify (as designed)"
 say "PHASE D PASS — NESTED TEST COMPLETE"
 ;;
 esac

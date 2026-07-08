@@ -110,21 +110,62 @@ RAC_NUM=""
 case "${RAC_EN:-Y}" in [Nn]*) ;; *) RAC_NUM="auto";; esac
 
 echo ""
+echo "HamSCI PSWS (space-weather / GRAPE uploads) — optional. If this station"
+echo "has a PSWS account (https://pswsnetwork.caps.ua.edu/), enter its IDs now."
+echo "The upload KEY is registered later from any SSH session — the VM's login"
+echo "banner walks you through it (no copy-paste needed on this console)."
+PSWS_ID=""
+while :; do
+    read -r -p "PSWS station ID (e.g. S000123, Enter to skip): " PSWS_ID
+    PSWS_ID=$(echo "$PSWS_ID" | tr '[:lower:]' '[:upper:]' | tr -d ' ')
+    [ -z "$PSWS_ID" ] && break
+    echo "$PSWS_ID" | grep -qE '^S[0-9]{6}$' && break
+    echo "  ✗ PSWS station IDs look like S000123 (S + 6 digits)"
+done
+PSWS_GRAPE=""; PSWS_MAG=""
+if [ -n "$PSWS_ID" ]; then
+    read -r -p "  GRAPE instrument ID from the portal (e.g. 172, Enter if none): " PSWS_GRAPE
+    PSWS_GRAPE=$(echo "$PSWS_GRAPE" | tr -d ' ')
+    read -r -p "  magnetometer device ID (e.g. RM3100, Enter if none): " PSWS_MAG
+    PSWS_MAG=$(echo "$PSWS_MAG" | tr -d ' ')
+fi
+
+echo ""
 echo "  Reporter: $REPORTER   Grid: $GRID"
 [ -n "$ANTENNA" ]  && echo "  Antenna:  $ANTENNA"
 [ -n "$RAC_NUM" ] && echo "  RAC:      enabled — VM ssh/web + host ssh + Proxmox UI (number auto-assigned)"
+[ -n "$PSWS_ID" ] && echo "  PSWS:     station $PSWS_ID${PSWS_GRAPE:+  grape=$PSWS_GRAPE}${PSWS_MAG:+  mag=$PSWS_MAG}  (key registered after install)"
 read -r -p "Apply? [Y/n] " OK
 case "${OK:-Y}" in [Nn]*) say "aborted by operator"; exit 1;; esac
 
 # ── push identity into the decoder VM ───────────────────────────────────────
 say "writing site-profile.toml into VM $VMID"
+# PSWS: ids now, key later — `smd config render` in the VM generates the
+# station key, arms the login banner that shows the pubkey to register at
+# the portal, and `smd psws verify` (run over ssh, where copy-paste works)
+# proves the handshake.
+PSWS_TOML=""
+if [ -n "$PSWS_ID" ]; then
+    PSWS_TOML="
+[psws]
+enabled    = true
+station_id = \"$PSWS_ID\"
+
+[psws.instruments]"
+    [ -n "$PSWS_GRAPE" ] && PSWS_TOML="$PSWS_TOML
+\"hf-timestd\"   = \"$PSWS_GRAPE\""
+    [ -n "$PSWS_MAG" ] && PSWS_TOML="$PSWS_TOML
+\"mag-recorder\" = \"$PSWS_MAG\""
+    PSWS_TOML="$PSWS_TOML
+"
+fi
 PROFILE=$(cat <<PEOF
 # Written by the Sigmond appliance first-boot wizard $(date -u +%Y-%m-%dT%H:%MZ)
 [station]
 callsign    = "$CALLSIGN"
 grid_square = "$GRID"
 description = "$ANTENNA"
-
+$PSWS_TOML
 [reporters]
 reporter_id = "$REPORTER"
 
@@ -466,6 +507,14 @@ TOMLEOF
     fi
 fi
 
+PSWS_STATE="skipped — add later: sigmond-setup --reconfigure"
+if [ -n "$PSWS_ID" ]; then
+    PSWS_STATE="station $PSWS_ID — IDs recorded, UPLOAD KEY NOT YET REGISTERED.
+            Finish from any computer: log into the VM (sigmond-vm) — the
+            login banner shows the key to paste into the PSWS portal,
+            then run:  smd psws verify"
+fi
+
 echo "$REPORTER $GRID $(date -u +%F)" > "$CONF_MARK"
 
 # ── final summary ───────────────────────────────────────────────────────────
@@ -492,6 +541,7 @@ SUMMARY=$(cat <<SEOF
             sigmond-vm --ip prints the current address)
    console: qm terminal $VMID  (Ctrl+O exits; sigmond or root)
  RAC:       $RAC_STATE
+ PSWS:      $PSWS_STATE
  Rerun wizard:  sigmond-setup --reconfigure
  This summary is saved in /root/sigmond-setup-summary.txt
 ──────────────────────────────────────────────────────
