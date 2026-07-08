@@ -13,19 +13,31 @@ managed = true
 [component.ka9q-web]
 enabled = true
 
+[component.igmp-querier]
+enabled = true
+
+[component.gpsdo-monitor]
+enabled = true
+
+[component.hf-timestd]
+enabled = true
+
 [component.wspr-recorder]
 enabled = true
 
 [component.psk-recorder]
 enabled = true
+
+[component.mag-recorder]
+enabled = true
 EOF
-echo "### topology enabled: radiod, ka9q-web, wspr-recorder, psk-recorder"
+echo "### topology enabled: dasi2 set (radiod ka9q-web igmp-querier gpsdo-monitor hf-timestd wspr-recorder psk-recorder mag-recorder)"
 echo "### smd install  (self-elevates; compiles ka9q-radio — long) ..."
 smd install --yes
 RC=$?
 echo "### smd install exit=$RC"
 echo "### --- smd list ---"
-smd list 2>&1 | head -30 || true
+smd component list 2>&1 | head -30 || true
 echo "### COMPONENTS DONE (rc=$RC) $(date -u)"
 
 echo "### stage 3: capture-prep (scrub identity/secrets/data for golden image)"

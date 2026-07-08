@@ -39,6 +39,14 @@ $SSH "grep -q 'GOLDEN PREP DONE' provision.log" || { say "FATAL: stage2/3 timeou
 say "stage 2+3 done"
 $SSH "grep '###' provision.log | tail -8"
 $SSH "cat capture-gate.json 2>/dev/null | head -5"
+# a not-ready gate means the template is missing components/artefacts —
+# refuse to ship it (observed 2026-07-08: 4-component topology left
+# hf-timestd/mag/gpsdo unbuilt, gate 21 fails, template silently 0.4G light)
+if ! $SSH "grep -q '\"ready\": true' capture-gate.json"; then
+    say "FATAL: capture gate NOT ready — template unusable; provision.log is inside golden-v2.qcow2"
+    exit 1
+fi
+say "capture gate READY"
 
 say "shutting down VM (halt, not reboot — no machine-id now)"
 $SSH "sudo shutdown -h now" 2>/dev/null
