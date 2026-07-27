@@ -1,8 +1,11 @@
-SIGMOND APPLIANCE — QUICK START
-================================
-1. Write the image to a USB stick (>=8 GB):
-     sudo dd if=usb-final-v2-release.img of=/dev/sdX bs=4M oflag=direct status=progress
-2. Boot the target machine from the USB.
+SIGMOND APPLIANCE @@VERSION@@ — QUICK START
+===========================================
+1. Write the image to a USB stick (>=16 GB):
+     xz -dc sigmond-appliance-@@VERSION@@-*.img.zst-or-.img | sudo dd of=/dev/sdX bs=4M ...
+   or with zstd:
+     zstd -dc sigmond-appliance-@@VERSION@@-*.img.zst | sudo dd of=/dev/sdX bs=4M oflag=direct status=progress
+2. Have the RX888 (and GPSDO etc.) ALREADY CONNECTED to the target
+   machine, then boot it from the USB.
    Proxmox VE installs AUTOMATICALLY — this ERASES the machine's NVMe disk.
 3. When the machine POWERS ITSELF OFF (~3 min), that is your cue:
      REMOVE THE USB STICK, then power the machine back on.
@@ -10,10 +13,23 @@ SIGMOND APPLIANCE — QUICK START
     running again on firmwares that always boot USB first.)
 4. The machine boots Proxmox from its own disk. When the console says
    "plug in the Sigmond install USB", insert the SAME stick again.
-   The decoder VM installs itself (~2 min); the console tells you when
-   to remove the stick.
-5. The site setup wizard appears on the console: enter your reporter
-   ID (e.g. AC0G/B4), grid square, optional antenna and RAC credentials.
+   The decoder VM (VMID 100) imports automatically (~3 min), sized to
+   this machine (all CPUs minus one pair, RAM minus 2 GB).
+5. The site setup wizard appears on the console (LEAVE THE STICK IN):
+   enter your reporter ID (e.g. AC0G/B4), grid square, optional
+   antenna and remote access (RAC).
    Rerun any time with:  sigmond-setup --reconfigure
-6. Web GUI: https://<machine-ip>:8006   (root / hamsci-sigmond —
-   change this password!)
+6. After the wizard, the host tunes itself automatically: CPU
+   isolation + pinning (grub), USB controller passthrough to the VM.
+   The console then says REMOVE THE USB STICK. Do it. The machine
+   reboots itself into production (decoder VM autostarts, pinned,
+   with the RX888 passed through).
+   NOTE: after this reboot the host console keyboard may be dead —
+   the USB controllers now belong to the VM. That is normal; use ssh.
+7. Proxmox web GUI: https://<machine-ip>:8006
+   Host login: root / hamsci-sigmond   (change it!)
+   Decoder VM login: hamsci / sigmond-hamsci   (change it!)
+
+This stick is appliance version @@VERSION@@ — the Proxmox host is named
+sigmond-appliance-@@VTAG@@ and the VM sigmond-decoder-@@VTAG@@, so you
+can always tell which image a machine was built from.
