@@ -278,6 +278,67 @@ ExecStopPost=/bin/systemctl --no-block start getty@tty1.service
 WantedBy=multi-user.target
 WIZEOF
 
+# ── persistent access panel on the console login screen ──────────────────
+# pvebanner.service rewrites /etc/issue at every boot, wiping anything the
+# wizard pinned there; and DHCP addresses go stale.  sigmond-issue rebuilds
+# a live who/where/how-to-login panel each boot (rob 2026-07-27: the login
+# screen must show IPs + logins for BOTH the host and the decoder VM).
+cat > /usr/local/sbin/sigmond-issue <<'ISSEOF'
+#!/bin/bash
+# Regenerate the Sigmond access panel in /etc/issue + /etc/motd (markered).
+VMID="${SIGMOND_VMID:-100}"
+VERSION="$(cat /etc/sigmond-appliance/version 2>/dev/null || echo '?')"
+CONF="$(cat /etc/sigmond-appliance/.configured 2>/dev/null)"
+HOSTIP=$(hostname -I 2>/dev/null | awk '{print $1}')
+VMIP=""
+for i in 1 2 3 4 5 6; do
+  VMIP=$(qm agent "$VMID" network-get-interfaces 2>/dev/null | python3 -c '
+import json,sys
+try:
+    for i in json.load(sys.stdin):
+        if i.get("name","").startswith(("en","eth")):
+            for a in i.get("ip-addresses",[]):
+                if a["ip-address-type"]=="ipv4" and not a["ip-address"].startswith("127"):
+                    print(a["ip-address"]); raise SystemExit
+except Exception: pass' 2>/dev/null)
+  [ -n "$VMIP" ] && break
+  sleep 10
+done
+PANEL=$(cat <<PEOF
+════ Sigmond appliance $VERSION ${CONF:+— station ${CONF%% *}} ════
+ Proxmox host:  ssh root@${HOSTIP:-<no-ip-yet>}
+                web UI  https://${HOSTIP:-<no-ip-yet>}:8006
+                password: set at install (image default hamsci-sigmond — change it!)
+ Decoder VM:    ssh sigmond@${VMIP:-<vm-starting>}   (same password as host root)
+                ssh hamsci@${VMIP:-<vm-starting>}    (image default sigmond-hamsci)
+                from this host:  sigmond-vm     console:  qm terminal $VMID
+ Wizard rerun:  sigmond-setup --reconfigure
+PEOF
+)
+for f in /etc/issue /etc/motd; do
+    sed -i '/^════ Sigmond appliance /,/^ Wizard rerun:/d' "$f" 2>/dev/null
+    printf '%s\n\n' "$PANEL" >> "$f"
+done
+exit 0
+ISSEOF
+chmod +x /usr/local/sbin/sigmond-issue
+
+cat > /etc/systemd/system/sigmond-issue.service <<'ISVCEOF'
+[Unit]
+Description=Sigmond access panel on the login screen (live IPs)
+# after pvebanner has done its /etc/issue rewrite, and late enough that
+# the decoder VM (onboot) has an address; the script itself retries the
+# guest-agent query for ~60s.
+After=multi-user.target pvebanner.service pve-guests.service
+[Service]
+Type=oneshot
+Environment=SIGMOND_VMID=100
+ExecStart=/usr/local/sbin/sigmond-issue
+[Install]
+WantedBy=multi-user.target
+ISVCEOF
+systemctl daemon-reload 2>/dev/null; systemctl enable sigmond-issue.service 2>/dev/null
+
 cat > /etc/udev/rules.d/99-sigmond-import.rules <<'UDEVEOF'
 ACTION=="add", SUBSYSTEM=="block", ENV{DEVTYPE}=="disk", ENV{ID_FS_TYPE}=="iso9660", ENV{ID_FS_LABEL}=="PVE", RUN+="/usr/bin/systemctl start --no-block sigmond-import.service"
 UDEVEOF

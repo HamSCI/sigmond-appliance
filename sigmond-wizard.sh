@@ -590,14 +590,20 @@ SEOF
 )
 echo "$SUMMARY" | tee -a "$LOG"
 echo "$SUMMARY" > /root/sigmond-setup-summary.txt
-# /etc/issue is rewritten by pvebanner.service at boot, so this only needs to
-# survive until then; /etc/motd persists. Markered so re-runs don't stack.
-for f in /etc/issue /etc/motd; do
-    sed -i '/^─* Sigmond setup ─*$/,/^─* end Sigmond setup ─*$/d' "$f" 2>/dev/null
-    { echo "────── Sigmond setup ──────"
-      echo "$SUMMARY"
-      echo "────── end Sigmond setup ──────"; } >> "$f"
-done
+# The persistent, boot-surviving login panel is sigmond-issue's job
+# (pvebanner rewrites /etc/issue every boot and DHCP addresses go stale —
+# it regenerates with live IPs).  Fall back to the old one-shot append on
+# hosts that don't have it yet.
+if [ -x /usr/local/sbin/sigmond-issue ]; then
+    SIGMOND_VMID="$VMID" /usr/local/sbin/sigmond-issue || true
+else
+    for f in /etc/issue /etc/motd; do
+        sed -i '/^─* Sigmond setup ─*$/,/^─* end Sigmond setup ─*$/d' "$f" 2>/dev/null
+        { echo "────── Sigmond setup ──────"
+          echo "$SUMMARY"
+          echo "────── end Sigmond setup ──────"; } >> "$f"
+    done
+fi
 echo ""
 read -r -p "Press Enter to finish (this summary stays on the login screen)... " _ 2>/dev/null || true
 exit 0
