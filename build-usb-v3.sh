@@ -106,6 +106,10 @@ dd if=/tmp/espfix.$$/esp-new.bin of=pve-sc-v3.iso bs=512 seek="$ESP_START" conv=
 rm -rf /tmp/espfix.$$
 say "ESP rewritten as FAT16 at sectors ${ESP_START}-${ESP_END} (contents identical)"
 
+say "MBR active flag on partition entry 1 (legacy AMI BIOSes refuse disks"
+say "with no 0x80 active partition — Kamrui mini PC, 2026-07-27; UEFI ignores it)"
+printf '\x80' | dd of=pve-sc-v3.iso bs=1 seek=446 conv=notrunc status=none
+
 say "payload ext4 (template + wizard + sigmond + rac + quickstart)"
 PAYSZ_MB=$(( $(stat -c%s "$TPL")/1048576 + $(stat -c%s sigmond.tar.gz)/1048576 + $(stat -c%s sigmond-rac.tar.gz)/1048576 + 320 ))
 rm -f payload-v3.ext4
