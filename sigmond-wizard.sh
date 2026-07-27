@@ -78,65 +78,106 @@ gexec(){ # gexec <timeout-s> <command...>  → runs in guest, echoes exitcode
 }
 
 # ── prompts ─────────────────────────────────────────────────────────────────
+# Each question is a function so the final review screen can re-run any
+# single one: the operator sees everything they typed and picks a number
+# to fix a mistake BEFORE anything is applied (rob mistyped his reporter
+# ID on the first Kamrui install, 2026-07-27 — the old flow's only exits
+# were apply-it-wrong or abort-and-reinstall).
 echo ""
 echo "──────────────────────────────────────────────────────"
 echo "  Sigmond station setup — a few questions and you're on the air"
+echo "  (you'll get a review screen to fix any answer before it's applied)"
 echo "──────────────────────────────────────────────────────"
 
-REPORTER=""
-while [ -z "$REPORTER" ]; do
-    read -r -p "Reporter ID (your callsign, optionally /suffix — e.g. AC0G/B4): " REPORTER
-    REPORTER=$(echo "$REPORTER" | tr '[:lower:]' '[:upper:]' | tr -d ' ')
-    echo "$REPORTER" | grep -qE '^[A-Z0-9]{3,}(/[A-Z0-9]+)?$' || { echo "  ✗ that doesn't look like a callsign"; REPORTER=""; }
-done
-CALLSIGN="${REPORTER%%/*}"
+ask_reporter() {
+    REPORTER=""
+    while [ -z "$REPORTER" ]; do
+        read -r -p "Reporter ID (your callsign, optionally /suffix — e.g. AC0G/B4): " REPORTER
+        REPORTER=$(echo "$REPORTER" | tr '[:lower:]' '[:upper:]' | tr -d ' ')
+        echo "$REPORTER" | grep -qE '^[A-Z0-9]{3,}(/[A-Z0-9]+)?$' || { echo "  ✗ that doesn't look like a callsign"; REPORTER=""; }
+    done
+    CALLSIGN="${REPORTER%%/*}"
+}
 
-GRID=""
-while [ -z "$GRID" ]; do
-    read -r -p "Grid square (Maidenhead, e.g. EM38ww): " GRID
-    GRID=$(echo "$GRID" | tr -d ' ')
-    echo "$GRID" | grep -qE '^[A-Ra-r]{2}[0-9]{2}([A-Xa-x]{2})?$' || { echo "  ✗ 4 or 6 character Maidenhead locator, please"; GRID=""; }
-done
+ask_grid() {
+    GRID=""
+    while [ -z "$GRID" ]; do
+        read -r -p "Grid square (Maidenhead, e.g. EM38ww): " GRID
+        GRID=$(echo "$GRID" | tr -d ' ')
+        echo "$GRID" | grep -qE '^[A-Ra-r]{2}[0-9]{2}([A-Xa-x]{2})?$' || { echo "  ✗ 4 or 6 character Maidenhead locator, please"; GRID=""; }
+    done
+}
 
-read -r -p "Antenna description (optional, Enter to skip): " ANTENNA
+ask_antenna() {
+    read -r -p "Antenna description (optional, Enter to skip): " ANTENNA
+}
 
-echo ""
-echo "Remote access (RAC) is a reverse tunnel to the WsprDaemon gateway so the"
-echo "fleet admin can reach this station for support. Everything — keys,"
-echo "credentials, channel numbers — is handled automatically, and you can"
-echo "turn it off any time with:  sigmond-setup --rac-off"
-read -r -p "Enable remote access? [Y/n] " RAC_EN
-RAC_NUM=""
-case "${RAC_EN:-Y}" in [Nn]*) ;; *) RAC_NUM="auto";; esac
+ask_rac() {
+    echo ""
+    echo "Remote access (RAC) is a reverse tunnel to the WsprDaemon gateway so the"
+    echo "fleet admin can reach this station for support. Everything — keys,"
+    echo "credentials, channel numbers — is handled automatically, and you can"
+    echo "turn it off any time with:  sigmond-setup --rac-off"
+    read -r -p "Enable remote access? [Y/n] " RAC_EN
+    RAC_NUM=""
+    case "${RAC_EN:-Y}" in [Nn]*) ;; *) RAC_NUM="auto";; esac
+}
 
-echo ""
-echo "HamSCI PSWS (space-weather / GRAPE uploads) — optional. If this station"
-echo "has a PSWS account (https://pswsnetwork.caps.ua.edu/), enter its IDs now."
-echo "The upload KEY is registered later from any SSH session — the VM's login"
-echo "banner walks you through it (no copy-paste needed on this console)."
-PSWS_ID=""
+ask_psws() {
+    echo ""
+    echo "HamSCI PSWS (space-weather / GRAPE uploads) — optional. If this station"
+    echo "has a PSWS account (https://pswsnetwork.caps.ua.edu/), enter its IDs now."
+    echo "The upload KEY is registered later from any SSH session — the VM's login"
+    echo "banner walks you through it (no copy-paste needed on this console)."
+    PSWS_ID=""
+    while :; do
+        read -r -p "PSWS station ID (e.g. S000123, Enter to skip): " PSWS_ID
+        PSWS_ID=$(echo "$PSWS_ID" | tr '[:lower:]' '[:upper:]' | tr -d ' ')
+        [ -z "$PSWS_ID" ] && break
+        echo "$PSWS_ID" | grep -qE '^S[0-9]{6}$' && break
+        echo "  ✗ PSWS station IDs look like S000123 (S + 6 digits)"
+    done
+    PSWS_GRAPE=""; PSWS_MAG=""
+    if [ -n "$PSWS_ID" ]; then
+        read -r -p "  GRAPE instrument ID from the portal (e.g. 172, Enter if none): " PSWS_GRAPE
+        PSWS_GRAPE=$(echo "$PSWS_GRAPE" | tr -d ' ')
+        read -r -p "  magnetometer device ID (e.g. RM3100, Enter if none): " PSWS_MAG
+        PSWS_MAG=$(echo "$PSWS_MAG" | tr -d ' ')
+    fi
+}
+
+ask_reporter
+ask_grid
+ask_antenna
+ask_rac
+ask_psws
+
+# ── review: everything on one screen, any entry editable ───────────────────
 while :; do
-    read -r -p "PSWS station ID (e.g. S000123, Enter to skip): " PSWS_ID
-    PSWS_ID=$(echo "$PSWS_ID" | tr '[:lower:]' '[:upper:]' | tr -d ' ')
-    [ -z "$PSWS_ID" ] && break
-    echo "$PSWS_ID" | grep -qE '^S[0-9]{6}$' && break
-    echo "  ✗ PSWS station IDs look like S000123 (S + 6 digits)"
+    echo ""
+    echo "  ── Review — nothing is applied yet ──────────────────"
+    echo "  1) Reporter:  $REPORTER"
+    echo "  2) Grid:      $GRID"
+    echo "  3) Antenna:   ${ANTENNA:-(none)}"
+    echo "  4) Remote:    $( [ -n "$RAC_NUM" ] && echo 'enabled — VM ssh/web + host ssh + Proxmox UI (number auto-assigned)' || echo 'disabled' )"
+    if [ -n "$PSWS_ID" ]; then
+        echo "  5) PSWS:      station $PSWS_ID${PSWS_GRAPE:+  grape=$PSWS_GRAPE}${PSWS_MAG:+  mag=$PSWS_MAG}  (key registered after install)"
+    else
+        echo "  5) PSWS:      (skipped)"
+    fi
+    echo "  ─────────────────────────────────────────────────────"
+    read -r -p "Apply? [Y = apply / 1-5 = re-edit that entry / n = abort] " OK
+    case "${OK:-Y}" in
+        1) ask_reporter;;
+        2) ask_grid;;
+        3) ask_antenna;;
+        4) ask_rac;;
+        5) ask_psws;;
+        [Nn]*) say "aborted by operator — nothing was applied. Rerun any time: sigmond-setup"; exit 1;;
+        [Yy]*|"") break;;
+        *) echo "  ✗ Y, n, or an entry number 1-5";;
+    esac
 done
-PSWS_GRAPE=""; PSWS_MAG=""
-if [ -n "$PSWS_ID" ]; then
-    read -r -p "  GRAPE instrument ID from the portal (e.g. 172, Enter if none): " PSWS_GRAPE
-    PSWS_GRAPE=$(echo "$PSWS_GRAPE" | tr -d ' ')
-    read -r -p "  magnetometer device ID (e.g. RM3100, Enter if none): " PSWS_MAG
-    PSWS_MAG=$(echo "$PSWS_MAG" | tr -d ' ')
-fi
-
-echo ""
-echo "  Reporter: $REPORTER   Grid: $GRID"
-[ -n "$ANTENNA" ]  && echo "  Antenna:  $ANTENNA"
-[ -n "$RAC_NUM" ] && echo "  RAC:      enabled — VM ssh/web + host ssh + Proxmox UI (number auto-assigned)"
-[ -n "$PSWS_ID" ] && echo "  PSWS:     station $PSWS_ID${PSWS_GRAPE:+  grape=$PSWS_GRAPE}${PSWS_MAG:+  mag=$PSWS_MAG}  (key registered after install)"
-read -r -p "Apply? [Y/n] " OK
-case "${OK:-Y}" in [Nn]*) say "aborted by operator"; exit 1;; esac
 
 # ── push identity into the decoder VM ───────────────────────────────────────
 say "writing site-profile.toml into VM $VMID"
