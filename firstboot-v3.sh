@@ -23,6 +23,51 @@ say "first-boot v3 ($VERSION): installing importer + wizard + finalizer hooks"
 mkdir -p /etc/sigmond-appliance
 echo "$VERSION" > /etc/sigmond-appliance/version
 
+# ── host networking: DHCP on vmbr0 ────────────────────────────────────────
+# The PVE installer answers "from-dhcp", but when no lease arrives in its
+# window (late NIC link, installer-env firmware) it silently falls back to
+# 192.168.100.2/24 — and PVE ALWAYS writes a STATIC config from whatever
+# the installer ended up with, fossilizing the bogus address (observed on
+# rob's LAN 2026-07-28: appliance came up 192.168.100.0/24 on a
+# 192.168.1.0/24 network). The appliance must take whatever the site LAN
+# offers: convert vmbr0 to DHCP, keep /etc/hosts pinned to the live lease
+# (PVE tools resolve the node name via /etc/hosts), and fall back to the
+# installer's static config only if DHCP times out on the real hardware.
+if grep -q '^iface vmbr0 inet static' /etc/network/interfaces; then
+  say "converting vmbr0 to DHCP (installer wrote static $(hostname -I 2>/dev/null | awk '{print $1}'))"
+  cp /etc/network/interfaces /etc/network/interfaces.sigmond-static-bak
+  sed -i -e '/^iface vmbr0 inet static/,/^\s*$/{/^\s*address\s/d;/^\s*gateway\s/d;}' \
+         -e 's/^iface vmbr0 inet static/iface vmbr0 inet dhcp/' /etc/network/interfaces
+  mkdir -p /etc/dhcp/dhclient-exit-hooks.d
+  cat > /etc/dhcp/dhclient-exit-hooks.d/sigmond-pve-hosts <<'HOOKEOF'
+# Sigmond appliance: keep the node's /etc/hosts line on the current DHCP
+# lease — PVE resolves its own hostname via /etc/hosts (static-IP design).
+case "$reason" in
+  BOUND|RENEW|REBIND|REBOOT)
+    H=$(hostname)
+    if [ -n "$new_ip_address" ] && grep -qE "^[0-9.]+[[:space:]].*\b$H\b" /etc/hosts; then
+      sed -i -E "s/^[0-9.]+([[:space:]].*\b$H\b)/$new_ip_address\1/" /etc/hosts
+    fi
+  ;;
+esac
+HOOKEOF
+  chmod 644 /etc/dhcp/dhclient-exit-hooks.d/sigmond-pve-hosts
+  if command -v ifreload >/dev/null 2>&1; then ifreload -a 2>/dev/null; else ifdown vmbr0 2>/dev/null; ifup vmbr0 2>/dev/null; fi
+  HOSTIP=""
+  for i in $(seq 1 12); do
+    HOSTIP=$(hostname -I 2>/dev/null | awk '{print $1}')
+    [ -n "$HOSTIP" ] && break
+    sleep 5
+  done
+  if [ -n "$HOSTIP" ]; then
+    say "vmbr0 DHCP lease: $HOSTIP"
+  else
+    say "WARNING: no DHCP lease after 60s — restoring the installer's static config"
+    cp /etc/network/interfaces.sigmond-static-bak /etc/network/interfaces
+    if command -v ifreload >/dev/null 2>&1; then ifreload -a 2>/dev/null; else ifdown vmbr0 2>/dev/null; ifup vmbr0 2>/dev/null; fi
+  fi
+fi
+
 # ── importer ──────────────────────────────────────────────────────────────
 cat > /usr/local/sbin/sigmond-import.sh <<'IMPEOF'
 #!/bin/bash

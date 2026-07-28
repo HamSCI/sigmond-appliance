@@ -81,6 +81,11 @@ $SSHN "grep -q 'no Sigmond USB present' /var/log/sigmond-firstboot.log" && say "
 $SSHN "test -x /usr/local/sbin/sigmond-import.sh" && say "importer installed" || { say "FATAL: importer missing"; exit 1; }
 $SSHN "test -f /etc/udev/rules.d/99-sigmond-import.rules" && say "udev rule armed" || { say "FATAL: udev rule missing"; exit 1; }
 $SSHN "cat /etc/sigmond-appliance/version" && say "version file present" || say "WARN: version file missing"
+$SSHN "grep -q '^iface vmbr0 inet dhcp' /etc/network/interfaces" \
+    && say "vmbr0 converted to DHCP ✓" \
+    || { say "FATAL: vmbr0 not on DHCP (static-fossilization bug)"; $SSHN "cat /etc/network/interfaces"; exit 1; }
+HIP=$($SSHN "hostname -I | awk '{print \$1}'" 2>/dev/null)
+$SSHN "grep -q \"^$HIP[[:space:]]\" /etc/hosts" && say "/etc/hosts pinned to live lease ($HIP) ✓" || say "WARN: /etc/hosts not on live lease"
 $SSHN "poweroff" 2>/dev/null; sleep 15; vm_kill
 say "PHASE B PASS"
 [ "${1:-all}" = "B" ] && exit 0
