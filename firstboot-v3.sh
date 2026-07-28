@@ -61,6 +61,7 @@ mount -o ro "$LO" /mnt/sig-media 2>/dev/null || { say "import: mount failed"; lo
 mkdir -p "$APP"
 cp /mnt/sig-media/sigmond-wizard.sh /usr/local/sbin/sigmond-setup 2>/dev/null && chmod +x /usr/local/sbin/sigmond-setup
 cp /mnt/sig-media/QUICKSTART.txt "$APP"/ 2>/dev/null
+cp /mnt/sig-media/wisdomf-seed "$APP"/ 2>/dev/null
 [ -f /mnt/sig-media/sigmond-rac.tar.gz ] && tar xzf /mnt/sig-media/sigmond-rac.tar.gz -C "$APP" 2>/dev/null
 [ -f /mnt/sig-media/sigmond.tar.gz ] && tar xzf /mnt/sig-media/sigmond.tar.gz -C "$APP" 2>/dev/null
 SIG="$APP/sigmond"
@@ -151,6 +152,9 @@ APP=/root/sigmond-appliance
 SIG="$APP/sigmond"
 say(){ local m="[sigmond $(date '+%T')] $*"; echo "$m" >>"$LOG" 2>/dev/null; echo "$m" >/dev/console 2>/dev/null; }
 [ -f /etc/sigmond-appliance/.configured ] || exit 0
+# defense in depth for the blank-console bug: a still-enabled wizard unit
+# kills getty@tty1 every boot via Conflicts even when its Condition fails
+systemctl disable sigmond-wizard.service 2>/dev/null
 [ -f /etc/sigmond-appliance/.finalized ] && exit 0
 
 if [ ! -f /etc/sigmond-appliance/layout.env ]; then

@@ -225,6 +225,86 @@ say "rendering site config in VM..."
 gexec 600 "smd config render" \
     || say "WARN: smd config render reported issues (continuing; rerun inside VM)"
 
+# ── FFT wisdom seed + SDR bring-up sentinel ────────────────────────────────
+# TWO structural gaps found on B4 + rob's Kamrui (2026-07-27/28, root-caused
+# in smd @9b015f2): (a) NOTHING in the wizard/clone flow ever mints a radiod
+# instance — `config render` only renders config for existing instances, and
+# minting lives solely in `smd config init radiod`, reached via `smd bringup`;
+# (b) nothing reacts to an RX888 that appears (or gets replugged out of an
+# FX3 wedge) after setup. Net effect: every appliance deploy ended with
+# radiod never started. The sentinel closes both: every 2 min, if an SDR is
+# on the bus and no radiod instance exists, it runs the full non-interactive
+# dasi2 bringup (identity comes from site-profile.toml, which bringup reads
+# when flags are omitted).
+# Also: `smd apply` refuses to START radiod until /etc/fftw/wisdomf exists,
+# and the in-VM planner grinds >1 h on first boot — seed wisdom from the
+# build fleet first (fftw silently ignores entries foreign to the CPU).
+if [ -f /root/sigmond-appliance/wisdomf-seed ]; then
+    say "seeding FFT wisdom into the VM (radiod start is gated on it)"
+    gexec 30 "[ -s /etc/fftw/wisdomf ] || { mkdir -p /etc/fftw; echo $(base64 -w0 /root/sigmond-appliance/wisdomf-seed) | base64 -d > /etc/fftw/wisdomf; }" \
+        || say "WARN: could not seed FFT wisdom — first radiod start waits on the planner"
+fi
+say "installing the SDR bring-up sentinel in the VM"
+SENT_B64=$(base64 -w0 <<'SENTEOF'
+#!/bin/bash
+# sigmond-sdr-sentinel — bridge between "RX888 attached" and "radiod decoding".
+# Installed by sigmond-setup. Nothing in smd mints a radiod instance outside
+# of bringup, and nothing watches for late/replugged SDRs — this does both.
+exec 9>/run/sigmond-sdr-sentinel.lock; flock -n 9 || exit 0
+ls /etc/radio/radiod@*.conf >/dev/null 2>&1 && exit 0            # already minted
+[ -s /etc/sigmond/site-profile.toml ] || exit 0                  # no identity yet
+lsusb 2>/dev/null | grep -qiE '04b4:00(f[013]|bc)|f4b3:0100' || exit 0   # no SDR
+echo "RX888 present and no radiod instance — running smd bringup dasi2" \
+  | systemd-cat -t sigmond-sdr-sentinel -p notice
+smd bringup dasi2 --non-interactive
+SENTEOF
+)
+SENTINST=$(cat <<INSTEOF
+echo $SENT_B64 | base64 -d > /usr/local/sbin/sigmond-sdr-sentinel
+chmod 755 /usr/local/sbin/sigmond-sdr-sentinel
+cat > /etc/systemd/system/sigmond-sdr-sentinel.service <<'UEOF'
+[Unit]
+Description=Sigmond SDR sentinel: bring up radiod when an RX888 is present
+[Service]
+Type=oneshot
+TimeoutStartSec=3600
+ExecStart=/usr/local/sbin/sigmond-sdr-sentinel
+UEOF
+cat > /etc/systemd/system/sigmond-sdr-sentinel.timer <<'TEOF'
+[Unit]
+Description=Periodic SDR sentinel (mints radiod once an RX888 is attached)
+[Timer]
+OnBootSec=75
+OnUnitActiveSec=120
+[Install]
+WantedBy=timers.target
+TEOF
+systemctl daemon-reload
+systemctl enable --now sigmond-sdr-sentinel.timer
+INSTEOF
+)
+gexec 60 "echo $(echo "$SENTINST" | base64 -w0) | base64 -d > /tmp/sig-sentinel-install.sh && bash /tmp/sig-sentinel-install.sh && rm -f /tmp/sig-sentinel-install.sh" \
+    || say "WARN: could not install the SDR sentinel — run 'smd bringup dasi2' in the VM manually"
+
+RADIOD_STATE="unknown"
+if gexec 15 "lsusb | grep -qiE '04b4:00(f[013]|bc)|f4b3:0100'"; then
+    say "RX888 detected — starting SDR bring-up now (takes a few minutes)..."
+    gexec 30 "systemctl start --no-block sigmond-sdr-sentinel.service" || true
+    RADIOD_STATE="bringup launched — still settling; check later with: sigmond-vm smd admin validate"
+    for i in $(seq 1 30); do
+        if gexec 15 "systemctl list-units --state=active 'radiod@*' --no-legend 2>/dev/null | grep -q radiod@"; then
+            RADIOD_STATE="radiod ACTIVE ✓ (decoding starts within ~2 min cycles)"
+            break
+        fi
+        sleep 10
+    done
+else
+    RADIOD_STATE="NO RX888 on the VM's USB bus — plug it in (or re-seat its USB
+            cable if it was already in: a wedged FX3 needs a physical replug);
+            the sentinel then brings radiod up automatically within ~2 min"
+fi
+say "SDR/radiod: $RADIOD_STATE"
+
 # ── host RAC (optional) ─────────────────────────────────────────────────────
 # ── operator access to the decoder VM ──────────────────────────────
 # The operator account is the 'sigmond' user — remote root ssh login is
@@ -558,6 +638,15 @@ fi
 
 echo "$REPORTER $GRID $(date -u +%F)" > "$CONF_MARK"
 
+# The wizard unit must NOT stay enabled once configured: its
+# Conflicts=getty@tty1 stop job fires even when the Condition check fails
+# (conditions don't remove Conflicts from the boot transaction — same bug
+# class as the dasi-install tty takeover, 2026-07-26), which left every
+# post-wizard boot with a BLANK console: no login prompt, no access panel
+# (observed on B4 v3.1 and rob's Kamrui, 2026-07-27/28).
+systemctl disable sigmond-wizard.service 2>/dev/null
+systemctl --no-block start getty@tty1.service 2>/dev/null
+
 # ── final summary ───────────────────────────────────────────────────────────
 # Print it, save it (/root/sigmond-setup-summary.txt), pin it above the tty1
 # login prompt (/etc/issue) and after ssh login (/etc/motd), and HOLD the
@@ -581,6 +670,7 @@ SUMMARY=$(cat <<SEOF
    ssh:     ssh sigmond@${VMIP:-<vm-ip>}   (from other machines;
             sigmond-vm --ip prints the current address)
    console: qm terminal $VMID  (Ctrl+O exits; sigmond or root)
+ SDR/radiod: $RADIOD_STATE
  RAC:       $RAC_STATE
  PSWS:      $PSWS_STATE
  Rerun wizard:  sigmond-setup --reconfigure

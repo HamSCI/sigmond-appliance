@@ -81,7 +81,10 @@ git -C sigmond-rac pull -q 2>/dev/null || true
 tar czf sigmond-rac.tar.gz sigmond-rac
 
 say "prepare-iso (embed answer + firstboot)"
-rm -f pve-sc-v3.iso
+# a stale .tmp from an interrupted run makes xorriso append to a full image
+# ("Image size ... exceeds free space on media 0s" — killed the first v3.4
+# build 2026-07-27); the assistant writes it next to the SOURCE iso
+rm -f pve-sc-v3.iso "$(dirname "$SRC_ISO")"/pve-sc-v3.iso.tmp
 proxmox-auto-install-assistant prepare-iso "$SRC_ISO" \
     --fetch-from iso --answer-file answer-v3.toml \
     --on-first-boot firstboot-rendered.sh --output pve-sc-v3.iso
@@ -120,6 +123,15 @@ mount -o loop payload-v3.ext4 /tmp/sigpay.$$
 cp "$TPL" sigmond.tar.gz sigmond-rac.tar.gz /tmp/sigpay.$$/
 cp sigmond-wizard-rendered.sh /tmp/sigpay.$$/sigmond-wizard.sh
 cp QUICKSTART-rendered.txt /tmp/sigpay.$$/QUICKSTART.txt
+# FFT wisdom seed (from the live B4 appliance VM, fftw 3.3.10): smd apply
+# gates radiod START on /etc/fftw/wisdomf existing, and the in-VM planner
+# grinds for over an hour on first boot — the wizard pushes this seed so
+# radiod starts immediately (fftw ignores entries that don't match the CPU)
+WSEED=""
+[ -f wisdomf-seed ] && WSEED=wisdomf-seed
+[ -z "$WSEED" ] && [ -f wisdomf-ryzen5825u ] && WSEED=wisdomf-ryzen5825u
+[ -n "$WSEED" ] && cp "$WSEED" /tmp/sigpay.$$/wisdomf-seed \
+  || say "WARN: no wisdom seed in rig — first radiod start may wait on the planner"
 echo "$VERSION sigmond@$SIGREV built $(date -Iseconds)" > /tmp/sigpay.$$/VERSION
 umount /tmp/sigpay.$$; rmdir /tmp/sigpay.$$
 

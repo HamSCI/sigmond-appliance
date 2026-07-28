@@ -185,6 +185,20 @@ echo "$PSWS_OUT" | grep -q 'MOTD-HOOK-OK'   || { say "FATAL: PSWS motd hook not 
 echo "$PSWS_OUT" | grep -q 'STATION-KEY-OK' || { say "FATAL: station key not generated"; exit 1; }
 echo "$PSWS_OUT" | grep -qi 'not finished\|NOT YET\|verify' || { say "FATAL: pending-enrollment banner missing"; exit 1; }
 say "PSWS: ids recorded, key generated, banner armed — pending verify (as designed)"
+
+say "── v3.4 fixes: wizard unit disabled, getty alive, panel, sentinel, wisdom"
+$SSHN "systemctl is-enabled sigmond-wizard.service 2>&1" | grep -q disabled \
+    && say "wizard unit disabled post-config ✓" \
+    || { say "FATAL: sigmond-wizard.service still enabled — blank-console bug"; exit 1; }
+$SSHN "systemctl is-active getty@tty1.service" 2>/dev/null | grep -q '^active' \
+    && say "getty@tty1 alive on rebooted host ✓" \
+    || { say "FATAL: getty@tty1 not active (blank console)"; exit 1; }
+$SSHN "grep -q 'Sigmond appliance' /etc/issue" 2>/dev/null \
+    && say "access panel present in /etc/issue ✓" || say "WARN: no access panel in /etc/issue"
+V34=$($SSHN "qm guest exec $VMID --timeout 60 -- bash -lc 'systemctl is-enabled sigmond-sdr-sentinel.timer 2>&1; test -s /etc/fftw/wisdomf && echo WISDOM-OK'" 2>&1)
+echo "$V34" | grep -q enabled   || { say "FATAL: sdr-sentinel timer not enabled in VM"; exit 1; }
+echo "$V34" | grep -q WISDOM-OK || { say "FATAL: FFT wisdom not seeded in VM"; exit 1; }
+say "SDR sentinel armed + wisdom seeded in VM ✓"
 say "PHASE D PASS — NESTED TEST COMPLETE"
 ;;
 esac
