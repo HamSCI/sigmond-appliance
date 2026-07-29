@@ -213,10 +213,15 @@ if [ "$PMNAME" != "$OLDHOST" ]; then
     sed -i "s/\b$OLDHOST\b/$PMNAME/g" /etc/hosts 2>/dev/null
     [ -f /etc/postfix/main.cf ] && sed -i "s/\b$OLDHOST\b/$PMNAME/g" /etc/postfix/main.cf 2>/dev/null
     systemctl restart pve-cluster 2>/dev/null
-    for i in $(seq 1 15); do [ -d "/etc/pve/nodes/$PMNAME" ] && break; sleep 2; done
-    if [ -d "/etc/pve/nodes/$PMNAME" ] && [ -d "/etc/pve/nodes/$OLDHOST/qemu-server" ]; then
+    # wait for pmxcfs to mount, then create the new node dir OURSELVES:
+    # pmxcfs materializes nodes/<name> lazily — sometimes minutes after the
+    # restart (observed 2026-07-29: a 54s wait wasn't enough, which made the
+    # guard revert two good renames). mkdir inside the fuse fs is legal and
+    # deterministic.
+    for i in $(seq 1 15); do [ -d /etc/pve/nodes ] && break; sleep 2; done
+    mkdir -p "/etc/pve/nodes/$PMNAME/qemu-server" 2>/dev/null
+    [ -d "/etc/pve/nodes/$OLDHOST/qemu-server" ] && \
         mv "/etc/pve/nodes/$OLDHOST/qemu-server/"*.conf "/etc/pve/nodes/$PMNAME/qemu-server/" 2>/dev/null
-    fi
     systemctl restart pveproxy pvedaemon 2>/dev/null
     # pmxcfs can take a while to settle after the restart — a single-shot
     # qm check 3s in reverted a PERFECTLY GOOD rename (nested run
