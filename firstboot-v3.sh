@@ -158,7 +158,15 @@ qm importdisk "$VMID" /tmp/decoder.qcow2 "$STORE"
 DISK="$(qm config "$VMID"|awk -F': ' '/^unused0:/{print $2;exit}')"
 [ -z "$DISK" ] && { say "import: no unused0"; qm destroy "$VMID" --purge 2>/dev/null; rm -f /tmp/decoder.qcow2; exit 1; }
 qm set "$VMID" --scsi0 "$DISK" --boot order=scsi0
-qm resize "$VMID" scsi0 32G 2>/dev/null && say "import: decoder disk grown to 32G"
+# size the decoder disk to the host's storage: the full timing chain's
+# 6-channel raw archive needs ~77G baseline (metrology preflight starved
+# at a fixed 32G, 2026-07-29). Thin-provisioned, so generosity is cheap:
+# 75% of the store's free space, capped 256G, floor 32G.
+AVAIL_G=$(pvesm status 2>/dev/null | awk -v s="$STORE" '$1==s{print int($6/1048576)}')
+TARGET_G=$(( ${AVAIL_G:-0} * 3 / 4 ))
+[ "$TARGET_G" -gt 256 ] && TARGET_G=256
+[ "$TARGET_G" -lt 32 ] && TARGET_G=32
+qm resize "$VMID" scsi0 "${TARGET_G}G" 2>/dev/null && say "import: decoder disk grown to ${TARGET_G}G (store had ${AVAIL_G}G free)"
 rm -f /tmp/decoder.qcow2
 
 # host RAC (inert until /etc/sigmond/frpc-host.toml is filled by the wizard)
