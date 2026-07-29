@@ -130,6 +130,8 @@ GK=$($SSHN "qm guest exec $VMID --timeout 60 -- bash -lc 'uname -r; ls /lib/modu
 echo "$GK" | tail -4
 echo "$GK" | grep -q 'cloud' && { say "FATAL: decoder VM still on CLOUD kernel (no USB stack)"; exit 1; }
 echo "$GK" | grep -q 'hamsci' || { say "FATAL: hamsci user missing in decoder VM"; exit 1; }
+say "staging a test site-keys tarball (exercises the stick key-restore path)"
+$SSHN "mkdir -p /root/sigmond-appliance /tmp/sk/etc/hs-uploader/keys /tmp/sk/home/timestd/.ssh && echo TESTPRIV > /tmp/sk/etc/hs-uploader/keys/id_ed25519_host && echo TESTPUB > /tmp/sk/etc/hs-uploader/keys/id_ed25519_host.pub && echo TESTRSA > /tmp/sk/home/timestd/.ssh/id_rsa_psws && tar czf /root/sigmond-appliance/site-keys.tar.gz -C /tmp/sk etc home && rm -rf /tmp/sk"
 say "guest kernel + hamsci OK; running wizard with piped answers (identity N0CALL/T1 @ EM00aa)"
 printf 'N0CALL/T1\nEM00aa\nTier2 test dipole\n\nS000999\n172\nRM3100\n\nY\n' | $SSHN "sigmond-setup" 2>&1 | tail -12
 MARK_OK=0
@@ -213,6 +215,10 @@ $SSHN "qm config $VMID | grep -q '^name: N0CALL-T1$'" \
     || { say "FATAL: VM not renamed"; $SSHN "qm config $VMID | grep name"; exit 1; }
 GH=$($SSHN "qm guest exec $VMID --timeout 30 -- bash -lc hostname" 2>/dev/null)
 echo "$GH" | grep -qi "N0CALL-T1" && say "VM guest hostname N0CALL-T1 ✓" || say "WARN: guest hostname: $GH"
+KR=$($SSHN "qm guest exec $VMID --timeout 30 -- bash -lc 'cat /etc/hs-uploader/keys/id_ed25519_host; stat -c %U:%G /etc/hs-uploader/keys/id_ed25519_host; cat /home/timestd/.ssh/id_rsa_psws 2>/dev/null'" 2>&1)
+echo "$KR" | grep -q TESTPRIV && echo "$KR" | grep -q "hsupload:sigmond" && echo "$KR" | grep -q TESTRSA \
+    && say "site-keys restored from stick with correct ownership ✓" \
+    || { say "FATAL: site-keys restore path failed"; echo "$KR" | head -5; exit 1; }
 say "PHASE D PASS — NESTED TEST COMPLETE"
 ;;
 esac

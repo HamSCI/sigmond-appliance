@@ -108,6 +108,19 @@ cp /mnt/sig-media/sigmond-wizard.sh /usr/local/sbin/sigmond-setup 2>/dev/null &&
 cp /mnt/sig-media/QUICKSTART.txt "$APP"/ 2>/dev/null
 cp /mnt/sig-media/wisdomf-seed "$APP"/ 2>/dev/null
 cp /mnt/sig-media/sigmond-site-timing "$APP"/ 2>/dev/null
+# optional site-keys tarball: a returning station's registered upload/PSWS
+# keys, dropped by the operator onto the stick's FAT (EFI) volume after
+# burning (writable from Mac/Windows). Staged here; the wizard restores it
+# into the decoder VM so the PSWS portal registration survives greenfields.
+ESPP=$(lsblk -nrpo NAME,TYPE "$MEDIA" 2>/dev/null | awk '$2=="part"{n++; if(n==2)print $1}')
+if [ -n "$ESPP" ]; then
+  mkdir -p /mnt/sig-esp
+  if mount -o ro "$ESPP" /mnt/sig-esp 2>/dev/null; then
+    [ -f /mnt/sig-esp/site-keys.tar.gz ] && cp /mnt/sig-esp/site-keys.tar.gz "$APP"/ \
+      && say "import: site-keys.tar.gz staged from the stick (key restore armed)"
+    umount /mnt/sig-esp 2>/dev/null
+  fi
+fi
 [ -f /mnt/sig-media/sigmond-rac.tar.gz ] && tar xzf /mnt/sig-media/sigmond-rac.tar.gz -C "$APP" 2>/dev/null
 [ -f /mnt/sig-media/sigmond.tar.gz ] && tar xzf /mnt/sig-media/sigmond.tar.gz -C "$APP" 2>/dev/null
 SIG="$APP/sigmond"

@@ -373,6 +373,24 @@ INSTEOF
 gexec 60 "echo $(echo "$SENTINST" | base64 -w0) | base64 -d > /tmp/sig-sentinel-install.sh && bash /tmp/sig-sentinel-install.sh && rm -f /tmp/sig-sentinel-install.sh" \
     || say "WARN: could not install the SDR sentinel — run 'smd bringup dasi2' in the VM manually"
 
+# ── site-keys restore (optional, rob 2026-07-29) ────────────────────────────
+# A returning station's registered keys ride the stick: after burning, the
+# stick's small FAT (EFI) volume accepts `site-keys.tar.gz`, created on the
+# old station with:
+#   tar czf site-keys.tar.gz -C / etc/hs-uploader/keys home/timestd/.ssh
+# The importer staged it; restore AFTER config render (which generates a
+# fresh key when absent) so the registered key wins, then fix ownership.
+KEYS_RESTORED=""
+if [ -f /root/sigmond-appliance/site-keys.tar.gz ]; then
+    say "restoring site keys from the install stick"
+    if gexec 60 "echo $(base64 -w0 /root/sigmond-appliance/site-keys.tar.gz) | base64 -d | tar xzf - -C / etc/hs-uploader/keys home/timestd/.ssh 2>/dev/null; chown -R hsupload:sigmond /etc/hs-uploader/keys 2>/dev/null; chmod 600 /etc/hs-uploader/keys/id_ed25519* 2>/dev/null; chmod 644 /etc/hs-uploader/keys/*.pub 2>/dev/null; chown -R timestd:timestd /home/timestd/.ssh 2>/dev/null; chmod 700 /home/timestd/.ssh 2>/dev/null; ls /etc/hs-uploader/keys/id_ed25519_host"; then
+        KEYS_RESTORED=1
+        say "site keys restored (hs-uploader + timestd)"
+    else
+        say "WARN: site-keys restore failed — see $LOG"
+    fi
+fi
+
 RADIOD_STATE="unknown"
 if gexec 15 "lsusb | grep -qiE '04b4:00(f[013]|bc)|f4b3:0100'"; then
     say "RX888 detected — starting SDR bring-up now (takes a few minutes)..."
@@ -716,7 +734,14 @@ TOMLEOF
 fi
 
 PSWS_STATE="skipped — add later: sigmond-setup --reconfigure"
-if [ -n "$PSWS_ID" ]; then
+if [ -n "$PSWS_ID" ] && [ -n "$KEYS_RESTORED" ]; then
+    if gexec 90 "smd psws verify"; then
+        PSWS_STATE="station $PSWS_ID — registered key RESTORED from the stick, verify PASSED ✓"
+    else
+        PSWS_STATE="station $PSWS_ID — key restored from the stick; verify pending
+            (portal may still need the key; check with: smd psws verify)"
+    fi
+elif [ -n "$PSWS_ID" ]; then
     PSWS_STATE="station $PSWS_ID — IDs recorded, UPLOAD KEY NOT YET REGISTERED.
             Finish from any computer: log into the VM (sigmond-vm) — the
             login banner shows the key to paste into the PSWS portal,

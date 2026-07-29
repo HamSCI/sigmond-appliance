@@ -30,6 +30,21 @@ SIGMOND APPLIANCE @@VERSION@@ — QUICK START
    Host login: root / hamsci-sigmond   (change it!)
    Decoder VM login: hamsci / sigmond-hamsci   (change it!)
 
-This stick is appliance version @@VERSION@@ — the Proxmox host is named
-sigmond-appliance-@@VTAG@@ and the VM sigmond-decoder-@@VTAG@@, so you
-can always tell which image a machine was built from.
+This stick is appliance version @@VERSION@@. Before the wizard runs, the
+Proxmox host is named sigmond-appliance-@@VTAG@@ and the VM
+sigmond-decoder-@@VTAG@@ (so you can tell which image a machine came
+from); the wizard then renames them to your station designator — VM =
+designator (e.g. AC0G-B4), Proxmox host = designator-PM (AC0G-B4-PM).
+The image version stays visible in /etc/sigmond-appliance/version and
+the login panel.
+
+RETURNING STATION? (key restore)
+  If this replaces an existing Sigmond station, its registered PSWS/upload
+  keys can ride the stick so no portal re-registration is needed:
+  1. On the OLD station (or from a backup):
+       tar czf site-keys.tar.gz -C / etc/hs-uploader/keys home/timestd/.ssh
+  2. AFTER burning this stick, it shows one small FAT volume (the EFI
+     partition) on any Mac/Windows/Linux machine — copy site-keys.tar.gz
+     onto it and eject.
+  3. Install normally. The wizard restores the keys and runs the PSWS
+     verify automatically.
