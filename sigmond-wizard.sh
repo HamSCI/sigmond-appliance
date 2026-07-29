@@ -644,8 +644,11 @@ echo "$REPORTER $GRID $(date -u +%F)" > "$CONF_MARK"
 # class as the dasi-install tty takeover, 2026-07-26), which left every
 # post-wizard boot with a BLANK console: no login prompt, no access panel
 # (observed on B4 v3.1 and rob's Kamrui, 2026-07-27/28).
+# disable ONLY — do NOT start getty here: Conflicts is symmetric, so a
+# getty start at this point SIGTERMs the wizard itself mid-run (v3.6 field
+# run 2026-07-29: summary never written/shown). The unit's ExecStopPost
+# already hands the console to getty when the wizard exits.
 systemctl disable sigmond-wizard.service 2>/dev/null
-systemctl --no-block start getty@tty1.service 2>/dev/null
 
 # ── final summary ───────────────────────────────────────────────────────────
 # Print it, save it (/root/sigmond-setup-summary.txt), pin it above the tty1
