@@ -210,5 +210,5 @@ timestd profile set full >/dev/null 2>&1 && say "timestd profile: full"
 # minted key comes out root-owned -> hsupload gets Permission denied every
 # SFTP tar cycle and silently falls back to FTP. Real fix belongs in
 # sigmond's key mint; repair here until it lands.
-chown hsupload:sigmond /etc/hs-uploader/keys/id_ed25519* 2>/dev/null
+id hsupload >/dev/null 2>&1 && chown -R hsupload:sigmond /etc/hs-uploader/keys 2>/dev/null
 exit 0

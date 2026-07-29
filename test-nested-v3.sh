@@ -216,7 +216,9 @@ $SSHN "qm config $VMID | grep -q '^name: N0CALL-T1$'" \
 GH=$($SSHN "qm guest exec $VMID --timeout 30 -- bash -lc hostname" 2>/dev/null)
 echo "$GH" | grep -qi "N0CALL-T1" && say "VM guest hostname N0CALL-T1 ✓" || say "WARN: guest hostname: $GH"
 KR=$($SSHN "qm guest exec $VMID --timeout 30 -- bash -lc 'cat /etc/hs-uploader/keys/id_ed25519_host; stat -c %U:%G /etc/hs-uploader/keys/id_ed25519_host; cat /home/timestd/.ssh/id_rsa_psws 2>/dev/null'" 2>&1)
-echo "$KR" | grep -q TESTPRIV && echo "$KR" | grep -q "hsupload:sigmond" && echo "$KR" | grep -q TESTRSA \
+# pre-bringup the hsupload user doesn't exist yet (born at bringup, when
+# site-timing completes the chown) — root:sigmond is the correct interim
+echo "$KR" | grep -q TESTPRIV && echo "$KR" | grep -qE "(hsupload|root):sigmond" && echo "$KR" | grep -q TESTRSA \
     && say "site-keys restored from stick with correct ownership ✓" \
     || { say "FATAL: site-keys restore path failed"; echo "$KR" | head -5; exit 1; }
 say "PHASE D PASS — NESTED TEST COMPLETE"

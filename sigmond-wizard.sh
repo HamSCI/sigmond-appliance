@@ -383,7 +383,7 @@ gexec 60 "echo $(echo "$SENTINST" | base64 -w0) | base64 -d > /tmp/sig-sentinel-
 KEYS_RESTORED=""
 if [ -f /root/sigmond-appliance/site-keys.tar.gz ]; then
     say "restoring site keys from the install stick"
-    if gexec 60 "echo $(base64 -w0 /root/sigmond-appliance/site-keys.tar.gz) | base64 -d | tar xzf - -C / etc/hs-uploader/keys home/timestd/.ssh 2>/dev/null; chown -R hsupload:sigmond /etc/hs-uploader/keys 2>/dev/null; chmod 600 /etc/hs-uploader/keys/id_ed25519* 2>/dev/null; chmod 644 /etc/hs-uploader/keys/*.pub 2>/dev/null; chown -R timestd:timestd /home/timestd/.ssh 2>/dev/null; chmod 700 /home/timestd/.ssh 2>/dev/null; ls /etc/hs-uploader/keys/id_ed25519_host"; then
+    if gexec 60 "echo $(base64 -w0 /root/sigmond-appliance/site-keys.tar.gz) | base64 -d | tar xzf - -C / etc/hs-uploader/keys home/timestd/.ssh 2>/dev/null; chown -R hsupload:sigmond /etc/hs-uploader/keys 2>/dev/null || chown -R root:sigmond /etc/hs-uploader/keys 2>/dev/null; chmod 600 /etc/hs-uploader/keys/id_ed25519* 2>/dev/null; chmod 644 /etc/hs-uploader/keys/*.pub 2>/dev/null; chown -R timestd:timestd /home/timestd/.ssh 2>/dev/null; chmod 700 /home/timestd/.ssh 2>/dev/null; ls /etc/hs-uploader/keys/id_ed25519_host"; then
         KEYS_RESTORED=1
         say "site keys restored (hs-uploader + timestd)"
     else
