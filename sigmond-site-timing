@@ -136,6 +136,8 @@ s = sub(s, "host", '"%s"' % host)
 open(p, "w").write(s)
 PYEOF
         say "GNSS UBX stream found: $GHOST:9000 - gnss_vtec enabled"
+        # an already-running vtec service read the config before this edit
+        systemctl try-restart timestd-vtec 2>/dev/null
     else
         say "no local GNSS UBX stream on :9000 - vtec stays off"
     fi
