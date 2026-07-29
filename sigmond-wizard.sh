@@ -218,14 +218,26 @@ if [ "$PMNAME" != "$OLDHOST" ]; then
         mv "/etc/pve/nodes/$OLDHOST/qemu-server/"*.conf "/etc/pve/nodes/$PMNAME/qemu-server/" 2>/dev/null
     fi
     systemctl restart pveproxy pvedaemon 2>/dev/null
-    sleep 3
-    if ! qm status "$VMID" >/dev/null 2>&1; then
+    # pmxcfs can take a while to settle after the restart — a single-shot
+    # qm check 3s in reverted a PERFECTLY GOOD rename (nested run
+    # 2026-07-29); give it up to 45s before declaring the rename broken
+    QOK=0
+    for i in $(seq 1 15); do
+        qm status "$VMID" >/dev/null 2>&1 && { QOK=1; break; }
+        sleep 3
+    done
+    if [ "$QOK" = 1 ]; then
+        # confs adopted + qm healthy: retire the old node dir (a leftover
+        # empty node lingers in the GUI forever otherwise)
+        rm -rf "/etc/pve/nodes/$OLDHOST" 2>/dev/null
+    else
         say "WARN: node rename broke qm — reverting to $OLDHOST"
         hostnamectl set-hostname "$OLDHOST" 2>/dev/null || hostname "$OLDHOST"
         sed -i "s/\b$PMNAME\b/$OLDHOST/g" /etc/hosts 2>/dev/null
         systemctl restart pve-cluster 2>/dev/null; sleep 5
         [ -d "/etc/pve/nodes/$PMNAME/qemu-server" ] && \
             mv "/etc/pve/nodes/$PMNAME/qemu-server/"*.conf "/etc/pve/nodes/$OLDHOST/qemu-server/" 2>/dev/null
+        rm -rf "/etc/pve/nodes/$PMNAME" 2>/dev/null
         systemctl restart pveproxy pvedaemon 2>/dev/null; sleep 3
         PMNAME="$OLDHOST"
     fi
