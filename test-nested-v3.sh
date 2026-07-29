@@ -131,7 +131,7 @@ echo "$GK" | tail -4
 echo "$GK" | grep -q 'cloud' && { say "FATAL: decoder VM still on CLOUD kernel (no USB stack)"; exit 1; }
 echo "$GK" | grep -q 'hamsci' || { say "FATAL: hamsci user missing in decoder VM"; exit 1; }
 say "guest kernel + hamsci OK; running wizard with piped answers (identity N0CALL/T1 @ EM00aa)"
-printf 'N0CALL/T1\nEM00aa\nTier2 test dipole\n\nS000999\n172\nRM3100\nY\n' | $SSHN "sigmond-setup" 2>&1 | tail -12
+printf 'N0CALL/T1\nEM00aa\nTier2 test dipole\n\nS000999\n172\nRM3100\n\nY\n' | $SSHN "sigmond-setup" 2>&1 | tail -12
 MARK_OK=0
 for i in $(seq 1 12); do
     $SSHN "test -f /etc/sigmond-appliance/.configured" 2>/dev/null && { MARK_OK=1; break; }
@@ -205,6 +205,14 @@ echo "$V34" | grep -q enabled   || { say "FATAL: sdr-sentinel timer not enabled 
 echo "$V34" | grep -q WISDOM-OK || { say "FATAL: FFT wisdom not seeded in VM"; exit 1; }
 echo "$V34" | grep -q TIMING-OK || { say "FATAL: sigmond-site-timing not installed in VM"; exit 1; }
 say "SDR sentinel armed + wisdom seeded + site-timing staged in VM ✓"
+$SSHN "hostname" | grep -q "N0CALL-T1-PM" \
+    && say "Proxmox host renamed to N0CALL-T1-PM ✓" \
+    || { say "FATAL: host not renamed (naming convention)"; $SSHN hostname; exit 1; }
+$SSHN "qm config $VMID | grep -q '^name: N0CALL-T1$'" \
+    && say "decoder VM named N0CALL-T1 ✓" \
+    || { say "FATAL: VM not renamed"; $SSHN "qm config $VMID | grep name"; exit 1; }
+GH=$($SSHN "qm guest exec $VMID --timeout 30 -- bash -lc hostname" 2>/dev/null)
+echo "$GH" | grep -qi "N0CALL-T1" && say "VM guest hostname N0CALL-T1 ✓" || say "WARN: guest hostname: $GH"
 say "PHASE D PASS — NESTED TEST COMPLETE"
 ;;
 esac

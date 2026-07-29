@@ -146,11 +146,30 @@ ask_psws() {
     fi
 }
 
+ask_names() {
+    # Station naming convention (rob 2026-07-29): the decoder VM carries the
+    # station designator, the Proxmox host carries designator-PM. Default
+    # derives from the reporter ID (AC0G/B4 → AC0G-B4), but multi-station
+    # sites or generic deployments can override (DASI2-01 / DASI2-01-PM).
+    local DES_DEFAULT
+    DES_DEFAULT=$(echo "$REPORTER" | tr '/' '-')
+    echo ""
+    echo "Station names: the decoder VM takes the station designator and the"
+    echo "Proxmox host takes designator-PM (e.g. AC0G-B4 + AC0G-B4-PM, or"
+    echo "DASI2-01 + DASI2-01-PM for numbered deployments)."
+    read -r -p "Station designator [$DES_DEFAULT]: " DES
+    DES=$(echo "${DES:-$DES_DEFAULT}" | tr -cd 'A-Za-z0-9-')
+    [ -z "$DES" ] && DES="$DES_DEFAULT"
+    VMNAME="$DES"
+    PMNAME="$DES-PM"
+}
+
 ask_reporter
 ask_grid
 ask_antenna
 ask_rac
 ask_psws
+ask_names
 
 # ── review: everything on one screen, any entry editable ───────────────────
 while :; do
@@ -165,19 +184,53 @@ while :; do
     else
         echo "  5) PSWS:      (skipped)"
     fi
+    echo "  6) Names:     VM $VMNAME · Proxmox host $PMNAME"
     echo "  ─────────────────────────────────────────────────────"
-    read -r -p "Apply? [Y = apply / 1-5 = re-edit that entry / n = abort] " OK
+    read -r -p "Apply? [Y = apply / 1-6 = re-edit that entry / n = abort] " OK
     case "${OK:-Y}" in
         1) ask_reporter;;
         2) ask_grid;;
         3) ask_antenna;;
         4) ask_rac;;
         5) ask_psws;;
+        6) ask_names;;
         [Nn]*) say "aborted by operator — nothing was applied. Rerun any time: sigmond-setup"; exit 1;;
         [Yy]*|"") break;;
-        *) echo "  ✗ Y, n, or an entry number 1-5";;
+        *) echo "  ✗ Y, n, or an entry number 1-6";;
     esac
 done
+
+# ── station names: VM = designator, Proxmox host = designator-PM ────────────
+# Applied FIRST: everything after this uses qm, and a Proxmox single-node
+# rename moves the node's config dir — do it before touching the VM, verify
+# qm still works, and revert if it doesn't. pmxcfs keys node data by
+# hostname: restart pve-cluster, then adopt the VM configs into the new
+# node dir.
+OLDHOST=$(hostname)
+if [ "$PMNAME" != "$OLDHOST" ]; then
+    say "renaming Proxmox host: $OLDHOST → $PMNAME"
+    hostnamectl set-hostname "$PMNAME" 2>/dev/null || hostname "$PMNAME"
+    sed -i "s/\b$OLDHOST\b/$PMNAME/g" /etc/hosts 2>/dev/null
+    [ -f /etc/postfix/main.cf ] && sed -i "s/\b$OLDHOST\b/$PMNAME/g" /etc/postfix/main.cf 2>/dev/null
+    systemctl restart pve-cluster 2>/dev/null
+    for i in $(seq 1 15); do [ -d "/etc/pve/nodes/$PMNAME" ] && break; sleep 2; done
+    if [ -d "/etc/pve/nodes/$PMNAME" ] && [ -d "/etc/pve/nodes/$OLDHOST/qemu-server" ]; then
+        mv "/etc/pve/nodes/$OLDHOST/qemu-server/"*.conf "/etc/pve/nodes/$PMNAME/qemu-server/" 2>/dev/null
+    fi
+    systemctl restart pveproxy pvedaemon 2>/dev/null
+    sleep 3
+    if ! qm status "$VMID" >/dev/null 2>&1; then
+        say "WARN: node rename broke qm — reverting to $OLDHOST"
+        hostnamectl set-hostname "$OLDHOST" 2>/dev/null || hostname "$OLDHOST"
+        sed -i "s/\b$PMNAME\b/$OLDHOST/g" /etc/hosts 2>/dev/null
+        systemctl restart pve-cluster 2>/dev/null; sleep 5
+        [ -d "/etc/pve/nodes/$PMNAME/qemu-server" ] && \
+            mv "/etc/pve/nodes/$PMNAME/qemu-server/"*.conf "/etc/pve/nodes/$OLDHOST/qemu-server/" 2>/dev/null
+        systemctl restart pveproxy pvedaemon 2>/dev/null; sleep 3
+        PMNAME="$OLDHOST"
+    fi
+fi
+qm set "$VMID" --name "$VMNAME" >/dev/null 2>&1 && say "decoder VM named $VMNAME"
 
 # ── push identity into the decoder VM ───────────────────────────────────────
 say "writing site-profile.toml into VM $VMID"
@@ -211,7 +264,7 @@ $PSWS_TOML
 reporter_id = "$REPORTER"
 
 [host]
-hostname = "sigmond-decoder"
+hostname = "$VMNAME"
 PEOF
 )
 B64=$(echo "$PROFILE" | base64 -w0)
