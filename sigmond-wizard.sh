@@ -244,6 +244,19 @@ if [ -f /root/sigmond-appliance/wisdomf-seed ]; then
     gexec 30 "[ -s /etc/fftw/wisdomf ] || { mkdir -p /etc/fftw; echo $(base64 -w0 /root/sigmond-appliance/wisdomf-seed) | base64 -d > /etc/fftw/wisdomf; }" \
         || say "WARN: could not seed FFT wisdom — first radiod start waits on the planner"
 fi
+# sigmond-site-timing: everything the timing chain needs from the local
+# site, discovered and wired automatically after bringup (rob 2026-07-29:
+# NO manual-only fixes — whatever the live station needed by hand must be
+# in the greenfield flow). The script rides the stick as its own payload
+# file (staged by the importer); the sentinel runs it after each
+# successful bringup, and it is safe to rerun any time.
+say "installing the site-timing auto-wiring helper in the VM"
+if [ -f /root/sigmond-appliance/sigmond-site-timing ]; then
+    gexec 60 "echo $(base64 -w0 /root/sigmond-appliance/sigmond-site-timing) | base64 -d > /usr/local/sbin/sigmond-site-timing && chmod 755 /usr/local/sbin/sigmond-site-timing" \
+        || say "WARN: could not install sigmond-site-timing"
+else
+    say "WARN: sigmond-site-timing not staged — timing chain will need manual wiring"
+fi
 say "installing the SDR bring-up sentinel in the VM"
 SENT_B64=$(base64 -w0 <<'SENTEOF'
 #!/bin/bash
@@ -257,6 +270,10 @@ lsusb 2>/dev/null | grep -qiE '04b4:00(f[013]|bc)|f4b3:0100' || exit 0   # no SD
 echo "RX888 present and no radiod instance — running smd bringup dasi2" \
   | systemd-cat -t sigmond-sdr-sentinel -p notice
 smd bringup dasi2 --non-interactive
+RC=$?
+# on success, wire the timing chain to the local site (idempotent)
+[ $RC -eq 0 ] && [ -x /usr/local/sbin/sigmond-site-timing ] && /usr/local/sbin/sigmond-site-timing
+exit $RC
 SENTEOF
 )
 SENTINST=$(cat <<INSTEOF

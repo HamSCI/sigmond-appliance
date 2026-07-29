@@ -132,6 +132,10 @@ WSEED=""
 [ -z "$WSEED" ] && [ -f wisdomf-ryzen5825u ] && WSEED=wisdomf-ryzen5825u
 [ -n "$WSEED" ] && cp "$WSEED" /tmp/sigpay.$$/wisdomf-seed \
   || say "WARN: no wisdom seed in rig — first radiod start may wait on the planner"
+# site-timing auto-wiring helper (chrony refclocks, LAN NTP/GNSS discovery,
+# metrology channels, full timestd profile) — pushed into the VM by the wizard
+[ -f sigmond-site-timing ] && cp sigmond-site-timing /tmp/sigpay.$$/ \
+  || say "WARN: sigmond-site-timing missing from rig — timing chain manual"
 echo "$VERSION sigmond@$SIGREV built $(date -Iseconds)" > /tmp/sigpay.$$/VERSION
 umount /tmp/sigpay.$$; rmdir /tmp/sigpay.$$
 

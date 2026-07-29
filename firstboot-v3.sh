@@ -107,6 +107,7 @@ mkdir -p "$APP"
 cp /mnt/sig-media/sigmond-wizard.sh /usr/local/sbin/sigmond-setup 2>/dev/null && chmod +x /usr/local/sbin/sigmond-setup
 cp /mnt/sig-media/QUICKSTART.txt "$APP"/ 2>/dev/null
 cp /mnt/sig-media/wisdomf-seed "$APP"/ 2>/dev/null
+cp /mnt/sig-media/sigmond-site-timing "$APP"/ 2>/dev/null
 [ -f /mnt/sig-media/sigmond-rac.tar.gz ] && tar xzf /mnt/sig-media/sigmond-rac.tar.gz -C "$APP" 2>/dev/null
 [ -f /mnt/sig-media/sigmond.tar.gz ] && tar xzf /mnt/sig-media/sigmond.tar.gz -C "$APP" 2>/dev/null
 SIG="$APP/sigmond"
