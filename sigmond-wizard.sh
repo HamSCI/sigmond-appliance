@@ -425,6 +425,11 @@ say "SDR/radiod: $RADIOD_STATE"
 say "setting up VM accounts (ONE password — every account tracks this host's root)"
 gexec 30 "id sigmond >/dev/null 2>&1 || useradd -m -s /bin/bash sigmond; usermod -s /bin/bash sigmond; getent group sudo >/dev/null && usermod -aG sudo sigmond || true" \
     || say "WARN: could not ensure sigmond operator user in VM"
+# operator accounts must read fleet state: smd status parses
+# group-readable client configs (hamsci hit Errno 13 on
+# timestd-config.toml, 2026-07-30) — grant the service groups
+gexec 30 "for u in hamsci sigmond; do for g in sigmond timestd pskrec wsprrec radio; do getent group \\$g >/dev/null && usermod -aG \\$g \\$u; done; done; true" \
+    || say "WARN: could not add operator accounts to service groups"
 HASH=$(getent shadow root | cut -d: -f2)
 if [ -n "$HASH" ] && [ "$HASH" != "*" ] && [ "$HASH" != "!" ]; then
     gexec 30 "usermod -p '$HASH' sigmond && usermod -p '$HASH' root && usermod -p '$HASH' hamsci" \

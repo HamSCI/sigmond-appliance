@@ -217,6 +217,10 @@ TMF=$($SSHN "qm guest exec $VMID --timeout 30 -- bash -lc 'bash -lc \"type tm; a
 echo "$TMF" | grep -q "tm is a function" && echo "$TMF" | grep -q "ls -lrt" \
     && say "tm()/ll/lrt live in VM login shells ✓" \
     || { say "FATAL: operator helpers not active in VM"; echo "$TMF" | head -3; exit 1; }
+GRP=$($SSHN "qm guest exec $VMID --timeout 30 -- bash -lc 'id hamsci'" 2>&1)
+echo "$GRP" | grep -q "timestd" && echo "$GRP" | grep -q "sigmond" \
+    && say "operator service-group membership ✓" \
+    || { say "FATAL: hamsci missing service groups"; exit 1; }
 say "SDR sentinel armed + wisdom seeded + site-timing staged in VM ✓"
 $SSHN "hostname" | grep -q "N0CALL-T1-PM" \
     && say "Proxmox host renamed to N0CALL-T1-PM ✓" \
