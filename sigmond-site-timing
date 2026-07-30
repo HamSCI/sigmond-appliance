@@ -203,6 +203,18 @@ PYEOF
     fi
 fi
 
+# ── 4.7 ka9q-web ─────────────────────────────────────────────────────────────
+# The sentinel-driven bringup can end with radiod running but NO ka9q-web
+# unit written (unit-writer needs the radiod status name; the bringup
+# re-install step didn't fire on the 2026-07-30 field greenfield — mjh
+# flag). Ensure it here, after radiod exists.
+if ls /etc/radio/radiod@*.conf >/dev/null 2>&1 && ! systemctl list-unit-files --no-legend 'ka9q-web*' 2>/dev/null | grep -q ka9q-web; then
+    smd install --components ka9q-web --yes >/dev/null 2>&1
+    systemctl enable --now ka9q-web 2>/dev/null \
+        && say "ka9q-web installed + started (:8081)" \
+        || say "WARN: ka9q-web install/start failed - check smd status"
+fi
+
 # ── 5. full timing profile ──────────────────────────────────────────────────
 timestd profile set full >/dev/null 2>&1 && say "timestd profile: full"
 
