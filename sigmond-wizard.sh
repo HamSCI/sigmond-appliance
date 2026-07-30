@@ -126,7 +126,7 @@ ask_rac() {
 ask_psws() {
     echo ""
     echo "HamSCI PSWS (space-weather / GRAPE uploads) — optional. If this station"
-    echo "has a PSWS account (https://pswsnetwork.caps.ua.edu/), enter its IDs now."
+    echo "has a PSWS account (https://pswsnetwork.eng.ua.edu/), enter its IDs now."
     echo "The upload KEY is registered later from any SSH session — the VM's login"
     echo "banner walks you through it (no copy-paste needed on this console)."
     PSWS_ID=""
