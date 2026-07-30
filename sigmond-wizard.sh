@@ -428,7 +428,7 @@ gexec 30 "id sigmond >/dev/null 2>&1 || useradd -m -s /bin/bash sigmond; usermod
 # operator accounts must read fleet state: smd status parses
 # group-readable client configs (hamsci hit Errno 13 on
 # timestd-config.toml, 2026-07-30) — grant the service groups
-gexec 30 "for u in hamsci sigmond; do for g in sigmond timestd pskrec wsprrec radio; do getent group \\$g >/dev/null && usermod -aG \\$g \\$u; done; done; true" \
+gexec 30 "for u in hamsci sigmond; do for g in sigmond timestd pskrec wsprrec radio; do getent group \$g >/dev/null && usermod -aG \$g \$u; done; done; true" \
     || say "WARN: could not add operator accounts to service groups"
 HASH=$(getent shadow root | cut -d: -f2)
 if [ -n "$HASH" ] && [ "$HASH" != "*" ] && [ "$HASH" != "!" ]; then
