@@ -202,10 +202,11 @@ $SSHN "systemctl is-active getty@tty1.service" 2>/dev/null | grep -q '^active' \
     || { say "FATAL: getty@tty1 not active (blank console)"; exit 1; }
 $SSHN "grep -q 'Sigmond appliance' /etc/issue" 2>/dev/null \
     && say "access panel present in /etc/issue ✓" || say "WARN: no access panel in /etc/issue"
-V34=$($SSHN "qm guest exec $VMID --timeout 60 -- bash -lc 'systemctl is-enabled sigmond-sdr-sentinel.timer 2>&1; test -s /etc/fftw/wisdomf && echo WISDOM-OK; test -x /usr/local/sbin/sigmond-site-timing && echo TIMING-OK'" 2>&1)
+V34=$($SSHN "qm guest exec $VMID --timeout 60 -- bash -lc 'systemctl is-enabled sigmond-sdr-sentinel.timer 2>&1; test -s /etc/fftw/wisdomf && echo WISDOM-OK; test -x /usr/local/sbin/sigmond-site-timing && echo TIMING-OK; grep -q \"^v3\" /etc/sigmond-appliance/version 2>/dev/null && echo VMVER-OK'" 2>&1)
 echo "$V34" | grep -q enabled   || { say "FATAL: sdr-sentinel timer not enabled in VM"; exit 1; }
 echo "$V34" | grep -q WISDOM-OK || { say "FATAL: FFT wisdom not seeded in VM"; exit 1; }
 echo "$V34" | grep -q TIMING-OK || { say "FATAL: sigmond-site-timing not installed in VM"; exit 1; }
+echo "$V34" | grep -q VMVER-OK  || { say "FATAL: appliance version not stamped into VM"; exit 1; }
 say "SDR sentinel armed + wisdom seeded + site-timing staged in VM ✓"
 $SSHN "hostname" | grep -q "N0CALL-T1-PM" \
     && say "Proxmox host renamed to N0CALL-T1-PM ✓" \

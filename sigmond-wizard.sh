@@ -309,6 +309,12 @@ gexec 600 "smd config render" \
 # Also: `smd apply` refuses to START radiod until /etc/fftw/wisdomf exists,
 # and the in-VM planner grinds >1 h on first boot — seed wisdom from the
 # build fleet first (fftw silently ignores entries foreign to the CPU).
+# appliance version visible inside the VM too (rob 2026-07-30) — same
+# path as on the host; placed after personalize so identity reset can't
+# touch it
+gexec 15 "mkdir -p /etc/sigmond-appliance && echo '$(cat /etc/sigmond-appliance/version 2>/dev/null || echo unknown)' > /etc/sigmond-appliance/version" \
+    || say "WARN: could not stamp appliance version into the VM"
+
 if [ -f /root/sigmond-appliance/wisdomf-seed ]; then
     say "seeding FFT wisdom into the VM (radiod start is gated on it)"
     gexec 30 "[ -s /etc/fftw/wisdomf ] || { mkdir -p /etc/fftw; echo $(base64 -w0 /root/sigmond-appliance/wisdomf-seed) | base64 -d > /etc/fftw/wisdomf; }" \
