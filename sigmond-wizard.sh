@@ -457,6 +457,12 @@ gexec 30 "systemctl enable --now serial-getty@ttyS0.service" || true
 # (btop + tmux binaries are baked into the template since v3.16)
 gexec 30 "for h in /root /home/hamsci /home/sigmond /etc/skel; do [ -d \$h ] && { echo 'set -g mouse on' > \$h/.tmux.conf; o=\$(stat -c %U \$h 2>/dev/null); [ \"\$o\" != root ] && chown \$o: \$h/.tmux.conf; }; done; true" \
     || say "WARN: could not install .tmux.conf in the VM"
+# operator shell helpers: rob's tm() tmux picker + ll/lrt aliases,
+# system-wide via /etc/profile.d (bash-guarded; staged from the stick)
+if [ -f /root/sigmond-appliance/sigmond-operator.sh ]; then
+    gexec 30 "echo $(base64 -w0 /root/sigmond-appliance/sigmond-operator.sh) | base64 -d > /etc/profile.d/sigmond-operator.sh && chmod 644 /etc/profile.d/sigmond-operator.sh" \
+        || say "WARN: could not install operator shell helpers in the VM"
+fi
 # Catch-all DHCP: the template's build-time NIC name never matches the
 # deployed VM's (observed: no IP on real hardware) — match en* instead.
 say "ensuring decoder VM networking (DHCP on any ethernet NIC)"

@@ -211,6 +211,12 @@ UT=$($SSHN "qm guest exec $VMID --timeout 30 -- bash -lc 'command -v btop; comma
 echo "$UT" | grep -q "bin/btop" && echo "$UT" | grep -q "bin/tmux" && echo "$UT" | grep -q "mouse on" \
     && say "operator utils (btop/tmux + tmux.conf) ✓" \
     || { say "FATAL: btop/tmux/.tmux.conf missing in VM"; exit 1; }
+$SSHN "test -f /etc/profile.d/sigmond-operator.sh" \
+    && say "operator helpers on host ✓" || { say "FATAL: sigmond-operator.sh missing on host"; exit 1; }
+TMF=$($SSHN "qm guest exec $VMID --timeout 30 -- bash -lc 'bash -lc \"type tm; alias ll lrt\" 2>&1'" 2>&1)
+echo "$TMF" | grep -q "tm is a function" && echo "$TMF" | grep -q "ls -lrt" \
+    && say "tm()/ll/lrt live in VM login shells ✓" \
+    || { say "FATAL: operator helpers not active in VM"; echo "$TMF" | head -3; exit 1; }
 say "SDR sentinel armed + wisdom seeded + site-timing staged in VM ✓"
 $SSHN "hostname" | grep -q "N0CALL-T1-PM" \
     && say "Proxmox host renamed to N0CALL-T1-PM ✓" \

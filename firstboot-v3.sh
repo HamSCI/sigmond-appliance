@@ -108,6 +108,9 @@ cp /mnt/sig-media/sigmond-wizard.sh /usr/local/sbin/sigmond-setup 2>/dev/null &&
 cp /mnt/sig-media/QUICKSTART.txt "$APP"/ 2>/dev/null
 cp /mnt/sig-media/wisdomf-seed "$APP"/ 2>/dev/null
 cp /mnt/sig-media/sigmond-site-timing "$APP"/ 2>/dev/null
+# operator shell helpers (rob's tm/ll/lrt): host now, VM via the wizard
+cp /mnt/sig-media/sigmond-operator.sh "$APP"/ 2>/dev/null
+[ -f "$APP/sigmond-operator.sh" ] && install -m 644 "$APP/sigmond-operator.sh" /etc/profile.d/sigmond-operator.sh
 # optional site-keys tarball: a returning station's registered upload/PSWS
 # keys, dropped by the operator onto the stick's FAT (EFI) volume after
 # burning (writable from Mac/Windows). Staged here; the wizard restores it

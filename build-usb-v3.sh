@@ -136,6 +136,8 @@ WSEED=""
 # metrology channels, full timestd profile) — pushed into the VM by the wizard
 [ -f sigmond-site-timing ] && cp sigmond-site-timing /tmp/sigpay.$$/ \
   || say "WARN: sigmond-site-timing missing from rig — timing chain manual"
+# operator shell helpers (tm/ll/lrt) for host + VM /etc/profile.d
+[ -f sigmond-operator.sh ] && cp sigmond-operator.sh /tmp/sigpay.$$/
 echo "$VERSION sigmond@$SIGREV built $(date -Iseconds)" > /tmp/sigpay.$$/VERSION
 umount /tmp/sigpay.$$; rmdir /tmp/sigpay.$$
 
