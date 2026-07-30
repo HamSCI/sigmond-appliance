@@ -28,7 +28,7 @@ SIGMOND APPLIANCE @@VERSION@@ — QUICK START
    the USB controllers now belong to the VM. That is normal; use ssh.
 7. Proxmox web GUI: https://<machine-ip>:8006
    Host login: root / hamsci-sigmond   (change it!)
-   Decoder VM login: hamsci / sigmond-hamsci   (change it!)
+   Decoder VM login: hamsci / hamsci-sigmond   (ONE password everywhere; change it!)
 
 This stick is appliance version @@VERSION@@. Before the wizard runs, the
 Proxmox host is named sigmond-appliance-@@VTAG@@ and the VM

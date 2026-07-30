@@ -381,7 +381,7 @@ PANEL=$(cat <<PEOF
                 web UI  https://${HOSTIP:-<no-ip-yet>}:8006
                 password: set at install (image default hamsci-sigmond — change it!)
  Decoder VM:    ssh sigmond@${VMIP:-<vm-starting>}   (same password as host root)
-                ssh hamsci@${VMIP:-<vm-starting>}    (image default sigmond-hamsci)
+                ssh hamsci@${VMIP:-<vm-starting>}    (same password as host root)
                 from this host:  sigmond-vm     console:  qm terminal $VMID
  Wizard rerun:  sigmond-setup --reconfigure
 PEOF

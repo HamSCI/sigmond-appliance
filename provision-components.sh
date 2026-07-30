@@ -42,7 +42,7 @@ echo "### COMPONENTS DONE (rc=$RC) $(date -u)"
 
 echo "### operator account: hamsci (fleet convention, NOPASSWD sudo, rob's key)"
 sudo useradd -m -s /bin/bash hamsci 2>/dev/null || true
-echo 'hamsci:sigmond-hamsci' | sudo chpasswd
+echo 'hamsci:hamsci-sigmond' | sudo chpasswd   # ONE password everywhere (rob 2026-07-30)
 echo 'hamsci ALL=(ALL) NOPASSWD:ALL' | sudo tee /etc/sudoers.d/hamsci >/dev/null
 sudo chmod 440 /etc/sudoers.d/hamsci
 sudo mkdir -p /home/hamsci/.ssh

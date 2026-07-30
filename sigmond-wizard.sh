@@ -422,12 +422,12 @@ say "SDR/radiod: $RADIOD_STATE"
 # DISABLED (root stays usable on the console / qm terminal for recovery).
 # sigmond gets the SAME password as this host's root (hash copy — one
 # password for the whole appliance), this host's SSH key, and sudo.
-say "setting up VM operator account 'sigmond' (same password as this host's root)"
+say "setting up VM accounts (ONE password — every account tracks this host's root)"
 gexec 30 "id sigmond >/dev/null 2>&1 || useradd -m -s /bin/bash sigmond; usermod -s /bin/bash sigmond; getent group sudo >/dev/null && usermod -aG sudo sigmond || true" \
     || say "WARN: could not ensure sigmond operator user in VM"
 HASH=$(getent shadow root | cut -d: -f2)
 if [ -n "$HASH" ] && [ "$HASH" != "*" ] && [ "$HASH" != "!" ]; then
-    gexec 30 "usermod -p '$HASH' sigmond && usermod -p '$HASH' root" \
+    gexec 30 "usermod -p '$HASH' sigmond && usermod -p '$HASH' root && usermod -p '$HASH' hamsci" \
         || say "WARN: could not set VM account passwords"
 fi
 [ -f /root/.ssh/id_ed25519 ] || ssh-keygen -q -t ed25519 -N "" -f /root/.ssh/id_ed25519
@@ -788,8 +788,8 @@ SUMMARY=$(cat <<SEOF
    web GUI: https://${HOSTIP:-<host-ip>}:8006
  Decoder VM $VMID:
    IP:      ${VMIP:-none yet — check: qm guest exec $VMID -- ip -4 -br addr}
-   login:   sigmond — SAME password as this host's root
-            (remote root ssh login is disabled)
+   login:   sigmond or hamsci — SAME password as this host's root
+            (ONE password per appliance; remote root ssh is disabled)
    shell:   sigmond-vm   ← run this on the host: finds the VM's
             current IP and logs you in as sigmond ($SSH_STATE)
    ssh:     ssh sigmond@${VMIP:-<vm-ip>}   (from other machines;
