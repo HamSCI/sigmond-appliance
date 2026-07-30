@@ -460,7 +460,7 @@ gexec 30 "for h in /root /home/hamsci /home/sigmond /etc/skel; do [ -d \$h ] && 
 # operator shell helpers: rob's tm() tmux picker + ll/lrt aliases,
 # system-wide via /etc/profile.d (bash-guarded; staged from the stick)
 if [ -f /root/sigmond-appliance/sigmond-operator.sh ]; then
-    gexec 30 "echo $(base64 -w0 /root/sigmond-appliance/sigmond-operator.sh) | base64 -d > /etc/profile.d/sigmond-operator.sh && chmod 644 /etc/profile.d/sigmond-operator.sh" \
+    gexec 30 "echo $(base64 -w0 /root/sigmond-appliance/sigmond-operator.sh) | base64 -d > /etc/profile.d/sigmond-operator.sh && chmod 644 /etc/profile.d/sigmond-operator.sh; grep -q sigmond-operator /etc/bash.bashrc 2>/dev/null || echo '[ -f /etc/profile.d/sigmond-operator.sh ] && . /etc/profile.d/sigmond-operator.sh' >> /etc/bash.bashrc" \
         || say "WARN: could not install operator shell helpers in the VM"
 fi
 # Catch-all DHCP: the template's build-time NIC name never matches the

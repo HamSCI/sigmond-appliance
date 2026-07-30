@@ -111,6 +111,9 @@ cp /mnt/sig-media/sigmond-site-timing "$APP"/ 2>/dev/null
 # operator shell helpers (rob's tm/ll/lrt): host now, VM via the wizard
 cp /mnt/sig-media/sigmond-operator.sh "$APP"/ 2>/dev/null
 [ -f "$APP/sigmond-operator.sh" ] && install -m 644 "$APP/sigmond-operator.sh" /etc/profile.d/sigmond-operator.sh
+# profile.d only reaches LOGIN shells — hook bash.bashrc so interactive
+# non-login shells (plain `bash`, some tmux configs) get the helpers too
+grep -q sigmond-operator /etc/bash.bashrc 2>/dev/null || echo '[ -f /etc/profile.d/sigmond-operator.sh ] && . /etc/profile.d/sigmond-operator.sh' >> /etc/bash.bashrc
 # optional site-keys tarball: a returning station's registered upload/PSWS
 # keys, dropped by the operator onto the stick's FAT (EFI) volume after
 # burning (writable from Mac/Windows). Staged here; the wizard restores it
