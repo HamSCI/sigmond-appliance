@@ -133,7 +133,7 @@ echo "$GK" | grep -q 'hamsci' || { say "FATAL: hamsci user missing in decoder VM
 say "staging a test site-keys tarball (exercises the stick key-restore path)"
 $SSHN "mkdir -p /root/sigmond-appliance /tmp/sk/etc/hs-uploader/keys /tmp/sk/home/timestd/.ssh && echo TESTPRIV > /tmp/sk/etc/hs-uploader/keys/id_ed25519_host && echo TESTPUB > /tmp/sk/etc/hs-uploader/keys/id_ed25519_host.pub && echo TESTRSA > /tmp/sk/home/timestd/.ssh/id_rsa_psws && tar czf /root/sigmond-appliance/site-keys.tar.gz -C /tmp/sk etc home && rm -rf /tmp/sk"
 say "guest kernel + hamsci OK; running wizard with piped answers (identity N0CALL/T1 @ EM00aa)"
-printf 'N0CALL/T1\nEM00aa\nTier2 test dipole\n\nS000999\n172\nRM3100\n\nY\n' | $SSHN "sigmond-setup" 2>&1 | tail -12
+printf 'N0CALL/T1\nEM00aa\nTier2 test dipole\n\nS000999\n172\nRM3100\nS000998\n\nY\n' | $SSHN "sigmond-setup" 2>&1 | tail -12
 MARK_OK=0
 for i in $(seq 1 12); do
     $SSHN "test -f /etc/sigmond-appliance/.configured" 2>/dev/null && { MARK_OK=1; break; }
@@ -221,6 +221,10 @@ GRP=$($SSHN "qm guest exec $VMID --timeout 30 -- bash -lc 'id hamsci'" 2>&1)
 echo "$GRP" | grep -q "timestd" && echo "$GRP" | grep -q "sigmond" \
     && say "operator service-group membership ✓" \
     || { say "FATAL: hamsci missing service groups"; exit 1; }
+MAGC=$($SSHN "qm guest exec $VMID --timeout 30 -- bash -lc 'grep -E \"psws_station_id|^callsign|^grid_square\" /etc/mag-recorder/mag-recorder-config.toml'" 2>&1)
+echo "$MAGC" | grep -q "S000998" && echo "$MAGC" | grep -q "N0CALL" && echo "$MAGC" | grep -q "EM00aa" \
+    && say "mag-recorder identity filled (own PSWS station) ✓" \
+    || { say "FATAL: mag-recorder identity not filled"; echo "$MAGC" | head -3; exit 1; }
 say "SDR sentinel armed + wisdom seeded + site-timing staged in VM ✓"
 $SSHN "hostname" | grep -q "N0CALL-T1-PM" \
     && say "Proxmox host renamed to N0CALL-T1-PM ✓" \

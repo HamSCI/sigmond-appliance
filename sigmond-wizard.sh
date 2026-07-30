@@ -137,12 +137,17 @@ ask_psws() {
         echo "$PSWS_ID" | grep -qE '^S[0-9]{6}$' && break
         echo "  ✗ PSWS station IDs look like S000123 (S + 6 digits)"
     done
-    PSWS_GRAPE=""; PSWS_MAG=""
+    PSWS_GRAPE=""; PSWS_MAG=""; PSWS_MAG_STATION=""
     if [ -n "$PSWS_ID" ]; then
         read -r -p "  GRAPE instrument ID from the portal (e.g. 172, Enter if none): " PSWS_GRAPE
         PSWS_GRAPE=$(echo "$PSWS_GRAPE" | tr -d ' ')
         read -r -p "  magnetometer device ID (e.g. RM3100, Enter if none): " PSWS_MAG
         PSWS_MAG=$(echo "$PSWS_MAG" | tr -d ' ')
+        PSWS_MAG_STATION=""
+        if [ -n "$PSWS_MAG" ]; then
+            read -r -p "  magnetometer PSWS station ID (Enter if same as $PSWS_ID): " PSWS_MAG_STATION
+            PSWS_MAG_STATION=$(echo "$PSWS_MAG_STATION" | tr '[:lower:]' '[:upper:]' | tr -d ' ')
+        fi
     fi
 }
 
@@ -180,7 +185,7 @@ while :; do
     echo "  3) Antenna:   ${ANTENNA:-(none)}"
     echo "  4) Remote:    $( [ -n "$RAC_NUM" ] && echo 'enabled — VM ssh/web + host ssh + Proxmox UI (number auto-assigned)' || echo 'disabled' )"
     if [ -n "$PSWS_ID" ]; then
-        echo "  5) PSWS:      station $PSWS_ID${PSWS_GRAPE:+  grape=$PSWS_GRAPE}${PSWS_MAG:+  mag=$PSWS_MAG}  (key registered after install)"
+        echo "  5) PSWS:      station $PSWS_ID${PSWS_GRAPE:+  grape=$PSWS_GRAPE}${PSWS_MAG:+  mag=$PSWS_MAG}${PSWS_MAG_STATION:+ (station $PSWS_MAG_STATION)}  (key registered after install)"
     else
         echo "  5) PSWS:      (skipped)"
     fi
@@ -294,6 +299,16 @@ gexec 600 "smd admin personalize --reset-identity --yes" \
 say "rendering site config in VM..."
 gexec 600 "smd config render" \
     || say "WARN: smd config render reported issues (continuing; rerun inside VM)"
+
+# mag-recorder identity: render pushes the SITE PSWS station id, but the
+# magnetometer often lives under its OWN portal station, and the config's
+# callsign/grid stay template placeholders (field gap, AC0G-B4 2026-07-30).
+# Fill them here.
+if [ -n "${PSWS_MAG:-}" ]; then
+    MAGST="${PSWS_MAG_STATION:-$PSWS_ID}"
+    gexec 30 "C=/etc/mag-recorder/mag-recorder-config.toml; [ -f \$C ] && { sed -i -e \"s|^psws_station_id  = .*|psws_station_id  = \\\"$MAGST\\\"|\" -e \"s|^callsign         = \\\"<YOUR_CALL>\\\"|callsign         = \\\"$CALLSIGN\\\"|\" -e \"s|^grid_square      = \\\"<YOUR_GRID>\\\"|grid_square      = \\\"$GRID\\\"|\" \$C; systemctl try-restart mag-recorder 2>/dev/null; }; true" \
+        || say "WARN: could not fill mag-recorder identity"
+fi
 
 # ── FFT wisdom seed + SDR bring-up sentinel ────────────────────────────────
 # TWO structural gaps found on B4 + rob's Kamrui (2026-07-27/28, root-caused
