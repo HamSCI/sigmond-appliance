@@ -207,6 +207,10 @@ echo "$V34" | grep -q enabled   || { say "FATAL: sdr-sentinel timer not enabled 
 echo "$V34" | grep -q WISDOM-OK || { say "FATAL: FFT wisdom not seeded in VM"; exit 1; }
 echo "$V34" | grep -q TIMING-OK || { say "FATAL: sigmond-site-timing not installed in VM"; exit 1; }
 echo "$V34" | grep -q VMVER-OK  || { say "FATAL: appliance version not stamped into VM"; exit 1; }
+UT=$($SSHN "qm guest exec $VMID --timeout 30 -- bash -lc 'command -v btop; command -v tmux; cat /home/hamsci/.tmux.conf 2>/dev/null'" 2>&1)
+echo "$UT" | grep -q "bin/btop" && echo "$UT" | grep -q "bin/tmux" && echo "$UT" | grep -q "mouse on" \
+    && say "operator utils (btop/tmux + tmux.conf) ✓" \
+    || { say "FATAL: btop/tmux/.tmux.conf missing in VM"; exit 1; }
 say "SDR sentinel armed + wisdom seeded + site-timing staged in VM ✓"
 $SSHN "hostname" | grep -q "N0CALL-T1-PM" \
     && say "Proxmox host renamed to N0CALL-T1-PM ✓" \

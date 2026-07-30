@@ -453,6 +453,10 @@ gexec 30 "H=\$(getent passwd sigmond | cut -d: -f6); case \"\$H\" in ''|/|/nonex
 gexec 30 "install -d -m 755 /etc/ssh/authorized_keys.d && printf '%s\n' '$PUB' > /etc/ssh/authorized_keys.d/sigmond && chmod 644 /etc/ssh/authorized_keys.d/sigmond && install -d /etc/ssh/sshd_config.d && printf 'PasswordAuthentication yes\nPermitRootLogin no\nStrictModes no\nAuthorizedKeysFile .ssh/authorized_keys /etc/ssh/authorized_keys.d/%%u\n' > /etc/ssh/sshd_config.d/10-sigmond-operator.conf && rm -f /etc/ssh/sshd_config.d/50-sigmond-no-root.conf && { systemctl reload ssh 2>/dev/null || systemctl reload sshd 2>/dev/null || systemctl restart ssh 2>/dev/null || systemctl restart sshd; }" \
     || say "WARN: could not set VM ssh policy (password on / remote root off)"
 gexec 30 "systemctl enable --now serial-getty@ttyS0.service" || true
+# operator comfort (rob 2026-07-30): tmux mouse mode for every login user
+# (btop + tmux binaries are baked into the template since v3.16)
+gexec 30 "for h in /root /home/hamsci /home/sigmond /etc/skel; do [ -d \$h ] && { echo 'set -g mouse on' > \$h/.tmux.conf; o=\$(stat -c %U \$h 2>/dev/null); [ \"\$o\" != root ] && chown \$o: \$h/.tmux.conf; }; done; true" \
+    || say "WARN: could not install .tmux.conf in the VM"
 # Catch-all DHCP: the template's build-time NIC name never matches the
 # deployed VM's (observed: no IP on real hardware) — match en* instead.
 say "ensuring decoder VM networking (DHCP on any ethernet NIC)"

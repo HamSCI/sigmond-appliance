@@ -14,6 +14,7 @@ cd /opt/git/sigmond/sigmond
 echo "### sigmond @ $(git rev-parse --short HEAD); running install.sh ..."
 SIGMOND_SKIP_PROXMOX_PROMPT=1 ./install.sh
 sudo apt-get install -y -qq qemu-guest-agent >/dev/null 2>&1 && echo "### qemu-guest-agent installed"
+sudo apt-get install -y -qq btop tmux >/dev/null 2>&1 && echo "### operator utils installed (btop tmux)"
 echo "### install.sh finished (exit $?)"
 echo "### smd path: $(command -v smd || echo MISSING)"
 /usr/local/bin/smd --help >/dev/null 2>&1 && echo "### smd works" || echo "### smd NOT working"
