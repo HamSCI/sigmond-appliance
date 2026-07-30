@@ -8,7 +8,8 @@
 # Prompts: reporter ID (required)   e.g. AC0G/B4 — drives ALL upload paths
 #          grid square (required)   e.g. EM38ww
 #          antenna     (optional)   free text
-#          remote access (RAC) — just Y/n. The gw2 registrar auto-assigns
+#          remote access (RAC) — just Y/n. The RAC registrar ($RAC_SERVER,
+#              configurable via SIGMOND_RAC_SERVER/_REGISTRAR) auto-assigns
 #              a free RAC number (sites are identified by reporter ID;
 #              the number is plumbing) and the wizard brings up ONE
 #              host-side frpc carrying FOUR channels: VM ssh (35800+n),
@@ -23,6 +24,13 @@
 #              --rac-on        bring it back up
 set -u
 VMID="${SIGMOND_VMID:-120}"
+# RAC server: the secure HamSCI frps endpoint (TLS). Configurable via
+# environment for other deployments; the fleet default is vpn.hamsci.org
+# (replaces gw2.wsprdaemon.org, rob 2026-07-30 — dashboard + registrar
+# being stood up in parallel; until it serves, registration fails softly
+# and `sigmond-setup --reconfigure` retries later).
+RAC_SERVER="${SIGMOND_RAC_SERVER:-vpn.hamsci.org}"
+RAC_REGISTRAR="${SIGMOND_RAC_REGISTRAR:-http://${RAC_SERVER}:35737/register}"
 MARK_DIR=/etc/sigmond-appliance
 CONF_MARK="$MARK_DIR/.configured"
 LOG=/var/log/sigmond-wizard.log
@@ -114,8 +122,9 @@ ask_antenna() {
 
 ask_rac() {
     echo ""
-    echo "Remote access (RAC) is a reverse tunnel to the WsprDaemon gateway so the"
-    echo "fleet admin can reach this station for support. Everything — keys,"
+    echo "Remote access (RAC) is a secure reverse tunnel to the HamSCI server"
+    echo "($RAC_SERVER) so the fleet admin can reach this station for support."
+    echo "Everything — keys,"
     echo "credentials, channel numbers — is handled automatically, and you can"
     echo "turn it off any time with:  sigmond-setup --rac-off"
     read -r -p "Enable remote access? [Y/n] " RAC_EN
@@ -573,11 +582,11 @@ if [ -n "$RAC_NUM" ]; then
         # RAC number (sticky per site, so reconfigure keeps it), and
         # returns user/token/ports for the frpc config.
         SITE=$(echo "$REPORTER" | tr '[:lower:]' '[:upper:]' | tr '/' '_' | tr -cd 'A-Z0-9_-')
-        REG=$(python3 - "$SITE" "$(cat /root/.ssh/id_ed25519.pub)" <<'PYEOF' 2>>"$LOG"
+        REG=$(python3 - "$SITE" "$(cat /root/.ssh/id_ed25519.pub)" "$RAC_REGISTRAR" <<'PYEOF' 2>>"$LOG"
 import json, re, sys, urllib.error, urllib.request
-site, pub = sys.argv[1], sys.argv[2]
+site, pub, registrar = sys.argv[1], sys.argv[2], sys.argv[3]
 req = urllib.request.Request(
-    "http://gw2.wsprdaemon.org:35737/register",
+    registrar,
     data=json.dumps({"site": site, "pubkey": pub}).encode(),
     headers={"Content-Type": "application/json"})
 try:
@@ -603,7 +612,7 @@ print("RACN=%d RUSER=%s RTOKEN=%s P_VMSSH=%d P_VMWEB=%d P_HSSH=%d P_HUI=%d SRV=%
 PYEOF
 )
         if [ -z "$REG" ]; then
-            RAC_STATE="FAILED — could not register with the gateway (see $LOG), rerun: sigmond-setup --reconfigure"
+            RAC_STATE="FAILED — could not register with $RAC_SERVER (see $LOG; the server may not be live yet), rerun: sigmond-setup --reconfigure"
             say "WARN: $RAC_STATE"
         else
             eval "$REG"
