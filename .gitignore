@@ -8,3 +8,4 @@
 *.sha256
 sigmond-rac/
 sigmond-rac.tar.gz
+.claude/
