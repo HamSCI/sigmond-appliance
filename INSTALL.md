@@ -213,3 +213,22 @@ step 4, this is already done.)
 *Fleet-internal: images live on wd30 (`~/sigmond-appliance-*.img` +
 `.sha256`). This document lives in the HamSCI/sigmond-appliance repo as
 `INSTALL.md` — keep it updated as the wizard changes.*
+
+---
+
+## 12. Moving a station (staged in one place, deployed in another)
+
+Stations are often built and tested at one site (wrong grid square!) and
+then shipped to their permanent home. After the station is physically
+installed at its destination:
+
+1. Log into the **Proxmox host** (`ssh root@<host address>`, or the
+   console before the USB controllers were handed to the VM).
+2. Run: `sigmond-setup --reconfigure`
+3. When it asks for the **grid square, type the new one**. For every
+   other question just press Enter (your previous answers, remote-access
+   number, and PSWS registration all stick).
+4. That's it — the new location flows everywhere automatically
+   (reporting grid, timing-station coordinates, metrology channels,
+   magnetometer), the recorders restart themselves, and the next spots
+   upload with the new grid. Verify on wsprnet after ~15 minutes.

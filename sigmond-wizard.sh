@@ -403,6 +403,19 @@ INSTEOF
 gexec 60 "echo $(echo "$SENTINST" | base64 -w0) | base64 -d > /tmp/sig-sentinel-install.sh && bash /tmp/sig-sentinel-install.sh && rm -f /tmp/sig-sentinel-install.sh" \
     || say "WARN: could not install the SDR sentinel — run 'smd bringup dasi2' in the VM manually"
 
+# ── relocation / reconfigure propagation (rob 2026-08-04) ──────────────────
+# When bringup has already run (radiod conf exists — i.e. this is a
+# reconfigure, e.g. a station staged at one site being re-gridded at its
+# deployment site), rerun the site wiring so identity flows into
+# hf-timestd/[station], the metrology channel envs, and mag-recorder, and
+# bounce the recorders so uploads carry the new grid immediately.
+if gexec 15 "ls /etc/radio/radiod@*.conf >/dev/null 2>&1"; then
+    say "existing station detected — re-applying site wiring (relocation-safe)"
+    gexec 300 "[ -x /usr/local/sbin/sigmond-site-timing ] && /usr/local/sbin/sigmond-site-timing; true" \
+        || say "WARN: site wiring rerun failed — check journal -t sigmond-site-timing in the VM"
+    gexec 60 "systemctl try-restart 'wspr-recorder@*' 'psk-recorder@*' 'meteor-scatter@*' 2>/dev/null; true"
+fi
+
 # ── site-keys restore (optional, rob 2026-07-29) ────────────────────────────
 # A returning station's registered keys ride the stick: after burning, the
 # stick's small FAT (EFI) volume accepts `site-keys.tar.gz`, created on the

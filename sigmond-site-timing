@@ -51,6 +51,54 @@ PYEOF
 fi
 [ "$CHANGED" = 1 ] && systemctl restart chrony 2>/dev/null
 
+# ── 2.5 identity reconciliation (relocation support) ───────────────────────
+# Stations may be staged at one site and deployed at another (rob
+# 2026-08-04: build in Scranton, deploy elsewhere). `sigmond-setup
+# --reconfigure` updates site-profile + re-renders the main configs, but
+# three places keep their own copy of grid/lat/lon and previously skipped
+# regeneration when the files existed. Reconcile them against the
+# canonical site-profile grid whenever they drift.
+CANON=$(python3 - <<'PYEOF'
+import tomllib
+try:
+    sp = tomllib.load(open('/etc/sigmond/site-profile.toml','rb'))
+    g = (sp.get('station',{}).get('grid_square') or '').strip()
+    if len(g) >= 4:
+        g6 = (g + 'mm')[:6].upper()
+        lon = (ord(g6[0])-65)*20 - 180 + int(g6[2])*2 + (ord(g6[4])-65)*(2/24) + 1/24
+        lat = (ord(g6[1])-65)*10 -  90 + int(g6[3])   + (ord(g6[5])-65)*(1/24) + 1/48
+        print("%s %.4f %.4f" % (g, lat, lon))
+except Exception:
+    pass
+PYEOF
+)
+if [ -n "$CANON" ]; then
+    set -- $CANON; G="$1"; LAT="$2"; LON="$3"
+    # hf-timestd [station]
+    if [ -f "$CFG" ] && ! grep -q "grid_square = \"$G\"" "$CFG"; then
+        sed -i -e "s|^grid_square = .*|grid_square = \"$G\"|" \
+               -e "s|^latitude = .*|latitude = $LAT|" \
+               -e "s|^longitude = .*|longitude = $LON|" "$CFG" \
+            && say "relocation: hf-timestd [station] -> $G ($LAT, $LON)"
+    fi
+    # metrology channel envs: regenerate on grid drift
+    if [ -d /etc/hf-timestd/metrology-channels ] && \
+       ! grep -q "GRID_SQUARE=$G" /etc/hf-timestd/metrology-channels/*.env 2>/dev/null; then
+        rm -rf /etc/hf-timestd/metrology-channels
+        say "relocation: metrology channel envs stale — regenerating for $G"
+        RESTART_METROLOGY=1
+    fi
+    # mag-recorder
+    MAGCFG=/etc/mag-recorder/mag-recorder-config.toml
+    if [ -f "$MAGCFG" ] && ! grep -q "grid_square      = \"$G\"" "$MAGCFG"; then
+        sed -i -e "s|^grid_square      = .*|grid_square      = \"$G\"|" \
+               -e "s|^latitude         = .*|latitude         = $LAT|" \
+               -e "s|^longitude        = .*|longitude        = $LON|" "$MAGCFG" \
+            && systemctl try-restart mag-recorder 2>/dev/null \
+            && say "relocation: mag-recorder -> $G"
+    fi
+fi
+
 # ── 3. metrology channel instances ──────────────────────────────────────────
 # env files from [station] (populated by sigmond config render) + one
 # timestd-metrology@ instance per channel. WWV/WWVH set only — CHU is off
@@ -97,8 +145,14 @@ fi
 if [ -d "$MC" ]; then
     for f in "$MC"/*.env; do
         [ -f "$f" ] || continue
-        systemctl enable --now "timestd-metrology@$(basename "$f" .env)" 2>/dev/null
+        if [ "${RESTART_METROLOGY:-0}" = 1 ]; then
+            systemctl restart "timestd-metrology@$(basename "$f" .env)" 2>/dev/null
+            systemctl enable "timestd-metrology@$(basename "$f" .env)" 2>/dev/null
+        else
+            systemctl enable --now "timestd-metrology@$(basename "$f" .env)" 2>/dev/null
+        fi
     done
+    [ "${RESTART_METROLOGY:-0}" = 1 ] && systemctl try-restart timestd-fusion 2>/dev/null
 fi
 
 # ── 4. local GNSS UBX stream → [gnss_vtec] ──────────────────────────────────
