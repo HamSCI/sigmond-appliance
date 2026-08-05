@@ -283,4 +283,7 @@ timestd profile set full >/dev/null 2>&1 && say "timestd profile: full"
 # SFTP tar cycle and silently falls back to FTP. Real fix belongs in
 # sigmond's key mint; repair here until it lands.
 id hsupload >/dev/null 2>&1 && chown -R hsupload:sigmond /etc/hs-uploader/keys 2>/dev/null
+# timestd needs the sigmond group to write the shared hs-uploader
+# watermark DB from CLI paths (grape upload readonly-database, 2026-08-05)
+id timestd >/dev/null 2>&1 && getent group sigmond >/dev/null && usermod -aG sigmond timestd 2>/dev/null
 exit 0
