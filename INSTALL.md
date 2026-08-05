@@ -39,7 +39,7 @@ login screen).
 | Enable remote support access? | `Y` (recommended) |
 | PSWS station ID (optional, skip with Enter) | `S000170` |
 | — its GRAPE instrument number | `171` |
-| — magnetometer device (if any) | `RM3100` |
+| — magnetometer instrument number (if any) | `84` |
 | — magnetometer's own PSWS station (if different) | `S000082` |
 | Station name (Enter accepts the suggestion) | `AC0G-B4` |
 

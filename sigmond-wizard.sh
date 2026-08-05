@@ -150,7 +150,7 @@ ask_psws() {
     if [ -n "$PSWS_ID" ]; then
         read -r -p "  GRAPE instrument ID from the portal (e.g. 172, Enter if none): " PSWS_GRAPE
         PSWS_GRAPE=$(echo "$PSWS_GRAPE" | tr -d ' ')
-        read -r -p "  magnetometer device ID (e.g. RM3100, Enter if none): " PSWS_MAG
+        read -r -p "  magnetometer instrument number from the portal (e.g. 84, Enter if none): " PSWS_MAG
         PSWS_MAG=$(echo "$PSWS_MAG" | tr -d ' ')
         PSWS_MAG_STATION=""
         if [ -n "$PSWS_MAG" ]; then
@@ -281,6 +281,10 @@ station_id = \"$PSWS_ID\"
 \"hf-timestd\"   = \"$PSWS_GRAPE\""
     [ -n "$PSWS_MAG" ] && PSWS_TOML="$PSWS_TOML
 \"mag-recorder\" = \"$PSWS_MAG\""
+    [ -n "$PSWS_MAG_STATION" ] && PSWS_TOML="$PSWS_TOML
+
+[psws.stations]
+\"mag-recorder\" = \"$PSWS_MAG_STATION\""
     PSWS_TOML="$PSWS_TOML
 "
 fi
