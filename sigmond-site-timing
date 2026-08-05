@@ -62,12 +62,17 @@ CANON=$(python3 - <<'PYEOF'
 import tomllib
 try:
     sp = tomllib.load(open('/etc/sigmond/site-profile.toml','rb'))
-    g = (sp.get('station',{}).get('grid_square') or '').strip()
+    st = sp.get('station',{})
+    g = (st.get('grid_square') or '').strip()
     if len(g) >= 4:
-        g6 = (g + 'mm')[:6].upper()
-        lon = (ord(g6[0])-65)*20 - 180 + int(g6[2])*2 + (ord(g6[4])-65)*(2/24) + 1/24
-        lat = (ord(g6[1])-65)*10 -  90 + int(g6[3])   + (ord(g6[5])-65)*(1/24) + 1/48
-        print("%s %.4f %.4f" % (g, lat, lon))
+        # explicit coordinates (e.g. written by the GPSDO location
+        # authority) beat the grid-square centre approximation
+        lat, lon = st.get('latitude'), st.get('longitude')
+        if not (isinstance(lat,(int,float)) and isinstance(lon,(int,float))):
+            g6 = (g + 'mm')[:6].upper()
+            lon = (ord(g6[0])-65)*20 - 180 + int(g6[2])*2 + (ord(g6[4])-65)*(2/24) + 1/24
+            lat = (ord(g6[1])-65)*10 -  90 + int(g6[3])   + (ord(g6[5])-65)*(1/24) + 1/48
+        print("%s %.7f %.7f" % (g, lat, lon))
 except Exception:
     pass
 PYEOF

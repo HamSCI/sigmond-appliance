@@ -1,0 +1,93 @@
+#!/bin/bash
+# sigmond-location-check — the location authority (rob 2026-08-04/05).
+#
+# Policy: a live GPSDO position is DEFINITIVE. Operator-entered grid and
+# coordinates are bootstrap values that stand only until a GPSDO with a
+# healthy fix (re)appears — then the station re-locates itself and the
+# change propagates everywhere (Scranton staging → deployment-site truth
+# with zero operator action).
+#
+# Runs INSIDE the decoder VM; installed by sigmond-setup, ticked by the
+# SDR sentinel (~2 min). Near-free when nothing changed: one JSON read,
+# one TOML read, exit. Acts only on a fresh 2D/3D fix with >=4 sats that
+# differs from the recorded location by a new 6-char grid or >~50 m.
+set -u
+say(){ echo "[location] $*" | systemd-cat -t sigmond-location-check -p notice; }
+SP=/etc/sigmond/site-profile.toml
+[ -f "$SP" ] || exit 0
+
+OUT=$(python3 - "$SP" <<'PYEOF'
+import glob, json, sys, tomllib
+sp_path = sys.argv[1]
+best = None
+for p in sorted(glob.glob('/run/gpsdo/*.json')):
+    if p.endswith('index.json'):
+        continue
+    try:
+        d = json.load(open(p))
+    except Exception:
+        continue
+    h = d.get('health', {})
+    lat, lon = h.get('latitude'), h.get('longitude')
+    if lat is None or lon is None:
+        continue
+    if h.get('gps_fix') not in ('2D', '3D') or (h.get('sats_used') or 0) < 4:
+        continue
+    age = h.get('fix_age_sec')
+    if age is None or age > 120:
+        continue
+    best = (float(lat), float(lon))
+    break
+if not best:
+    print('NOGNSS'); raise SystemExit
+lat, lon = best
+
+def grid6(lat, lon):
+    lat += 90.0; lon += 180.0
+    return (chr(ord('A') + int(lon // 20)) + chr(ord('A') + int(lat // 10))
+            + str(int((lon % 20) // 2)) + str(int(lat % 10))
+            + chr(ord('a') + int((lon % 2) * 12)) + chr(ord('a') + int((lat % 1) * 24)))
+
+G = grid6(lat, lon)
+st = tomllib.load(open(sp_path, 'rb')).get('station', {})
+old_g = (st.get('grid_square') or '').strip()
+old_lat, old_lon = st.get('latitude'), st.get('longitude')
+moved = True
+if isinstance(old_lat, (int, float)) and isinstance(old_lon, (int, float)):
+    # ~50 m hysteresis: GPSDO jitter is metres, real moves are kilometres
+    moved = abs(lat - old_lat) > 0.0005 or abs(lon - old_lon) > 0.0005
+if old_g[:6].lower() == G.lower() and not moved:
+    print('CURRENT'); raise SystemExit
+print('UPDATE %s %.7f %.7f %s' % (G, lat, lon, old_g or '(none)'))
+PYEOF
+)
+case "$OUT" in
+  NOGNSS|CURRENT|'') exit 0 ;;
+esac
+set -- $OUT; G="$2"; LAT="$3"; LON="$4"; OLDG="$5"
+
+say "GPSDO position is authoritative: $OLDG -> $G ($LAT, $LON) — updating station identity"
+cp -p "$SP" "$SP.bak-location-$(date +%Y%m%d-%H%M%S)"
+python3 - "$SP" "$G" "$LAT" "$LON" <<'PYEOF'
+import re, sys
+p, g, lat, lon = sys.argv[1:5]
+s = open(p).read()
+def setkey(s, key, val):
+    line = f'{key} = {val}'
+    if re.search(r'(?m)^' + key + r'\s*=', s):
+        return re.sub(r'(?m)^' + key + r'\s*=\s*[^\n]*', line, s, count=1)
+    return re.sub(r'(?m)^\[station\]\s*$', '[station]\n' + line, s, count=1)
+s = setkey(s, 'grid_square', f'"{g}"   # GPSDO location authority')
+s = setkey(s, 'latitude', lat)
+s = setkey(s, 'longitude', lon)
+open(p, 'w').write(s)
+PYEOF
+
+# Propagate: coordination/env re-render, then the site-timing
+# reconciliation (timestd [station], metrology envs, mag-recorder), then
+# bounce the recorders so uploads carry the new location immediately.
+smd config render >/dev/null 2>&1 || say "WARN: config render failed after location update"
+[ -x /usr/local/sbin/sigmond-site-timing ] && /usr/local/sbin/sigmond-site-timing
+systemctl try-restart 'wspr-recorder@*' 'psk-recorder@*' 'meteor-scatter@*' 2>/dev/null
+say "location update applied and propagated: $G ($LAT, $LON)"
+exit 0

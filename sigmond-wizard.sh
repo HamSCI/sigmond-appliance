@@ -357,6 +357,12 @@ if [ -f /root/sigmond-appliance/sigmond-site-timing ]; then
 else
     say "WARN: sigmond-site-timing not staged — timing chain will need manual wiring"
 fi
+# location authority: GPSDO position is definitive over operator entry
+# (rob 2026-08-04) — ticked by the sentinel; staged from the stick
+if [ -f /root/sigmond-appliance/sigmond-location-check ]; then
+    gexec 60 "echo $(base64 -w0 /root/sigmond-appliance/sigmond-location-check) | base64 -d > /usr/local/sbin/sigmond-location-check && chmod 755 /usr/local/sbin/sigmond-location-check" \
+        || say "WARN: could not install sigmond-location-check"
+fi
 say "installing the SDR bring-up sentinel in the VM"
 SENT_B64=$(base64 -w0 <<'SENTEOF'
 #!/bin/bash
@@ -364,6 +370,8 @@ SENT_B64=$(base64 -w0 <<'SENTEOF'
 # Installed by sigmond-setup. Nothing in smd mints a radiod instance outside
 # of bringup, and nothing watches for late/replugged SDRs — this does both.
 exec 9>/run/sigmond-sdr-sentinel.lock; flock -n 9 || exit 0
+# location authority first (GPSDO definitive) — near-free when unchanged
+[ -x /usr/local/sbin/sigmond-location-check ] && /usr/local/sbin/sigmond-location-check
 ls /etc/radio/radiod@*.conf >/dev/null 2>&1 && exit 0            # already minted
 [ -s /etc/sigmond/site-profile.toml ] || exit 0                  # no identity yet
 lsusb 2>/dev/null | grep -qiE '04b4:00(f[013]|bc)|f4b3:0100' || exit 0   # no SDR

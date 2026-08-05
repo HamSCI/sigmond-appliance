@@ -240,6 +240,12 @@ KR=$($SSHN "qm guest exec $VMID --timeout 30 -- bash -lc 'cat /etc/hs-uploader/k
 echo "$KR" | grep -q TESTPRIV && echo "$KR" | grep -qE "(hsupload|root):sigmond" && echo "$KR" | grep -q TESTRSA \
     && say "site-keys restored from stick with correct ownership ✓" \
     || { say "FATAL: site-keys restore path failed"; echo "$KR" | head -5; exit 1; }
+say "── location authority: fake GPSDO announces Scranton (FN21ej)"
+LC=$($SSHN "qm guest exec $VMID --timeout 120 -- bash -lc 'test -x /usr/local/sbin/sigmond-location-check || { echo NOT-STAGED; exit 0; }; mkdir -p /run/gpsdo && printf \"{\\\"health\\\": {\\\"latitude\\\": 41.4, \\\"longitude\\\": -75.66, \\\"gps_fix\\\": \\\"3D\\\", \\\"sats_used\\\": 8, \\\"fix_age_sec\\\": 1}}\" > /run/gpsdo/TEST.json; /usr/local/sbin/sigmond-location-check; grep -E \"grid_square|latitude|longitude\" /etc/sigmond/site-profile.toml | head -3'" 2>&1)
+echo "$LC" | grep -q NOT-STAGED && { say "FATAL: sigmond-location-check not staged"; exit 1; }
+echo "$LC" | grep -q 'FN21ej' && echo "$LC" | grep -q '41.4' \
+    && say "location authority re-gridded the station from the (fake) GPSDO ✓" \
+    || { say "FATAL: location authority did not apply GPSDO position"; echo "$LC" | head -4; exit 1; }
 say "PHASE D PASS — NESTED TEST COMPLETE"
 ;;
 esac

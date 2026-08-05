@@ -138,6 +138,8 @@ WSEED=""
   || say "WARN: sigmond-site-timing missing from rig — timing chain manual"
 # operator shell helpers (tm/ll/lrt) for host + VM /etc/profile.d
 [ -f sigmond-operator.sh ] && cp sigmond-operator.sh /tmp/sigpay.$$/
+# location authority (GPSDO definitive over operator entry)
+[ -f sigmond-location-check ] && cp sigmond-location-check /tmp/sigpay.$$/
 echo "$VERSION sigmond@$SIGREV built $(date -Iseconds)" > /tmp/sigpay.$$/VERSION
 umount /tmp/sigpay.$$; rmdir /tmp/sigpay.$$
 
