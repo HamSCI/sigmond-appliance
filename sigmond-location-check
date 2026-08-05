@@ -86,7 +86,7 @@ PYEOF
 # Propagate: coordination/env re-render, then the site-timing
 # reconciliation (timestd [station], metrology envs, mag-recorder), then
 # bounce the recorders so uploads carry the new location immediately.
-smd config render >/dev/null 2>&1 || say "WARN: config render failed after location update"
+env -u SUDO_USER -u SUDO_UID -u SUDO_GID -u SUDO_COMMAND smd config render >/dev/null 2>&1 || say "WARN: config render failed after location update"
 [ -x /usr/local/sbin/sigmond-site-timing ] && /usr/local/sbin/sigmond-site-timing
 systemctl try-restart 'wspr-recorder@*' 'psk-recorder@*' 'meteor-scatter@*' 2>/dev/null
 say "location update applied and propagated: $G ($LAT, $LON)"

@@ -79,8 +79,8 @@ PYEOF
 )
 if [ -n "$CANON" ]; then
     set -- $CANON; G="$1"; LAT="$2"; LON="$3"
-    # hf-timestd [station]
-    if [ -f "$CFG" ] && ! grep -q "grid_square = \"$G\"" "$CFG"; then
+    # hf-timestd [station] — grid OR precise-coordinate drift
+    if [ -f "$CFG" ] && { ! grep -q "grid_square = \"$G\"" "$CFG" || ! grep -q "latitude = $LAT" "$CFG"; }; then
         sed -i -e "s|^grid_square = .*|grid_square = \"$G\"|" \
                -e "s|^latitude = .*|latitude = $LAT|" \
                -e "s|^longitude = .*|longitude = $LON|" "$CFG" \
@@ -88,14 +88,15 @@ if [ -n "$CANON" ]; then
     fi
     # metrology channel envs: regenerate on grid drift
     if [ -d /etc/hf-timestd/metrology-channels ] && \
-       ! grep -q "GRID_SQUARE=$G" /etc/hf-timestd/metrology-channels/*.env 2>/dev/null; then
+       { ! grep -q "GRID_SQUARE=$G" /etc/hf-timestd/metrology-channels/*.env 2>/dev/null || \
+         ! grep -q "LATITUDE=$LAT" /etc/hf-timestd/metrology-channels/*.env 2>/dev/null; }; then
         rm -rf /etc/hf-timestd/metrology-channels
         say "relocation: metrology channel envs stale — regenerating for $G"
         RESTART_METROLOGY=1
     fi
     # mag-recorder
     MAGCFG=/etc/mag-recorder/mag-recorder-config.toml
-    if [ -f "$MAGCFG" ] && ! grep -q "grid_square      = \"$G\"" "$MAGCFG"; then
+    if [ -f "$MAGCFG" ] && { ! grep -q "grid_square      = \"$G\"" "$MAGCFG" || ! grep -q "latitude         = $LAT" "$MAGCFG"; }; then
         sed -i -e "s|^grid_square      = .*|grid_square      = \"$G\"|" \
                -e "s|^latitude         = .*|latitude         = $LAT|" \
                -e "s|^longitude        = .*|longitude        = $LON|" "$MAGCFG" \
