@@ -275,6 +275,56 @@ if ls /etc/radio/radiod@*.conf >/dev/null 2>&1 && ! systemctl list-unit-files --
         || say "WARN: ka9q-web install/start failed - check smd status"
 fi
 
+# ── 4.8 precision timing tiers (T5 GPSDO PPS / T6 BPSK PPS) ─────────────────
+# The config template ships every tier above chrony DISABLED, so a fresh
+# greenfield silently runs the offset judge at T4 (found on the 2026-08-05
+# B4 v3.19 install). T5 is auto-detectable: gpsdo-monitor publishes
+# per-device JSON under /run/gpsdo when an LBE-142x is present. T6 needs
+# deliberate site hardware (WB6CXC TS-1 RF injector) AND is deliberately
+# NOT auto-enabled: the first live T6 bench run (2026-08-05) reproduced
+# the displaced-MF-peak defect (hf-timestd#7, +62 ms falseticker) — see
+# hf-timestd docs/T6-DISPLACED-PEAK-62MS-2026-08-05.md. Sites record the
+# injector frequency in site-profile [timing] bpsk_pps_hz now; this
+# script starts applying it only once #7 + the cross-bench gate land.
+if [ -f "$CFG" ]; then
+    TCHANGED=$(python3 - "$CFG" <<'PYEOF'
+import glob, json, re, shutil, sys, time, tomllib
+cfg = sys.argv[1]
+changed = []
+s = open(cfg).read()
+
+# T5: enable when gpsdo-monitor sees a Leo Bodnar with a live fix surface
+t5 = False
+for p in glob.glob('/run/gpsdo/*.json'):
+    if p.endswith('index.json'): continue
+    try: d = json.load(open(p))
+    except Exception: continue
+    if 'lbe' in (d.get('model') or d.get('product') or '').lower() or d.get('health'):
+        t5 = True; break
+cur = tomllib.load(open(cfg, 'rb')).get('timing', {})
+if t5 and not cur.get('lb1421_enabled'):
+    if re.search(r'(?m)^lb1421_enabled\s*=', s):
+        s = re.sub(r'(?m)^lb1421_enabled\s*=.*$', 'lb1421_enabled = true', s, count=1)
+    else:
+        s = re.sub(r'(?m)^(\[timing\]\n)', r'\1lb1421_enabled = true\n', s, count=1)
+    changed.append('T5')
+
+# T6: HELD OFF pending hf-timestd#7 + the judge cross-bench gate (see
+# header comment). When those land, apply the bee1-parity block here for
+# sites whose site-profile records [timing] bpsk_pps_hz.
+
+if changed:
+    shutil.copy2(cfg, cfg + '.bak-tiers-' + time.strftime('%Y%m%d-%H%M%S'))
+    open(cfg, 'w').write(s)
+print(' '.join(changed))
+PYEOF
+)
+    if [ -n "$TCHANGED" ]; then
+        say "precision timing tiers enabled: $TCHANGED - restarting core-recorder"
+        systemctl try-restart timestd-core-recorder 2>/dev/null
+    fi
+fi
+
 # ── 5. full timing profile ──────────────────────────────────────────────────
 timestd profile set full >/dev/null 2>&1 && say "timestd profile: full"
 
@@ -283,6 +333,23 @@ timestd profile set full >/dev/null 2>&1 && say "timestd profile: full"
 # SFTP tar cycle and silently falls back to FTP. Real fix belongs in
 # sigmond's key mint; repair here until it lands.
 id hsupload >/dev/null 2>&1 && chown -R hsupload:sigmond /etc/hs-uploader/keys 2>/dev/null
+# one portal key serves every consumer (rob's directive): grape looks for
+# /home/timestd/.ssh/id_rsa_psws and mag-recorder/status for keys/id_ed25519,
+# but the wizard mints (and the portal registers) keys/id_ed25519_host —
+# fan the registered key out to the expected paths (2026-08-05 B4 fix)
+HK=/etc/hs-uploader/keys/id_ed25519_host
+if [ -f "$HK" ]; then
+    if [ ! -f /etc/hs-uploader/keys/id_ed25519 ]; then
+        install -o hsupload -g sigmond -m 600 "$HK" /etc/hs-uploader/keys/id_ed25519
+        [ -f "$HK.pub" ] && install -o hsupload -g sigmond -m 644 "$HK.pub" /etc/hs-uploader/keys/id_ed25519.pub
+        say "hs-uploader key fanned out: id_ed25519"
+    fi
+    if id timestd >/dev/null 2>&1 && [ ! -f /home/timestd/.ssh/id_rsa_psws ]; then
+        install -d -o timestd -g timestd -m 700 /home/timestd/.ssh
+        install -o timestd -g timestd -m 600 "$HK" /home/timestd/.ssh/id_rsa_psws
+        say "grape PSWS key fanned out: id_rsa_psws"
+    fi
+fi
 # timestd needs the sigmond group to write the shared hs-uploader
 # watermark DB from CLI paths (grape upload readonly-database, 2026-08-05)
 id timestd >/dev/null 2>&1 && getent group sigmond >/dev/null && usermod -aG sigmond timestd 2>/dev/null
