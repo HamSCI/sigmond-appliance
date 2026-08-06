@@ -27,10 +27,26 @@ VMID="${SIGMOND_VMID:-120}"
 # RAC server: the secure HamSCI frps endpoint (TLS). Configurable via
 # environment for other deployments; the fleet default is vpn.hamsci.org
 # (replaces gw2.wsprdaemon.org, rob 2026-07-30 — dashboard + registrar
-# being stood up in parallel; until it serves, registration fails softly
-# and `sigmond-setup --reconfigure` retries later).
+# being stood up in parallel).
+#
+# "Fails softly and --reconfigure retries later" was the plan while the new
+# gateway came up, but the cost landed on the wrong side: vpn.hamsci.org:35737
+# still times out, so EVERY greenfield install since 2026-07-30 has finished
+# with RAC dead and nobody to notice until someone needs remote support
+# (found on B4, 2026-08-06 — install reported "FAILED — could not register").
+# So try the fleet default FIRST and fall back to the gateway that is still
+# serving: new installs get a working tunnel today, and they migrate to
+# vpn.hamsci.org by themselves the moment it answers.  Pinning either
+# SIGMOND_RAC_SERVER or SIGMOND_RAC_REGISTRAR disables the fallback — an
+# explicit endpoint is an instruction, not a preference.
 RAC_SERVER="${SIGMOND_RAC_SERVER:-vpn.hamsci.org}"
 RAC_REGISTRAR="${SIGMOND_RAC_REGISTRAR:-http://${RAC_SERVER}:35737/register}"
+RAC_FALLBACK_SERVER="${SIGMOND_RAC_FALLBACK_SERVER:-gw2.wsprdaemon.org}"
+if [ -n "${SIGMOND_RAC_SERVER:-}" ] || [ -n "${SIGMOND_RAC_REGISTRAR:-}" ]; then
+    RAC_CANDIDATES="$RAC_SERVER"
+else
+    RAC_CANDIDATES="$RAC_SERVER $RAC_FALLBACK_SERVER"
+fi
 MARK_DIR=/etc/sigmond-appliance
 CONF_MARK="$MARK_DIR/.configured"
 LOG=/var/log/sigmond-wizard.log
@@ -607,7 +623,17 @@ if [ -n "$RAC_NUM" ]; then
         # RAC number (sticky per site, so reconfigure keeps it), and
         # returns user/token/ports for the frpc config.
         SITE=$(echo "$REPORTER" | tr '[:lower:]' '[:upper:]' | tr '/' '_' | tr -cd 'A-Z0-9_-')
-        REG=$(python3 - "$SITE" "$(cat /root/.ssh/id_ed25519.pub)" "$RAC_REGISTRAR" <<'PYEOF' 2>>"$LOG"
+        REG=""
+        RAC_TRIED=""
+        for _cand in $RAC_CANDIDATES; do
+        if [ -n "${SIGMOND_RAC_REGISTRAR:-}" ]; then
+            _cand_reg="$SIGMOND_RAC_REGISTRAR"
+        else
+            _cand_reg="http://${_cand}:35737/register"
+        fi
+        RAC_TRIED="${RAC_TRIED:+$RAC_TRIED, }$_cand"
+        say "registering with $_cand"
+        REG=$(python3 - "$SITE" "$(cat /root/.ssh/id_ed25519.pub)" "$_cand_reg" <<'PYEOF' 2>>"$LOG"
 import json, re, sys, urllib.error, urllib.request
 site, pub, registrar = sys.argv[1], sys.argv[2], sys.argv[3]
 req = urllib.request.Request(
@@ -636,8 +662,15 @@ print("RACN=%d RUSER=%s RTOKEN=%s P_VMSSH=%d P_VMWEB=%d P_HSSH=%d P_HUI=%d SRV=%
     r["server_addr"], int(r["server_port"])))
 PYEOF
 )
+        if [ -n "$REG" ]; then
+            RAC_SERVER="$_cand"
+            RAC_REGISTRAR="$_cand_reg"
+            break
+        fi
+        say "  $_cand did not answer"
+        done
         if [ -z "$REG" ]; then
-            RAC_STATE="FAILED — could not register with $RAC_SERVER (see $LOG; the server may not be live yet), rerun: sigmond-setup --reconfigure"
+            RAC_STATE="FAILED — could not register with any gateway (tried: $RAC_TRIED; see $LOG), rerun: sigmond-setup --reconfigure"
             say "WARN: $RAC_STATE"
         else
             eval "$REG"
