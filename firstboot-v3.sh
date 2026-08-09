@@ -19,7 +19,14 @@
 set +e
 LOG=/var/log/sigmond-firstboot.log
 VERSION="@@VERSION@@"
-say(){ local m="[sigmond $(date '+%T')] $*"; echo "$m"; echo "$m" >>"$LOG" 2>/dev/null; echo "$m" >/dev/console 2>/dev/null; }
+# The one-time leading newline: getty@tty1 stays ALIVE next to firstboot, so
+# its "login:" prompt sits mid-line on the console and our first write would
+# land on that same line (mjh, v3.26 test 2026-08-09 — same bug class as the
+# wizard's first line, different actor).  Drop to a fresh line once per
+# process before the first console write.
+say(){ local m="[sigmond $(date '+%T')] $*"; echo "$m"; echo "$m" >>"$LOG" 2>/dev/null
+      [ -z "$_SAY_NL" ] && { _SAY_NL=1; printf '\n' >/dev/console 2>/dev/null; }
+      echo "$m" >/dev/console 2>/dev/null; }
 say "first-boot v3 ($VERSION): installing importer + wizard + finalizer hooks"
 mkdir -p /etc/sigmond-appliance
 echo "$VERSION" > /etc/sigmond-appliance/version
@@ -79,7 +86,9 @@ VERSION="$(cat /etc/sigmond-appliance/version 2>/dev/null || echo v3)"
 VTAG="${VERSION//./-}"
 VMID="${SIGMOND_VMID:-100}"; TPL_NAME="sigmond-decoder-template-v3.qcow2"
 APP=/root/sigmond-appliance
-say(){ local m="[sigmond $(date '+%T')] $*"; echo "$m" >>"$LOG" 2>/dev/null; echo "$m" >/dev/console 2>/dev/null; }
+say(){ local m="[sigmond $(date '+%T')] $*"; echo "$m" >>"$LOG" 2>/dev/null
+      [ -z "$_SAY_NL" ] && { _SAY_NL=1; printf '\n' >/dev/console 2>/dev/null; }
+      echo "$m" >/dev/console 2>/dev/null; }
 if qm config "$VMID" 2>/dev/null | grep -q '^scsi0:'; then exit 0; fi
 if qm status "$VMID" >/dev/null 2>&1; then qm stop "$VMID" 2>/dev/null; sleep 2; qm destroy "$VMID" --purge 2>/dev/null; fi
 MEDIA=""
@@ -225,7 +234,9 @@ LOG=/var/log/sigmond-firstboot.log
 VMID="${SIGMOND_VMID:-100}"
 APP=/root/sigmond-appliance
 SIG="$APP/sigmond"
-say(){ local m="[sigmond $(date '+%T')] $*"; echo "$m" >>"$LOG" 2>/dev/null; echo "$m" >/dev/console 2>/dev/null; }
+say(){ local m="[sigmond $(date '+%T')] $*"; echo "$m" >>"$LOG" 2>/dev/null
+      [ -z "$_SAY_NL" ] && { _SAY_NL=1; printf '\n' >/dev/console 2>/dev/null; }
+      echo "$m" >/dev/console 2>/dev/null; }
 [ -f /etc/sigmond-appliance/.configured ] || exit 0
 # defense in depth for the blank-console bug: a still-enabled wizard unit
 # kills getty@tty1 every boot via Conflicts even when its Condition fails
