@@ -39,6 +39,26 @@ SRC_ISO="$HOME/appliance/iso/proxmox-ve_9.1-1.iso"
 TPL=sigmond-decoder-template-v3.qcow2
 [ -f "$SRC_ISO" ] || { say "FATAL: $SRC_ISO missing"; exit 1; }
 [ -f "$TPL" ] || { say "FATAL: $TPL missing (build the golden VM first)"; exit 1; }
+# The wizard is versioned in HamSCI/sigmond (scripts/proxmox/sigmond-wizard.sh)
+# as of 0774d81.  Take it from the checkout rather than a local copy: it used
+# to live only in this rig, unversioned, and the whole point of putting it in
+# the repo was to stop the rig and the repo drifting.  Refuse to build from a
+# checkout whose wizard is uncommitted, and warn if the checkout is not at
+# origin/main -- the image would otherwise ship something nobody can identify.
+SIGMOND_REPO="${SIGMOND_REPO:-$HOME/appliance/repos/sigmond}"
+WIZ_SRC="$SIGMOND_REPO/scripts/proxmox/sigmond-wizard.sh"
+[ -f "$WIZ_SRC" ] || { say "FATAL: wizard missing at $WIZ_SRC"; exit 1; }
+if [ -n "$(git -C "$SIGMOND_REPO" status --porcelain -- scripts/proxmox/sigmond-wizard.sh 2>/dev/null)" ]; then
+    say "FATAL: $WIZ_SRC has uncommitted changes — commit and push first"; exit 1
+fi
+git -C "$SIGMOND_REPO" fetch origin >/dev/null 2>&1 || true
+_wiz_head=$(git -C "$SIGMOND_REPO" rev-parse --short HEAD 2>/dev/null || echo unknown)
+if [ "$(git -C "$SIGMOND_REPO" rev-parse HEAD 2>/dev/null)" \
+   != "$(git -C "$SIGMOND_REPO" rev-parse origin/main 2>/dev/null)" ]; then
+    say "WARN: sigmond checkout at $_wiz_head is not origin/main — wizard may be stale"
+fi
+cp "$WIZ_SRC" sigmond-wizard.sh
+say "wizard sourced from sigmond $_wiz_head ($(wc -l < sigmond-wizard.sh) lines)"
 [ -f sigmond-wizard.sh ] || { say "FATAL: sigmond-wizard.sh missing"; exit 1; }
 [ -f firstboot-v3.sh ] || { say "FATAL: firstboot-v3.sh missing"; exit 1; }
 
@@ -155,17 +175,28 @@ cp pve-sc-v3.iso "$IMG"
 truncate -s "$OFF" "$IMG"
 cat payload-v3.ext4 >> "$IMG"
 
-say "compress + checksum (.img.xz — the ONLY format we publish: Raspberry Pi"
-say "Imager silently writes .zst bytes RAW to the stick = unbootable, 2026-07-26)"
+# Publish the RAW .img — no compression (rob 2026-08-09).
+# Measured over v3.21/22/23: xz lands at 90.7% every time, saving ~464 MB on
+# a ~5 GB image for 2 min 36 s of build time plus the operator's decompress.
+# The payload is already-compressed data (squashfs Proxmox ISO + a compacted
+# qcow2 template), so xz grinds on incompressible bytes for 9%.
+#
+# The decisive argument is safety, not speed: compression is the direct cause
+# of the worst failure this fleet has had -- Raspberry Pi Imager writing the
+# COMPRESSED bytes verbatim to the stick, which looks written and silently
+# will not boot (hit with .zst 2026-07-26, then again with .img.xz 2026-07-27).
+# Shipping raw deletes that class outright: there is no decompress step to get
+# wrong and no GUI writer to mishandle.  wd30 can still compress on demand for
+# a slow-link site without the build or the burn path depending on it.
+say "checksum (publishing the RAW .img — no compression; see the note above)"
 rm -f "$IMG.xz"
-xz -T0 -3 -k "$IMG"
-sha256sum "$IMG" "$IMG.xz" | tee "${IMG%.img}.sha256"
-ls -la "$IMG" "$IMG.xz"
+sha256sum "$IMG" | tee "${IMG%.img}.sha256"
+ls -la "$IMG"
 
 if [ "$SHIP" = 1 ]; then
     say "SHIPPING to wd30 NOW (untested — test verdict follows separately)"
-    scp -q "$IMG.xz" "${IMG%.img}.sha256" wd30:~/ \
-        && say "shipped: wd30:~/$IMG.xz + .sha256" \
+    scp -q "$IMG" "${IMG%.img}.sha256" wd30:~/ \
+        && say "shipped: wd30:~/$IMG + .sha256" \
         || say "WARNING: ship to wd30 FAILED — ship manually"
 fi
 say "USB IMAGE BUILD COMPLETE: $VERSION ($IMG)"

@@ -1,9 +1,12 @@
 SIGMOND APPLIANCE @@VERSION@@ — QUICK START
 ===========================================
-1. Write the image to a USB stick (>=16 GB):
-     xz -dc sigmond-appliance-@@VERSION@@-*.img.zst-or-.img | sudo dd of=/dev/sdX bs=4M ...
-   or with zstd:
-     zstd -dc sigmond-appliance-@@VERSION@@-*.img.zst | sudo dd of=/dev/sdX bs=4M oflag=direct status=progress
+1. Write the image to a USB stick (>=16 GB).  The image is published
+   UNCOMPRESSED — there is nothing to decompress, just write it:
+     sudo dd if=sigmond-appliance-@@VERSION@@-*.img of=/dev/sdX bs=4M \
+             oflag=direct conv=fsync status=progress
+   Verify the stick took a real image before booting — this should say
+   "DOS/MBR boot sector":
+     sudo file -s /dev/sdX
 2. Have the RX888 (and GPSDO etc.) ALREADY CONNECTED to the target
    machine, then boot it from the USB.
    Proxmox VE installs AUTOMATICALLY — this ERASES the machine's NVMe disk.

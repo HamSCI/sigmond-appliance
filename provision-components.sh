@@ -30,8 +30,15 @@ enabled = true
 
 [component.mag-recorder]
 enabled = true
+
+# meteor-scatter is a dasi2 CORE client as of sigmond a8bc72b (2026-08-08) --
+# it was `optional` until B4's v3.21 install showed the service running while
+# neither topology.toml nor the profile that provisions it declared it.
+# Declared here so the image's topology matches the profile.
+[component.meteor-scatter]
+enabled = true
 EOF
-echo "### topology enabled: dasi2 set (radiod ka9q-web igmp-querier gpsdo-monitor hf-timestd wspr-recorder psk-recorder mag-recorder)"
+echo "### topology enabled: dasi2 set (radiod ka9q-web igmp-querier gpsdo-monitor hf-timestd wspr-recorder psk-recorder mag-recorder meteor-scatter)"
 echo "### smd install  (self-elevates; compiles ka9q-radio — long) ..."
 smd install --yes
 RC=$?

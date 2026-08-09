@@ -346,7 +346,11 @@ StandardOutput=tty
 # waits on invisible questions (black screen, 2026-07-02)
 StandardError=tty
 TTYPath=/dev/tty1
-TTYReset=yes
+# TTYReset=no ON PURPOSE: a reset blanks VT1 when the wizard exits, taking
+# the install transcript with it (rob 2026-08-09).  The wizard only ever uses
+# plain `read`, so it leaves no terminal modes behind that need resetting.
+# TTYVHangup stays — that runs at START, to take the console off getty.
+TTYReset=no
 TTYVHangup=yes
 # no auto-restart: a crash-loop re-clears the tty every cycle (black
 # screen); on any exit hand the console back to a login prompt instead
@@ -355,6 +359,21 @@ ExecStopPost=/bin/systemctl --no-block start getty@tty1.service
 [Install]
 WantedBy=multi-user.target
 WIZEOF
+
+# ── keep the console readable after the wizard exits ─────────────────────
+# The wizard hands the console back with ExecStopPost=start getty@tty1, and
+# that wipes every line sigmond just printed (rob 2026-08-09: "at the end it
+# clears the console screen so I don't get to see what it was doing").
+# agetty is NOT the culprit — Debian already passes --noclear --noreset.
+# It is systemd's TTYVTDisallocate=yes, which deallocates the VT itself.
+# So override exactly that one setting and leave ExecStart alone.
+mkdir -p /etc/systemd/system/getty@tty1.service.d
+cat > /etc/systemd/system/getty@tty1.service.d/10-sigmond-noclear.conf <<'GTEOF'
+[Service]
+# preserve the install transcript on VT1 — see sigmond-wizard.service
+TTYVTDisallocate=no
+GTEOF
+systemctl daemon-reload 2>/dev/null
 
 # ── persistent access panel on the console login screen ──────────────────
 # pvebanner.service rewrites /etc/issue at every boot, wiping anything the
@@ -382,19 +401,66 @@ except Exception: pass' 2>/dev/null)
   [ -n "$VMIP" ] && break
   sleep 10
 done
+# Is host root still on the image default?  If so we can print it outright,
+# which is the whole point of this panel — an operator who cannot type here
+# and does not know the password has no way in at all.  If it was changed we
+# must not guess, so we say where it came from instead.
+# RX888 handoff notice.  The wizard leaves a marker when it saw an RX888 on
+# the host that the VM could not see; that instruction has to survive the
+# reboot which immediately follows, so it lives here rather than only in the
+# install transcript.  Re-checked on every refresh and removed once the SDR
+# actually turns up, so it cannot linger as a stale scare.
+RXWARN=""
+if [ -f /etc/sigmond-appliance/.rx888-needs-powercycle ]; then
+    if qm guest exec "$VMID" -- /usr/bin/lsusb 2>/dev/null \
+         | grep -qiE '04b4:00(f[013]|bc)|f4b3:0100'; then
+        rm -f /etc/sigmond-appliance/.rx888-needs-powercycle
+    else
+        RXWARN=" !! RX888 NOT VISIBLE TO THE DECODER VM
+ !!   The SDR was handed to the VM part-way through its USB start-up and
+ !!   stays latched until its power is removed.  A REBOOT IS NOT ENOUGH.
+ !!   ==> Power-cycle the machine, or unplug and replug the RX888's USB
+ !!       cable.  radiod then starts by itself within about 2 minutes,
+ !!       this notice clears, and it will not happen again on later boots.
+"
+    fi
+fi
+
+PWLINE="the password you set at install"
+_h=$(awk -F: '$1=="root"{print $2}' /etc/shadow 2>/dev/null)
+case "$_h" in
+  \$*) _salt=$(echo "$_h" | cut -d'$' -f3)
+      _alg=$(echo "$_h" | cut -d'$' -f2)
+      [ "$(openssl passwd -"$_alg" -salt "$_salt" hamsci-sigmond 2>/dev/null)" = "$_h" ] \
+          && PWLINE="hamsci-sigmond   <-- image default, CHANGE IT" ;;
+esac
+
 PANEL=$(cat <<PEOF
 ════ Sigmond appliance $VERSION ${CONF:+— station ${CONF%% *}} ════
- Proxmox host:  ssh root@${HOSTIP:-<no-ip-yet>}
-                web UI  https://${HOSTIP:-<no-ip-yet>}:8006
-                password: set at install (image default hamsci-sigmond — change it!)
- Decoder VM:    ssh sigmond@${VMIP:-<vm-starting>}   (same password as host root)
-                ssh hamsci@${VMIP:-<vm-starting>}    (same password as host root)
-                from this host:  sigmond-vm     console:  qm terminal $VMID
- Wizard rerun:  sigmond-setup --reconfigure
+ THIS CONSOLE IS READ-ONLY — the keyboard does not work here.  Its USB
+ controller was passed through to the decoder VM, so nothing you type on
+ this machine registers.  Reach the station from another computer using
+ the addresses below.
+
+${RXWARN}
+ Proxmox host ${HOSTIP:-<no-ip-yet>}
+   ssh        ssh root@${HOSTIP:-<no-ip-yet>}
+   web UI     https://${HOSTIP:-<no-ip-yet>}:8006
+   login      root / $PWLINE
+
+ Decoder VM   ${VMIP:-<starting — this panel refreshes every 5 min>}
+   ssh        ssh sigmond@${VMIP:-<starting>}      (also: hamsci@)
+   ka9q-web   http://${VMIP:-<starting>}:8081
+   login      sigmond / $PWLINE
+
+ From the host over ssh:  sigmond-vm        (shell in the decoder VM)
+                          qm terminal $VMID  (its console)
+                          sigmond-setup --reconfigure   (rerun the wizard)
+════ end Sigmond panel ════
 PEOF
 )
 for f in /etc/issue /etc/motd; do
-    sed -i '/^════ Sigmond appliance /,/^ Wizard rerun:/d' "$f" 2>/dev/null
+    sed -i '/^════ Sigmond appliance /,/^════ end Sigmond panel ════/d' "$f" 2>/dev/null
     printf '%s\n\n' "$PANEL" >> "$f"
 done
 exit 0
@@ -415,7 +481,17 @@ ExecStart=/usr/local/sbin/sigmond-issue
 [Install]
 WantedBy=multi-user.target
 ISVCEOF
-systemctl daemon-reload 2>/dev/null; systemctl enable sigmond-issue.service 2>/dev/null
+cat > /etc/systemd/system/sigmond-issue.timer <<'ITEOF'
+[Unit]
+Description=Refresh the Sigmond access panel (VM address appears late; DHCP moves it)
+[Timer]
+OnBootSec=45s
+OnUnitActiveSec=5min
+[Install]
+WantedBy=timers.target
+ITEOF
+systemctl daemon-reload 2>/dev/null
+systemctl enable sigmond-issue.service sigmond-issue.timer 2>/dev/null
 
 cat > /etc/udev/rules.d/99-sigmond-import.rules <<'UDEVEOF'
 ACTION=="add", SUBSYSTEM=="block", ENV{DEVTYPE}=="disk", ENV{ID_FS_TYPE}=="iso9660", ENV{ID_FS_LABEL}=="PVE", RUN+="/usr/bin/systemctl start --no-block sigmond-import.service"
