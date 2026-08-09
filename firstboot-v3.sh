@@ -9,9 +9,10 @@
 #     the console (USB keyboard still on the host) → wizard completion
 #     triggers the FINALIZER: VM shutdown → host-apply VM-mode (grub
 #     isolcpus/IOMMU, vfio, cpu-pin hookscript, qm affinity/args, USB
-#     controller passthrough) → operator removes stick → one reboot →
+#     controller passthrough) → operator removes stick → POWER OFF →
+#     operator powers back on (the power-off is also the RX888's reset) →
 #     VM autostarts pinned with the SDR passed through.  After that
-#     reboot the host may have NO local USB input (all controllers can
+#     power-on the host may have NO local USB input (all controllers can
 #     belong to the VM) — by then nothing needs typing; sigmond-setup
 #     remains available over ssh.
 #   - decoder VM is VMID 100 (fleet convention).
@@ -267,13 +268,19 @@ fi
 touch /etc/sigmond-appliance/.finalized
 
 say "─────────────────────────────────────────────────────────"
-say " >>> REMOVE THE USB STICK NOW <<<"
-say " The system reboots into production automatically once"
-say " the stick is removed (decoder VM autostarts, pinned,"
-say " with the SDR passed through)."
+say " >>> INSTALL COMPLETE — REMOVE THE USB STICK NOW <<<"
+say " As soon as the stick is removed this machine POWERS OFF."
+say " Power it back on to finish the installation.  The full"
+say " power-off also resets the RX888 SDR, so on that power-on"
+say " the decoder VM can finally see it."
 say "─────────────────────────────────────────────────────────"
-# Rebooting with the stick in risks a BIOS USB-first loop back into the
-# PVE installer — wait for removal (up to 60 min), then reboot.
+# Wait for removal before acting (up to 60 min): booting with the stick in
+# risks a BIOS USB-first loop back into the PVE installer, and acting only
+# after removal proves the operator has read the instruction.
+# poweroff, NOT reboot (rob 2026-08-09): a warm reboot never drops VBUS, so
+# the RX888's FX3 stays latched mid-handoff and the SDR is invisible to the
+# VM.  A real power-off is the reset it needs — the operator's power-on
+# doubles as the RX888 power-cycle.
 GONE=0
 for i in $(seq 1 720); do
   GONE=1
@@ -284,11 +291,12 @@ for i in $(seq 1 720); do
   sleep 5
 done
 if [ "$GONE" = 1 ]; then
-  say "stick removed — rebooting now"
-  sleep 3; reboot
+  say "stick removed — POWERING OFF now."
+  say "Power the machine back on to finish the installation."
+  sleep 3; poweroff
 else
-  say "WARNING: stick still present after 60 min — NOT rebooting."
-  say "Remove it and run:  reboot"
+  say "WARNING: stick still present after 60 min — NOT powering off."
+  say "Remove it, run:  poweroff   — then power the machine back on."
 fi
 FINEOF
 chmod +x /usr/local/sbin/sigmond-finalize.sh
@@ -419,19 +427,22 @@ if [ -f /etc/sigmond-appliance/.rx888-needs-powercycle ]; then
         RXWARN=" !! RX888 NOT VISIBLE TO THE DECODER VM
  !!   The SDR was handed to the VM part-way through its USB start-up and
  !!   stays latched until its power is removed.  A REBOOT IS NOT ENOUGH.
- !!   ==> Power-cycle the machine, or unplug and replug the RX888's USB
- !!       cable.  radiod then starts by itself within about 2 minutes,
- !!       this notice clears, and it will not happen again on later boots.
+ !!   ==> Unplug and replug the RX888's USB cable, or power the machine
+ !!       fully OFF then on (some boards keep USB power in soft-off — if
+ !!       you already power-cycled and still see this, replug the cable).
+ !!       radiod then starts by itself within about 2 minutes, this
+ !!       notice clears, and it will not happen again on later boots.
 "
     fi
 fi
 
+# libc crypt via perl, NOT openssl passwd: Debian roots are yescrypt ($y$),
+# which openssl cannot compute — v3.25 said "the password you set at
+# install" even on a box still on the image default (mjh 2026-08-09).
 PWLINE="the password you set at install"
 _h=$(awk -F: '$1=="root"{print $2}' /etc/shadow 2>/dev/null)
 case "$_h" in
-  \$*) _salt=$(echo "$_h" | cut -d'$' -f3)
-      _alg=$(echo "$_h" | cut -d'$' -f2)
-      [ "$(openssl passwd -"$_alg" -salt "$_salt" hamsci-sigmond 2>/dev/null)" = "$_h" ] \
+  \$*) [ "$(perl -e 'print crypt($ARGV[1], $ARGV[0])' "$_h" hamsci-sigmond 2>/dev/null)" = "$_h" ] \
           && PWLINE="hamsci-sigmond   <-- image default, CHANGE IT" ;;
 esac
 
@@ -463,6 +474,20 @@ for f in /etc/issue /etc/motd; do
     sed -i '/^════ Sigmond appliance /,/^════ end Sigmond panel ════/d' "$f" 2>/dev/null
     printf '%s\n\n' "$PANEL" >> "$f"
 done
+# The files above only matter when getty (re)paints them — which it does
+# ONCE, early in boot, BEFORE this script first runs, and never again: the
+# console keyboard is dead, so no keypress can ever trigger a redraw.
+# v3.25 shipped a correct panel that no operator ever saw (mjh 2026-08-09).
+# Paint it straight onto VT1 ourselves.  Only on post-install boots: never
+# while the wizard or finalizer own the console (that would erase the
+# install transcript / the remove-the-stick instruction), and never over a
+# live console login (an untuned host still has a working keyboard).
+if [ -f /etc/sigmond-appliance/.finalized ] \
+   && ! systemctl is-active --quiet sigmond-wizard.service 2>/dev/null \
+   && ! systemctl is-active --quiet sigmond-finalize.service 2>/dev/null \
+   && ! who 2>/dev/null | grep -qw tty1; then
+    { printf '\033[H\033[2J'; printf '%s\n' "$PANEL"; } > /dev/tty1 2>/dev/null
+fi
 exit 0
 ISSEOF
 chmod +x /usr/local/sbin/sigmond-issue
