@@ -134,10 +134,16 @@ say "staging a test site-keys tarball (exercises the stick key-restore path)"
 $SSHN "mkdir -p /root/sigmond-appliance /tmp/sk/etc/hs-uploader/keys /tmp/sk/home/timestd/.ssh && echo TESTPRIV > /tmp/sk/etc/hs-uploader/keys/id_ed25519_host && echo TESTPUB > /tmp/sk/etc/hs-uploader/keys/id_ed25519_host.pub && echo TESTRSA > /tmp/sk/home/timestd/.ssh/id_rsa_psws && tar czf /root/sigmond-appliance/site-keys.tar.gz -C /tmp/sk etc home && rm -rf /tmp/sk"
 say "guest kernel + hamsci OK; running wizard with piped answers (identity N0CALL/T1 @ EM00aa)"
 # Answer sequence for the v3.29+ wizard (reporter, grid, antenna, DASI n,
-# remote-access n — keeps the nest offline-independent, PSWS id, GRAPE
-# instr, mag instr, mag station, designator default, apply).  The wizard's
-# rd() guard aborts loudly on desync instead of hanging (2026-08-11).
-printf 'N0CALL/T1\nEM00aa\nTier2 test dipole\nn\nn\nS000999\n172\n84\nS000998\n\nY\n' | $SSHN "sigmond-setup" 2>&1 | tail -40
+# remote-access n, PSWS id, GRAPE instr, mag instr, mag station,
+# designator default, apply).  PACED 2 s apart: a burst delivered at t=0
+# races an early transient stdin reader in the wizard and loses exactly
+# one line (2026-08-11 hunt; under strace the theft vanishes).  Paced
+# answers arrive after their prompts exist — like an operator typing.
+# The wizard's rd() guard aborts loudly on any future desync.
+for _a in 'N0CALL/T1' 'EM00aa' 'Tier2 test dipole' 'n' 'n' 'S000999' '172' '84' 'S000998' '' 'Y'; do
+    printf '%s
+' "$_a"; sleep 2
+done | $SSHN "sigmond-setup" 2>&1 | tail -40
 MARK_OK=0
 for i in $(seq 1 12); do
     $SSHN "test -f /etc/sigmond-appliance/.configured" 2>/dev/null && { MARK_OK=1; break; }
