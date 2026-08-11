@@ -81,7 +81,7 @@ sed -e "s|@@VERSION@@|${VERSION}|g" -e "s|@@VTAG@@|${VTAG}|g" QUICKSTART.txt > Q
 sed -e 's|SIGMOND_VMID:-120|SIGMOND_VMID:-100|g' \
     -e 's|"SIGMOND_VMID", "120"|"SIGMOND_VMID", "100"|g' sigmond-wizard.sh > sigmond-wizard-rendered.sh
 if grep -q '120' sigmond-wizard-rendered.sh; then
-    grep -n '120' sigmond-wizard-rendered.sh | grep -qiv 'timeout\|sleep\|port\|freq' && say "WARN: wizard still mentions 120 somewhere — check"
+    grep -n '120' sigmond-wizard-rendered.sh | grep -qiv 'timeout\|sleep\|port\|freq\|OnUnitActiveSec' && say "WARN: wizard still mentions 120 somewhere — check"
 fi
 
 say "sigmond repo payload (host tuning scripts ride on the stick)"
