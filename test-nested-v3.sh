@@ -174,14 +174,22 @@ $SSHN "test -f /etc/sigmond/host-layout.env" && say "host-layout.env saved" || s
 
 say "detaching USB stick via QMP (device_del usbdev)"
 qmp '{"execute":"device_del","arguments":{"id":"usbdev"}}'
-say "waiting for finalizer-driven reboot (ssh drop + return, up to 10 min)"
+# v3.28+ semantics: after stick removal the appliance POWERS OFF (by
+# design — the operator's manual power-on resets the RX888's VBUS).  So:
+# wait for ssh to drop, wait for the guest to power off (qemu exits),
+# then "press the power button" — relaunch from NVMe.
+say "waiting for finalizer-driven power-off (ssh drop + qemu exit, up to 10 min)"
 DROPPED=0
 for i in $(seq 1 60); do $SSHN true 2>/dev/null || { DROPPED=1; break; }; sleep 5; done
-[ "$DROPPED" = 1 ] || { say "FATAL: nested host never rebooted after stick removal"; exit 1; }
-say "ssh dropped (rebooting); waiting for return"
-sleep 20
+[ "$DROPPED" = 1 ] || { say "FATAL: nested host never went down after stick removal"; exit 1; }
+say "ssh dropped; waiting for guest power-off (qemu exit)"
+QOFF=0
+for i in $(seq 1 36); do pgrep -f "guest=sigv[3]" >/dev/null || { QOFF=1; break; }; sleep 5; done
+[ "$QOFF" = 1 ] || { say "FATAL: guest did not power off within 3 min of ssh drop"; exit 1; }
+say "guest powered off (v3.28+ by-design); powering back on from NVMe"
+boot_vm 0 serialE-v3.log
 for i in $(seq 1 90); do $SSHN true 2>/dev/null && break; sleep 5; done
-$SSHN true 2>/dev/null || { say "FATAL: nested PVE did not come back after reboot"; exit 1; }
+$SSHN true 2>/dev/null || { say "FATAL: nested PVE did not come back after power-on"; exit 1; }
 $SSHN "grep -qw 'isolcpus=${ISOL:-}' /proc/cmdline 2>/dev/null || grep -qw isolcpus /proc/cmdline" && say "isolcpus ACTIVE on rebooted host" || say "WARN: isolcpus not in cmdline"
 say "checking VM $VMID autostart (nest has no IOMMU: hostpci start fails by design)"
 VMUP=0
