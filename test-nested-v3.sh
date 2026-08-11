@@ -205,6 +205,15 @@ fi
 say "decoder VM $VMID running pinned-config post-reboot; verifying 1:1 vCPU pinning"
 $SSHN "QP=\$(cat /var/run/qemu-server/$VMID.pid); for tid in \$(ps -T -p \$QP -o tid=); do case \"\$(cat /proc/\$tid/comm)\" in CPU*KVM) taskset -pc \$tid;; esac; done" 2>&1 | tail -8
 for i in $(seq 1 30); do $SSHN "qm agent $VMID ping" >/dev/null 2>&1 && break; sleep 10; done
+say "verifying VM account password hash matches PM root (the wizard hash-copy path)"
+RHASH=$($SSHN "getent shadow root | cut -d: -f2" 2>/dev/null)
+VHASH=$($SSHN "qm guest exec $VMID --timeout 20 -- bash -c 'getent shadow hamsci | cut -d: -f2' 2>/dev/null" | grep -o '"out-data" *: *"[^"]*"' | sed 's/.*: *"//;s/\\n"$//;s/"$//')
+if [ -n "$RHASH" ] && [ "$VHASH" = "$RHASH" ]; then
+    say "VM password hash matches PM root ✓"
+else
+    say "FATAL: VM hamsci hash does not match PM root (wizard hash-copy mangled: pm=${RHASH:0:12}... vm=${VHASH:0:12}...)"; exit 1
+fi
+
 say "verifying identity inside decoder VM (post-reboot)"
 $SSHN "qm guest exec $VMID --timeout 60 -- bash -lc 'grep -E \"reporter_id|callsign|grid\" /etc/sigmond/site-profile.toml; grep REPORTER /etc/sigmond/coordination.env; hostname'" 2>&1 | tail -8
 say "verifying two-phase PSWS enrollment in decoder VM"
