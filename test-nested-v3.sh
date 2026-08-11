@@ -137,7 +137,7 @@ say "guest kernel + hamsci OK; running wizard with piped answers (identity N0CAL
 # remote-access n — keeps the nest offline-independent, PSWS id, GRAPE
 # instr, mag instr, mag station, designator default, apply).  The wizard's
 # rd() guard aborts loudly on desync instead of hanging (2026-08-11).
-printf 'N0CALL/T1\nEM00aa\nTier2 test dipole\nn\nn\nS000999\n172\n84\nS000998\n\nY\n' | $SSHN "sigmond-setup" 2>&1 | tail -12
+printf 'N0CALL/T1\nEM00aa\nTier2 test dipole\nn\nn\nS000999\n172\n84\nS000998\n\nY\n' | $SSHN "sigmond-setup" 2>&1 | tail -40
 MARK_OK=0
 for i in $(seq 1 12); do
     $SSHN "test -f /etc/sigmond-appliance/.configured" 2>/dev/null && { MARK_OK=1; break; }
