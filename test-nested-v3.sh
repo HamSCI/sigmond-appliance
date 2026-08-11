@@ -133,7 +133,11 @@ echo "$GK" | grep -q 'hamsci' || { say "FATAL: hamsci user missing in decoder VM
 say "staging a test site-keys tarball (exercises the stick key-restore path)"
 $SSHN "mkdir -p /root/sigmond-appliance /tmp/sk/etc/hs-uploader/keys /tmp/sk/home/timestd/.ssh && echo TESTPRIV > /tmp/sk/etc/hs-uploader/keys/id_ed25519_host && echo TESTPUB > /tmp/sk/etc/hs-uploader/keys/id_ed25519_host.pub && echo TESTRSA > /tmp/sk/home/timestd/.ssh/id_rsa_psws && tar czf /root/sigmond-appliance/site-keys.tar.gz -C /tmp/sk etc home && rm -rf /tmp/sk"
 say "guest kernel + hamsci OK; running wizard with piped answers (identity N0CALL/T1 @ EM00aa)"
-printf 'N0CALL/T1\nEM00aa\nTier2 test dipole\n\nS000999\n172\nRM3100\nS000998\n\nY\n' | $SSHN "sigmond-setup" 2>&1 | tail -12
+# Answer sequence for the v3.29+ wizard (reporter, grid, antenna, DASI n,
+# remote-access n — keeps the nest offline-independent, PSWS id, GRAPE
+# instr, mag instr, mag station, designator default, apply).  The wizard's
+# rd() guard aborts loudly on desync instead of hanging (2026-08-11).
+printf 'N0CALL/T1\nEM00aa\nTier2 test dipole\nn\nn\nS000999\n172\n84\nS000998\n\nY\n' | $SSHN "sigmond-setup" 2>&1 | tail -12
 MARK_OK=0
 for i in $(seq 1 12); do
     $SSHN "test -f /etc/sigmond-appliance/.configured" 2>/dev/null && { MARK_OK=1; break; }

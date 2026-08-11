@@ -22,31 +22,106 @@
 # Subcommands: --reconfigure   rerun the wizard (RAC number is sticky)
 #              --rac-off       drop the remote-access tunnel (config kept)
 #              --rac-on        bring it back up
+#              --rac-upgrade   climb to a more secure gateway tier if one
+#                              has since come up (see the RAC ladder below)
 set -u
 VMID="${SIGMOND_VMID:-120}"
-# RAC server: the secure HamSCI frps endpoint (TLS). Configurable via
-# environment for other deployments; the fleet default is vpn.hamsci.org
-# (replaces gw2.wsprdaemon.org, rob 2026-07-30 — dashboard + registrar
-# being stood up in parallel).
+# ── RAC endpoint ladder ────────────────────────────────────────────────
+# Two policies, split on whether this is a DASI station (rob 2026-08-09):
 #
-# "Fails softly and --reconfigure retries later" was the plan while the new
-# gateway came up, but the cost landed on the wrong side: vpn.hamsci.org:35737
-# still times out, so EVERY greenfield install since 2026-07-30 has finished
-# with RAC dead and nobody to notice until someone needs remote support
-# (found on B4, 2026-08-06 — install reported "FAILED — could not register").
-# So try the fleet default FIRST and fall back to the gateway that is still
-# serving: new installs get a working tunnel today, and they migrate to
-# vpn.hamsci.org by themselves the moment it answers.  Pinning either
-# SIGMOND_RAC_SERVER or SIGMOND_RAC_REGISTRAR disables the fallback — an
-# explicit endpoint is an instruction, not a preference.
-RAC_SERVER="${SIGMOND_RAC_SERVER:-vpn.hamsci.org}"
-RAC_REGISTRAR="${SIGMOND_RAC_REGISTRAR:-http://${RAC_SERVER}:35737/register}"
-RAC_FALLBACK_SERVER="${SIGMOND_RAC_FALLBACK_SERVER:-gw2.wsprdaemon.org}"
-if [ -n "${SIGMOND_RAC_SERVER:-}" ] || [ -n "${SIGMOND_RAC_REGISTRAR:-}" ]; then
-    RAC_CANDIDATES="$RAC_SERVER"
-else
-    RAC_CANDIDATES="$RAC_SERVER $RAC_FALLBACK_SERVER"
-fi
+#   dasi      Prefer the HamSCI gateway, and rather than finish with no
+#             remote access at all, walk all the way down to an unsecured
+#             tunnel.  These boxes sit in a physically secure location, and
+#             a station nobody can reach is a station nobody can support.
+#   standard  Ordinary WsprDaemon-group installs never touch vpn.hamsci.org
+#             and are secure-only — no unsecured fallback, ever.
+#
+# I flagged that silently downgrading to an unsecured transport is a genuine
+# weakening; rob scoped it to DASI deliberately rather than dropping it, and
+# every tier below announces itself on the console and in $LOG.
+#
+# Why a ladder at all: vpn.hamsci.org's secure stack has never answered, so
+# EVERY greenfield install since 2026-07-30 finished with RAC dead and nobody
+# noticed until someone needed remote support (found on B4, 2026-08-06).
+#
+# What secure/unsecured actually MEANS (mjh 2026-08-09, correcting the
+# v3.25/v3.26 guess): it is the frps TUNNEL port —
+#   secure    = TLS frps on 35736 + frpc [transport.tls] with the pinned CA
+#   unsecured = legacy plain frps on 35735 + TLS off
+# The REGISTRAR (account-creation API) is a separate, tier-independent thing:
+# plain http on 35737, the only registrar either gateway serves.  v3.25/26
+# implemented "secure" as an https registrar on 35737 — nothing serves that,
+# so every install quietly fell through to an unsecured rung.
+#
+# Tier fields:  label|server|registrar|tls|frps_port
+#
+# DASI stations get a REGISTRAR-LESS rung (rob 2026-08-09): both gateways
+# keep their registration pages WireGuard-only by policy (exposing them
+# publicly is a hole rob won't open — gw2's :35737 is firewalled to known
+# sites), so a greenfield DASI box cannot self-register with the HamSCI
+# gateway.  Instead DASI-N maps DETERMINISTICALLY to RAC 220+N (DASI-001 ->
+# RAC #221) and to the standard port bands, and "is it free?" is answered
+# by ATTEMPTING the tunnel — frps refuses a taken name/port — never by
+# probing.  Port bands measured live on gw2 (RAC #151, 2026-08-09):
+RAC_BASE_VMSSH=35800; RAC_BASE_VMWEB=45800
+RAC_BASE_HSSH=50800;  RAC_BASE_HUI=55800
+# Profile + DASI number stick across --reconfigure via /etc/sigmond-appliance.
+RAC_PROFILE="${SIGMOND_RAC_PROFILE:-$(cat /etc/sigmond-appliance/rac-profile 2>/dev/null || echo dasi)}"
+DASI_NUM="${SIGMOND_DASI_NUMBER:-$(cat /etc/sigmond-appliance/dasi-number 2>/dev/null)}"
+HAMSCI_TOKEN="${SIGMOND_RAC_HAMSCI_TOKEN:-}"
+RAC_REG_PORT="${SIGMOND_RAC_REG_PORT:-35737}"
+RAC_PORT_SECURE="${SIGMOND_RAC_PORT_SECURE:-35736}"
+RAC_PORT_UNSEC="${SIGMOND_RAC_PORT_UNSECURED:-35735}"
+_hs="vpn.hamsci.org"
+_wd="gw2.wsprdaemon.org"
+build_rac_tiers() {
+    case "$RAC_PROFILE" in
+        standard)
+            RAC_TIERS="wsprdaemon (secure)|$_wd|http://$_wd:$RAC_REG_PORT/register|on|$RAC_PORT_SECURE"
+            ;;
+        *)
+            if [ -n "$DASI_NUM" ]; then
+                # vpn.hamsci.org runs frps-secure on 35736 with account-less
+                # TOFU auth (verified end-to-end 2026-08-09): no registrar,
+                # no Linux accounts — the station's pubkey rides the login as
+                # metadata and is trusted-on-first-use, keyed by DASI id.
+                # DIRECT = deterministic RAC/ports claimed by ATTEMPT.
+                # tls=opp: encrypted against the self-signed cert without
+                # pinning; graduates to tls=on when the VPN gets a fleet-CA
+                # cert (one tier-table field).  No token needed (pubkey is
+                # the gate; the server's auth.token is empty).
+                # Rung 2 (unsecured VPN) is the interim path that works TODAY:
+                # vpn's legacy frps on 35735 is open (empty token, no plugin),
+                # reachable through the firewall now, so a DASI box gets a
+                # HamSCI tunnel before 35736 is opened.  Same DIRECT
+                # deterministic RAC/ports + pubkey metadata; tls=off means the
+                # pubkey rides but isn't verified there — the shared-open port
+                # is the admission, a working tunnel the point (proven from
+                # the AI6VN box 2026-08-09).  --rac-upgrade climbs to the TOFU
+                # rung once 35736 opens.
+                RAC_TIERS="HamSCI secure (TOFU)|$_hs|DIRECT|opp|$RAC_PORT_SECURE
+HamSCI unsecured (direct)|$_hs|DIRECT|off|$RAC_PORT_UNSEC
+wsprdaemon (secure)|$_wd|http://$_wd:$RAC_REG_PORT/register|on|$RAC_PORT_SECURE
+wsprdaemon (UNSECURED)|$_wd|http://$_wd:$RAC_REG_PORT/register|off|$RAC_PORT_UNSEC"
+            else
+                RAC_TIERS="HamSCI (secure)|$_hs|http://$_hs:$RAC_REG_PORT/register|on|$RAC_PORT_SECURE
+HamSCI (UNSECURED)|$_hs|http://$_hs:$RAC_REG_PORT/register|off|$RAC_PORT_UNSEC
+wsprdaemon (secure)|$_wd|http://$_wd:$RAC_REG_PORT/register|on|$RAC_PORT_SECURE
+wsprdaemon (UNSECURED)|$_wd|http://$_wd:$RAC_REG_PORT/register|off|$RAC_PORT_UNSEC"
+            fi
+            ;;
+    esac
+    # An explicitly pinned endpoint is an instruction, not a preference: it
+    # replaces the ladder outright rather than becoming its first rung.
+    if [ -n "${SIGMOND_RAC_SERVER:-}" ] || [ -n "${SIGMOND_RAC_REGISTRAR:-}" ]; then
+        _ps="${SIGMOND_RAC_SERVER:-$_wd}"
+        RAC_TIERS="pinned|$_ps|${SIGMOND_RAC_REGISTRAR:-http://$_ps:$RAC_REG_PORT/register}|${SIGMOND_RAC_TLS:-on}|${SIGMOND_RAC_FRPS_PORT:-$RAC_PORT_SECURE}"
+    fi
+}
+build_rac_tiers
+RAC_SERVER="$(echo "$RAC_TIERS" | head -1 | cut -d'|' -f2)"
+RAC_TLS="on"
+RAC_TIER_LABEL=""
 MARK_DIR=/etc/sigmond-appliance
 CONF_MARK="$MARK_DIR/.configured"
 LOG=/var/log/sigmond-wizard.log
@@ -62,6 +137,46 @@ case "${1:-}" in
         say "remote access (RAC) disabled — tunnel is down, config kept."
         say "re-enable any time:  sigmond-setup --rac-on"
         exit 0;;
+    --rac-upgrade)
+        # rob 2026-08-09: a station that had to settle for a lower tier should
+        # be able to climb once a better gateway comes up, without a rebuild.
+        # This probes the ladder top-down and only acts if something strictly
+        # better than the current tier answers.
+        CUR=$(cat "$MARK_DIR/rac-tier" 2>/dev/null || echo "(none)")
+        echo "current RAC tier: $CUR"
+        echo "probing the ladder, best first:"
+        BEST=""; BEST_LBL=""
+        while IFS='|' read -r _l _c _r _t _p; do
+            [ -n "$_c" ] || continue
+            # a tier is up iff its frps TUNNEL port answers (35736 TLS /
+            # 35735 legacy); the registrar is shared and proves nothing
+            if timeout 5 bash -c "exec 3<>/dev/tcp/$_c/$_p" 2>/dev/null; then
+                echo "  $_l — ANSWERS ($_c:$_p)"
+                [ -z "$BEST" ] && { BEST="$_r"; BEST_LBL="$_l"; }
+            else
+                echo "  $_l — no answer ($_c:$_p)"
+            fi
+        done <<TIEREOF
+$RAC_TIERS
+TIEREOF
+        if [ -z "$BEST" ]; then
+            echo "no gateway tier is reachable right now — nothing to do."
+            exit 1
+        fi
+        if [ "$BEST_LBL" = "$CUR" ]; then
+            echo "already on the best tier that answers ($CUR) — nothing to do."
+            exit 0
+        fi
+        echo ""
+        echo "a better tier is available: $BEST_LBL  (currently $CUR)"
+        echo "re-registering re-runs the setup questions; the RAC number is sticky,"
+        echo "so the station keeps its assigned channels."
+        rd -r -p "upgrade now? [y/N] " _u
+        case "${_u:-N}" in
+            [Yy]*) exec "$0" --reconfigure ;;
+            *) echo "left on $CUR; run this again any time." ; exit 0 ;;
+        esac
+        ;;
     --rac-on)
         if [ ! -f /etc/sigmond/frpc-host.toml ]; then
             say "no RAC config on this host yet — run: sigmond-setup --reconfigure"
@@ -92,6 +207,11 @@ if ! qm agent "$VMID" ping >/dev/null 2>&1; then
     exit 1
 fi
 
+# rd — read that ABORTS on EOF instead of letting a validation loop spin
+# forever when piped stdin runs dry (nested-test hang, 2026-08-11).  On a
+# live tty read only fails on EOF (Ctrl-D), where aborting is also right.
+rd(){ read "$@" || { echo; say "stdin closed (EOF) — aborting wizard; nothing applied. Rerun: sigmond-setup"; exit 1; }; }
+
 gexec(){ # gexec <timeout-s> <command...>  → runs in guest, echoes exitcode
     local t="$1"; shift
     local out rc
@@ -113,10 +233,107 @@ echo "  Sigmond station setup — a few questions and you're on the air"
 echo "  (you'll get a review screen to fix any answer before it's applied)"
 echo "──────────────────────────────────────────────────────"
 
+# ── external-device pre-flight ─────────────────────────────────────────────
+# Runs BEFORE the questions.  USB controller passthrough to the VM is
+# configured by firstboot AFTER this wizard (and needs a reboot), so at this
+# moment every external device is on the PROXMOX HOST — host lsusb is the
+# right place to look, not `gexec lsusb`.
+#
+# This NEVER blocks.  A station with nothing plugged in must still reach the
+# end of the wizard, because the single most valuable outcome of a failed
+# install is a working RAC tunnel: it lets a remote admin connect and finish
+# the job.  So we report what is missing, plainly, and carry on.
+HAVE_GPSDO=0; HAVE_RX888=0; HAVE_TS1=0; HAVE_MAG=0; GPSDO_MODEL=""
+
+preflight_devices() {
+    local usb; usb=$(lsusb 2>/dev/null || true)
+    # RX888 — same PID set the SDR sentinel matches on (line ~397).
+    echo "$usb" | grep -qiE '04b4:00(f[013]|bc)|f4b3:0100' && HAVE_RX888=1
+    # Leo Bodnar GPSDOs, per gpsdo-monitor/models/registry.py:
+    #   LBE-1420 0x2443 · LBE-1421 0x2444 · LBE-1423 0x226f · LBE-Mini 0x2211
+    if   echo "$usb" | grep -qiE '1dd2:2211'; then HAVE_GPSDO=1; GPSDO_MODEL="LBE-Mini"
+    elif echo "$usb" | grep -qiE '1dd2:2444'; then HAVE_GPSDO=1; GPSDO_MODEL="LBE-1421"
+    elif echo "$usb" | grep -qiE '1dd2:2443'; then HAVE_GPSDO=1; GPSDO_MODEL="LBE-1420"
+    elif echo "$usb" | grep -qiE '1dd2:226f'; then HAVE_GPSDO=1; GPSDO_MODEL="LBE-1423"
+    fi
+    # TS-1 TimeSync: the USB interface enumerates as an Adafruit SAMD21
+    # module, so the VID/PID alone is not proof — confirmed by asking the
+    # CLI, which answers with a "TimeSync vN.N, Board ID #..." banner.
+    echo "$usb" | grep -qiE '239a:801e' && HAVE_TS1=1
+    # RM3100 magnetometer via the Pololu isolated USB-I2C adapter.
+    echo "$usb" | grep -qiE '1ffb:250[23]' && HAVE_MAG=1
+
+    echo ""
+    echo "  ── Attached equipment ───────────────────────────────"
+    if [ "$HAVE_RX888" = 1 ]; then echo "  ✓ RX888 SDR"
+    else echo "  ✗ RX888 SDR          — NOT DETECTED (no HF reception until fitted)"; fi
+    if [ "$HAVE_GPSDO" = 1 ]; then echo "  ✓ GPSDO ($GPSDO_MODEL)"
+    else echo "  ✗ GPSDO              — NOT DETECTED (timing falls back to NTP)"; fi
+    if [ "$HAVE_TS1" = 1 ]; then echo "  ✓ TS-1 TimeSync injector"
+    else echo "  ✗ TS-1 TimeSync      — NOT DETECTED (no ns-class timing)"; fi
+    if [ "$HAVE_MAG" = 1 ]; then echo "  ✓ RM3100 magnetometer"
+    else echo "  ✗ RM3100 magnetometer — NOT DETECTED (no magnetometer data)"; fi
+
+    if [ "$HAVE_RX888" = 0 ] || [ "$HAVE_GPSDO" = 0 ] || [ "$HAVE_TS1" = 0 ] || [ "$HAVE_MAG" = 0 ]; then
+        echo ""
+        echo "  Missing equipment does not stop this install.  The station will"
+        echo "  come up with whatever is fitted, and anything added later is"
+        echo "  picked up automatically (the SDR sentinel watches for a late or"
+        echo "  replugged RX888).  Setup continues."
+    fi
+    echo "──────────────────────────────────────────────────────"
+}
+
+# ── GPSDO → Maidenhead ─────────────────────────────────────────────────────
+# gpsdo-monitor computes this properly (nmea.py maidenhead(), and its own
+# comment says the position exists for "the station's grid square at install
+# time") — but it lives in the decoder VM, which cannot see the GPSDO until
+# passthrough happens after this wizard.  So read NMEA straight off the
+# device here.  This value is only the PROMPT DEFAULT; the authoritative
+# position is re-asserted from the GPSDO after bring-up by
+# sigmond-location-check ("location authority first (GPSDO definitive)").
+gpsdo_grid() {
+    [ "$HAVE_GPSDO" = 1 ] || return 1
+    # Find the GPSDO's OWN serial node.  Never walk /dev/ttyACM* blindly:
+    # on a DASI2 box ttyACM0 is usually the TS-1 TimeSync CLI, and opening
+    # a CDC port asserts DTR -- that is how the TS-1's console was wedged
+    # during testing on 2026-08-08.  gpsdo-monitor solves this the same way
+    # (nmea.py: "Return /dev/ttyACM* nodes whose owning USB device matches").
+    local port=""
+    for cand in /dev/serial/by-id/*Leo_Bodnar*; do
+        [ -e "$cand" ] || continue
+        port=$(readlink -f "$cand"); break
+    done
+    # LBE-Mini (0x2211) is HID-only -- UBX on interrupt-IN, no serial node
+    # at all (verified on a v3.22 install: bInterfaceClass 3, 1 endpoint).
+    # Nothing to parse here; the VM sets the grid later from the real
+    # gpsdo-monitor, which speaks UBX properly.
+    [ -n "$port" ] || return 1
+    # -hupcl and clocal suppress the DTR toggle on open.
+    stty -F "$port" 9600 raw -echo clocal -hupcl 2>/dev/null || true
+    local sentence
+    sentence=$(timeout 6 grep -m1 -E '^\$G[PNLA]RMC,' < "$port" 2>/dev/null || true)
+    [ -n "$sentence" ] || return 1
+    # Field layout per gpsdo-monitor/nmea.py:
+    #   $xxRMC,utc,status,lat,N/S,lon,E/W,sog,cog,date,magvar,...
+    echo "$sentence" | awk -F, '
+        $3 != "A" { exit 1 }
+        {
+          lat = int($4/100) + ($4 - int($4/100)*100)/60; if ($5 == "S") lat = -lat
+          lon = int($6/100) + ($6 - int($6/100)*100)/60; if ($7 == "W") lon = -lon
+          if (lat == 0 && lon == 0) exit 1
+          L = lon + 180; A = lat + 90
+          f1 = int(L/20); f2 = int(A/10)
+          s1 = int((L - f1*20)/2); s2 = int(A - f2*10)
+          u1 = int((L - f1*20 - s1*2) * 12); u2 = int((A - f2*10 - s2) * 24)
+          printf "%c%c%d%d%c%c\n", 65+f1, 65+f2, s1, s2, 97+u1, 97+u2
+        }'
+}
+
 ask_reporter() {
     REPORTER=""
     while [ -z "$REPORTER" ]; do
-        read -r -p "Reporter ID (your callsign, optionally /suffix — e.g. AC0G/B4): " REPORTER
+        rd -r -p "Reporter ID (your callsign, optionally /suffix — e.g. AC0G/B4): " REPORTER
         REPORTER=$(echo "$REPORTER" | tr '[:lower:]' '[:upper:]' | tr -d ' ')
         echo "$REPORTER" | grep -qE '^[A-Z0-9]{3,}(/[A-Z0-9]+)?$' || { echo "  ✗ that doesn't look like a callsign"; REPORTER=""; }
     done
@@ -124,26 +341,102 @@ ask_reporter() {
 }
 
 ask_grid() {
+    # Offer the GPSDO's own position as the default so the operator confirms
+    # rather than types.  Falls back to a bare prompt when there is no GPSDO,
+    # no fix yet, or the device is not on a port we can read.
+    local GRID_DEFAULT=""
+    if [ "$HAVE_GPSDO" = 1 ]; then
+        printf "Reading position from the GPSDO (%s)... " "$GPSDO_MODEL"
+        GRID_DEFAULT=$(gpsdo_grid || true)
+        if [ -n "$GRID_DEFAULT" ]; then
+            echo "$GRID_DEFAULT"
+        else
+            echo "not readable here"
+            # Either an LBE-Mini (HID/UBX only, no serial node) or no fix
+            # yet.  Not a problem: sigmond-location-check runs before
+            # bring-up and treats a live GPSDO position as DEFINITIVE,
+            # rewriting site-profile grid/lat/lon and propagating to
+            # hf-timestd, the metrology envs and mag-recorder via
+            # sigmond-site-timing.  Whatever is entered now is provisional.
+            echo "  (your GPSDO will set the grid automatically after setup —"
+            echo "   the value below is only used until then)"
+        fi
+    fi
     GRID=""
     while [ -z "$GRID" ]; do
-        read -r -p "Grid square (Maidenhead, e.g. EM38ww): " GRID
+        if [ -n "$GRID_DEFAULT" ]; then
+            rd -r -p "Grid square (Maidenhead) [$GRID_DEFAULT]: " GRID
+            GRID="${GRID:-$GRID_DEFAULT}"
+        else
+            rd -r -p "Grid square (Maidenhead, e.g. EM38ww): " GRID
+        fi
         GRID=$(echo "$GRID" | tr -d ' ')
         echo "$GRID" | grep -qE '^[A-Ra-r]{2}[0-9]{2}([A-Xa-x]{2})?$' || { echo "  ✗ 4 or 6 character Maidenhead locator, please"; GRID=""; }
     done
 }
 
 ask_antenna() {
-    read -r -p "Antenna description (optional, Enter to skip): " ANTENNA
+    rd -r -p "Antenna description (optional, Enter to skip): " ANTENNA
 }
 
 ask_rac() {
     echo ""
-    echo "Remote access (RAC) is a secure reverse tunnel to the HamSCI server"
-    echo "($RAC_SERVER) so the fleet admin can reach this station for support."
-    echo "Everything — keys,"
-    echo "credentials, channel numbers — is handled automatically, and you can"
-    echo "turn it off any time with:  sigmond-setup --rac-off"
-    read -r -p "Enable remote access? [Y/n] " RAC_EN
+    # Station class decides the gateway ladder (rob 2026-08-09): DASI = the
+    # HamSCI-managed install shape, prefers vpn.hamsci.org and may walk down
+    # to an unsecured tunnel; everything else is an ordinary WsprDaemon-group
+    # station, gw2 secure ONLY.  Default follows the image profile so later
+    # image builds can flip it (SIGMOND_RAC_PROFILE=standard -> default No).
+    if [ "$RAC_PROFILE" = "standard" ]; then _dp="y/N"; else _dp="Y/n"; fi
+    rd -r -p "Is this a DASI (HamSCI) station? [$_dp] " _dq
+    _ddef="Y"; [ "$RAC_PROFILE" = "standard" ] && _ddef="N"
+    case "${_dq:-$_ddef}" in
+        [Nn]*) RAC_PROFILE="standard" ;;
+        *)     RAC_PROFILE="dasi" ;;
+    esac
+    if [ "$RAC_PROFILE" = "dasi" ]; then
+        while :; do
+            rd -r -p "DASI unit number (1-99, e.g. 3 for DASI-003${DASI_NUM:+; current $DASI_NUM}; Enter to skip): " _dn
+            _dn="${_dn:-$DASI_NUM}"
+            [ -z "$_dn" ] && break
+            echo "$_dn" | grep -qE '^[1-9][0-9]?$' && { DASI_NUM="$_dn"; break; }
+            echo "  ✗ DASI numbers are 1-99 (DASI-001 … DASI-099)"
+        done
+        if [ -n "$DASI_NUM" ]; then
+            _rn=$((220 + DASI_NUM))
+            echo "  DASI-$(printf '%03d' "$DASI_NUM") maps deterministically to RAC #$_rn:"
+            echo "    VM ssh :$((RAC_BASE_VMSSH+_rn)) · ka9q-web :$((RAC_BASE_VMWEB+_rn)) · host ssh :$((RAC_BASE_HSSH+_rn)) · host UI :$((RAC_BASE_HUI+_rn))"
+            echo "  Secure HamSCI access (vpn.hamsci.org:35736, TLS + trust-on-first-use)"
+            echo "  needs no token or account — this station's key is filed on first connect."
+        else
+            echo "  No DASI number — the secure HamSCI rung is skipped; falling back to gw2."
+        fi
+    fi
+    build_rac_tiers
+    echo ""
+    echo "Remote access (RAC) is a reverse tunnel to the fleet gateway so the"
+    echo "admin can reach this station for support.  Keys, credentials and"
+    echo "channel numbers are all handled automatically, and you can turn it"
+    echo "off any time with:  sigmond-setup --rac-off"
+    echo ""
+    if [ "$RAC_PROFILE" = "standard" ]; then
+        echo "  Gateway: $RAC_SERVER, secure only."
+    else
+        echo "  Gateways are tried in order, most secure first:"
+        echo "$RAC_TIERS" | while IFS='|' read -r _l _c _r _t _p; do
+            [ -n "$_c" ] && echo "    · $_l  ($_c:$_p)"
+        done
+        echo "  The tier that answers is reported at the end of the install."
+    fi
+    # When equipment is missing this is the single most valuable thing the
+    # install can still achieve: it is how someone remote reaches the station
+    # to help finish it.  Say so at the moment of the decision.
+    if [ "$HAVE_RX888" = 0 ] || [ "$HAVE_GPSDO" = 0 ] || [ "$HAVE_TS1" = 0 ] || [ "$HAVE_MAG" = 0 ]; then
+        echo ""
+        echo "  ** Some equipment was not detected (see above).  Enabling remote"
+        echo "     access is strongly recommended: it lets the fleet admin connect"
+        echo "     and help finish the install once the missing parts are fitted. **"
+    fi
+    rd -r -p "Enable remote access? [Y/n] " RAC_EN
     RAC_NUM=""
     case "${RAC_EN:-Y}" in [Nn]*) ;; *) RAC_NUM="auto";; esac
 }
@@ -156,7 +449,7 @@ ask_psws() {
     echo "banner walks you through it (no copy-paste needed on this console)."
     PSWS_ID=""
     while :; do
-        read -r -p "PSWS station ID (e.g. S000123, Enter to skip): " PSWS_ID
+        rd -r -p "PSWS station ID (e.g. S000123, Enter to skip): " PSWS_ID
         PSWS_ID=$(echo "$PSWS_ID" | tr '[:lower:]' '[:upper:]' | tr -d ' ')
         [ -z "$PSWS_ID" ] && break
         echo "$PSWS_ID" | grep -qE '^S[0-9]{6}$' && break
@@ -164,13 +457,13 @@ ask_psws() {
     done
     PSWS_GRAPE=""; PSWS_MAG=""; PSWS_MAG_STATION=""
     if [ -n "$PSWS_ID" ]; then
-        read -r -p "  GRAPE instrument ID from the portal (e.g. 172, Enter if none): " PSWS_GRAPE
+        rd -r -p "  GRAPE instrument ID from the portal (e.g. 172, Enter if none): " PSWS_GRAPE
         PSWS_GRAPE=$(echo "$PSWS_GRAPE" | tr -d ' ')
-        read -r -p "  magnetometer instrument number from the portal (e.g. 84, Enter if none): " PSWS_MAG
+        rd -r -p "  magnetometer instrument number from the portal (e.g. 84, Enter if none): " PSWS_MAG
         PSWS_MAG=$(echo "$PSWS_MAG" | tr -d ' ')
         PSWS_MAG_STATION=""
         if [ -n "$PSWS_MAG" ]; then
-            read -r -p "  magnetometer PSWS station ID (Enter if same as $PSWS_ID): " PSWS_MAG_STATION
+            rd -r -p "  magnetometer PSWS station ID (Enter if same as $PSWS_ID): " PSWS_MAG_STATION
             PSWS_MAG_STATION=$(echo "$PSWS_MAG_STATION" | tr '[:lower:]' '[:upper:]' | tr -d ' ')
         fi
     fi
@@ -187,13 +480,39 @@ ask_names() {
     echo "Station names: the decoder VM takes the station designator and the"
     echo "Proxmox host takes designator-PM (e.g. AC0G-B4 + AC0G-B4-PM, or"
     echo "DASI2-01 + DASI2-01-PM for numbered deployments)."
-    read -r -p "Station designator [$DES_DEFAULT]: " DES
+    rd -r -p "Station designator [$DES_DEFAULT]: " DES
     DES=$(echo "${DES:-$DES_DEFAULT}" | tr -cd 'A-Za-z0-9-')
     [ -z "$DES" ] && DES="$DES_DEFAULT"
     VMNAME="$DES"
     PMNAME="$DES-PM"
 }
 
+# ── take the console cleanly ────────────────────────────────────────────
+# sigmond-wizard.service has Conflicts=getty@tty1, but systemd stops getty
+# ASYNCHRONOUSLY: getty routinely gets "login:" onto the screen just before
+# it dies.  v3.25 printed blank lines first, but blank lines can't win a
+# race — "login:" can land AFTER they've flushed, putting the banner back
+# on the login line (mjh, v3.25 test 2026-08-09).  So wait for getty@tty1
+# to actually be gone (bounded) before emitting the first byte; the leading
+# blank line then lands below whatever getty last wrote.
+for _i in $(seq 1 50); do
+    _gst=$(systemctl show -p ActiveState --value getty@tty1.service 2>/dev/null)
+    case "$_gst" in active|activating|deactivating) sleep 0.2 ;; *) break ;; esac
+done
+sleep 1
+printf '\n\n'
+echo "════════════════════════════════════════════════════════════════"
+echo "  Sigmond appliance — first-boot station setup"
+echo "════════════════════════════════════════════════════════════════"
+echo ""
+echo "  This asks a short series of questions about the station, then"
+echo "  configures the Proxmox host and the decoder VM.  Nothing is"
+echo "  applied until you confirm at the review screen."
+echo ""
+rd -r -p "  Press Enter to begin: " _ || true
+echo ""
+
+preflight_devices
 ask_reporter
 ask_grid
 ask_antenna
@@ -216,7 +535,7 @@ while :; do
     fi
     echo "  6) Names:     VM $VMNAME · Proxmox host $PMNAME"
     echo "  ─────────────────────────────────────────────────────"
-    read -r -p "Apply? [Y = apply / 1-6 = re-edit that entry / n = abort] " OK
+    rd -r -p "Apply? [Y = apply / 1-6 = re-edit that entry / n = abort] " OK
     case "${OK:-Y}" in
         1) ask_reporter;;
         2) ask_grid;;
@@ -474,6 +793,51 @@ if gexec 15 "lsusb | grep -qiE '04b4:00(f[013]|bc)|f4b3:0100'"; then
         fi
         sleep 10
     done
+elif [ "$HAVE_RX888" = 1 ]; then
+    # The pre-flight saw an RX888 on this machine, but the VM cannot.  This is
+    # the first-install USB handoff, and it is expected exactly once:
+    #
+    #   1. the host boots and enumerates the RX888 in its FX3 boot ROM
+    #      (04b4:00f3, USB 2.0) -- the host has no rx888_boot, so it sits
+    #      there claimed but unloaded;
+    #   2. firstboot binds the USB controllers to the VM and reboots;
+    #   3. the FX3 is handed across mid-state and never re-enumerates in the
+    #      guest -- no `add` uevent, so 70-rx888-boot.rules never fires
+    #      rx888_boot.service, so no firmware, so no RX888.
+    #
+    # On EVERY later boot the controllers are already assigned at boot and the
+    # host never touches the device, so the guest enumerates it cleanly.  That
+    # is why this is an install-only problem (rob, 2026-08-09).
+    #
+    # A warm reboot does NOT clear it: the FX3 stays latched as long as VBUS is
+    # maintained.  Only removing power -- or physically replugging the RX888 --
+    # resets it.  Say so plainly, because "reboot" is what an operator will try
+    # first and it will not work.
+    say ""
+    say "  ── RX888 not visible to the decoder VM ──────────────"
+    say "  An RX888 was detected on this machine, but the VM cannot see it."
+    say "  This is EXPECTED on a first install: the SDR was handed across to"
+    say "  the VM mid-state and needs its power removed to reset."
+    say ""
+    say "  ==> The installer POWERS THIS MACHINE OFF at the end of setup;"
+    say "      that power-off is exactly the reset the SDR needs (a reboot"
+    say "      would NOT be — the FX3 stays latched while USB power is held)."
+    say ""
+    say "  Nothing else needs doing — after you power back on, radiod comes up"
+    say "  automatically within ~2 min, and this will not recur on later boots."
+    say "  If the SDR STILL fails to appear then, unplug and replug the"
+    say "  RX888's USB cable (some boards keep USB power even in soft-off)."
+    say "──────────────────────────────────────────────────────"
+    RADIOD_STATE="RX888 present on the host but NOT yet visible to the VM —
+            expected on a first install; the POWER-OFF at the end of setup
+            resets it, and radiod starts automatically ~2 min after the
+            next power-on"
+    # The wizard's transcript does not survive the power-off that follows, so
+    # the operator never sees the paragraph above (rob 2026-08-09: "after the
+    # reboot I did not see any mention of the need to re-plug or power cycle").
+    # Leave a marker: the console access panel repeats the instruction on every
+    # boot, and clears it by itself once the SDR turns up.
+    : > "$MARK_DIR/.rx888-needs-powercycle"
 else
     RADIOD_STATE="NO RX888 on the VM's USB bus — plug it in (or re-seat its USB
             cable if it was already in: a wedged FX3 needs a physical replug);
@@ -625,14 +989,72 @@ if [ -n "$RAC_NUM" ]; then
         SITE=$(echo "$REPORTER" | tr '[:lower:]' '[:upper:]' | tr '/' '_' | tr -cd 'A-Z0-9_-')
         REG=""
         RAC_TRIED=""
-        for _cand in $RAC_CANDIDATES; do
-        if [ -n "${SIGMOND_RAC_REGISTRAR:-}" ]; then
-            _cand_reg="$SIGMOND_RAC_REGISTRAR"
-        else
-            _cand_reg="http://${_cand}:35737/register"
+        while IFS='|' read -r _lbl _cand _cand_reg _tls _fport; do
+        [ -n "$_cand" ] || continue
+        RAC_TRIED="${RAC_TRIED:+$RAC_TRIED, }$_lbl"
+        say "trying $_lbl — $_cand:$_fport (registrar $_cand_reg)"
+        case "$_tls" in
+            off) say "  NOTE: this tier is UNSECURED (no TLS, legacy frps)." ;;
+            opp) say "  NOTE: encrypted (TLS) but the server is unauthenticated" ;;
+        esac
+        # The tier IS its tunnel port: if no frps listens there, the tier is
+        # down no matter what the (shared) registrar would say — probe it
+        # first so a dead secure stack can't register and then fail late.
+        if ! timeout 5 bash -c "exec 3<>/dev/tcp/$_cand/$_fport" 2>/dev/null; then
+            say "  $_lbl did not answer (no frps on $_cand:$_fport)"
+            continue
         fi
-        RAC_TRIED="${RAC_TRIED:+$RAC_TRIED, }$_cand"
-        say "registering with $_cand"
+        if [ "$_cand_reg" = "DIRECT" ]; then
+            # Registrar-less DASI rung: deterministic RAC + ports, verified
+            # by ATTEMPT — a throwaway frpc claims all 4 proxies and the
+            # frps itself refuses a taken name/port.  The live tunnel (if
+            # any) is untouched: separate config, separate admin port.
+            _racn=$((220 + DASI_NUM))
+            _pvs=$((RAC_BASE_VMSSH+_racn)); _pvw=$((RAC_BASE_VMWEB+_racn))
+            _phs=$((RAC_BASE_HSSH+_racn)); _phu=$((RAC_BASE_HUI+_racn))
+            _duser="DASI-$(printf '%03d' "$DASI_NUM")"
+            say "  deterministic mapping: $_duser -> RAC #$_racn (attempting, not probing)"
+            _tf=$(mktemp /tmp/frpc-dasi-XXXXXX.toml)
+            _dtls=true; [ "$_tls" = "off" ] && _dtls=false
+            {
+                printf 'serverAddr = "%s"\nserverPort = %s\nuser = "%s"\nloginFailExit = true\n' "$_cand" "$_fport" "$_duser"
+                # the pubkey rides EVERY login as metadata — today the server
+                # ignores it; a future Login plugin on the VPN turns it into
+                # per-unit admission (TOFU) with no Linux accounts (rob).
+                printf '[metadatas]\npubkey = "%s"\nsite = "%s"\ndasi = "%s"\n' "$(cat /root/.ssh/id_ed25519.pub)" "$SITE" "$_duser"
+                # TOFU: the pubkey (above) is the credential; the server's
+                # auth.token is empty, so the client sends an empty token too.
+                printf '[auth]\nmethod = "token"\ntoken = ""\n'
+                printf '[transport.tls]\nenable = %s\n' "$_dtls"
+                printf '[webServer]\naddr = "127.0.0.1"\nport = 7502\n'
+                for _spec in "vm-ssh:12222:$_pvs" "vm-web:12223:$_pvw" "host-ssh:22:$_phs" "host-ui:8006:$_phu"; do
+                    IFS=: read -r _n _lp _rp <<<"$_spec"
+                    printf '[[proxies]]\nname = "%s-%s"\ntype = "tcp"\nlocalIP = "127.0.0.1"\nlocalPort = %s\nremotePort = %s\n' "$SITE" "$_n" "$_lp" "$_rp"
+                done
+            } > "$_tf"
+            /usr/local/sbin/frpc -c "$_tf" >>"$LOG" 2>&1 &
+            _tpid=$!
+            _drun=0; _derr=""
+            for _i in 1 2 3 4 5 6 7 8; do
+                sleep 3
+                kill -0 "$_tpid" 2>/dev/null || break
+                _api=$(curl -s http://127.0.0.1:7502/api/status 2>/dev/null)
+                _drun=$(echo "$_api" | grep -o '"status":"running"' | wc -l)
+                _derr=$(echo "$_api" | grep -o '"err":"[^"]\{1,\}"' | head -3)
+                [ "$_drun" -ge 4 ] && break
+            done
+            kill "$_tpid" 2>/dev/null; wait "$_tpid" 2>/dev/null; rm -f "$_tf"
+            if [ "$_drun" -ge 4 ]; then
+                say "  RAC #$_racn is free on $_cand — claiming it"
+                REG="RACN=$_racn RUSER=$_duser RTOKEN=$HAMSCI_TOKEN P_VMSSH=$_pvs P_VMWEB=$_pvw P_HSSH=$_phs P_HUI=$_phu SRV=$_cand SPORT=$_fport"
+            elif echo "$_derr" | grep -qi "port already"; then
+                say "  ** RAC #$_racn ports are TAKEN on $_cand — is another unit already"
+                say "  ** using DASI number $DASI_NUM?  Choose a different number via"
+                say "  ** sigmond-setup --reconfigure, or let the ladder continue below."
+            else
+                say "  HamSCI direct attempt failed (${_derr:-login refused — check the token}); see $LOG"
+            fi
+        else
         REG=$(python3 - "$SITE" "$(cat /root/.ssh/id_ed25519.pub)" "$_cand_reg" <<'PYEOF' 2>>"$LOG"
 import json, re, sys, urllib.error, urllib.request
 site, pub, registrar = sys.argv[1], sys.argv[2], sys.argv[3]
@@ -662,15 +1084,21 @@ print("RACN=%d RUSER=%s RTOKEN=%s P_VMSSH=%d P_VMWEB=%d P_HSSH=%d P_HUI=%d SRV=%
     r["server_addr"], int(r["server_port"])))
 PYEOF
 )
+        fi
         if [ -n "$REG" ]; then
             RAC_SERVER="$_cand"
             RAC_REGISTRAR="$_cand_reg"
+            RAC_TLS="$_tls"
+            RAC_PORT="$_fport"
+            RAC_TIER_LABEL="$_lbl"
             break
         fi
-        say "  $_cand did not answer"
-        done
+        say "  $_lbl frps answered on :$_fport but its registrar did not"
+        done <<TIEREOF
+$RAC_TIERS
+TIEREOF
         if [ -z "$REG" ]; then
-            RAC_STATE="FAILED — could not register with any gateway (tried: $RAC_TRIED; see $LOG), rerun: sigmond-setup --reconfigure"
+            RAC_STATE="FAILED — no gateway tier answered (tried: $RAC_TRIED; see $LOG), rerun: sigmond-setup --reconfigure"
             say "WARN: $RAC_STATE"
         else
             eval "$REG"
@@ -761,23 +1189,48 @@ SVCEOF
             systemctl daemon-reload
             systemctl enable --now sigmond-vm-ssh-relay.socket sigmond-vm-web-relay.socket >>"$LOG" 2>&1
 
+            # transport follows the tier that actually answered: a secure
+            # tier pins the fleet CA, opportunistic (opp) encrypts without
+            # pinning (server cert is self-signed — vpn.hamsci.org today),
+            # and an unsecured one has no TLS at all.
+            case "$RAC_TLS" in
+                off) RAC_TLS_BLOCK="[transport.tls]
+enable = false" ;;
+                opp) RAC_TLS_BLOCK="[transport.tls]
+enable = true" ;;
+                *)   RAC_TLS_BLOCK="[transport.tls]
+enable = true
+trustedCaFile = \"/etc/sigmond/frps-ca.crt\"" ;;
+            esac
+            # record the tier so 'sigmond-setup --rac-upgrade' can tell whether
+            # a better one has since come up
+            printf '%s\n' "$RAC_TIER_LABEL" > "$MARK_DIR/rac-tier"
+            printf '%s\n' "$RAC_REGISTRAR" > "$MARK_DIR/rac-registrar"
             say "writing /etc/sigmond/frpc-host.toml (4 channels, one tunnel)"
             cat > /etc/sigmond/frpc-host.toml <<TOMLEOF
 # Written by sigmond-setup $(date -u +%F) — RAC #$RACN (auto-assigned), site $SITE.
 # ONE frpc on the Proxmox host carries all four channels; the vm-*
 # channels ride the local relays (12222/12223) that resolve the VM's
 # current IP per connection, so this file never needs the VM's address.
+# serverPort comes from the TIER that answered (35736 TLS / 35735 legacy),
+# not from the registrar's reply — the registrar only knows the legacy stack.
 serverAddr = "$SRV"
-serverPort = $SPORT
+serverPort = ${RAC_PORT:-$SPORT}
 user = "$RUSER"
+
+# The station's pubkey rides every login as metadata (any tier): servers
+# ignore it today; a Login plugin can enforce per-unit admission (TOFU)
+# from it later — no per-client accounts needed (rob 2026-08-09).
+[metadatas]
+pubkey = "$(cat /root/.ssh/id_ed25519.pub)"
+site = "$SITE"
+dasi = "${DASI_NUM:+DASI-$(printf '%03d' "$DASI_NUM")}"
 
 [auth]
 method = "token"
 token = "$RTOKEN"
 
-[transport.tls]
-enable = true
-trustedCaFile = "/etc/sigmond/frps-ca.crt"
+$RAC_TLS_BLOCK
 
 [webServer]
 addr = "127.0.0.1"
@@ -826,7 +1279,12 @@ TOMLEOF
                 sleep 5
             done
             if [ "$RUNNING" -ge 4 ]; then
-                RAC_STATE="#$RACN live on $SRV — VM ssh :$P_VMSSH · VM web :$P_VMWEB · host ssh :$P_HSSH · Proxmox UI :$P_HUI (off: sigmond-setup --rac-off)"
+                RAC_STATE="#$RACN live on $SRV via $RAC_TIER_LABEL — VM ssh :$P_VMSSH · VM web :$P_VMWEB · host ssh :$P_HSSH · Proxmox UI :$P_HUI (off: sigmond-setup --rac-off)"
+                if [ "$RAC_TLS" = "off" ]; then
+                    RAC_STATE="$RAC_STATE
+              ** this tunnel is UNSECURED (no TLS) — the secure gateways did
+                 not answer.  Once one is available run: sigmond-setup --rac-upgrade **"
+                fi
                 echo "$RACN" > "$MARK_DIR/rac-number"
             else
                 RAC_STATE="FAILED — registered, but only $RUNNING/4 channels came up; journalctl -u sigmond-rac-host"
@@ -852,6 +1310,9 @@ elif [ -n "$PSWS_ID" ]; then
 fi
 
 echo "$REPORTER $GRID $(date -u +%F)" > "$CONF_MARK"
+# Station class + DASI number stick across --reconfigure / --rac-upgrade.
+printf '%s\n' "$RAC_PROFILE" > "$MARK_DIR/rac-profile"
+[ -n "$DASI_NUM" ] && printf '%s\n' "$DASI_NUM" > "$MARK_DIR/dasi-number"
 
 # The wizard unit must NOT stay enabled once configured: its
 # Conflicts=getty@tty1 stop job fires even when the Condition check fails
@@ -913,5 +1374,5 @@ else
     done
 fi
 echo ""
-read -r -p "Press Enter to finish (this summary stays on the login screen)... " _ 2>/dev/null || true
+rd -r -p "Press Enter to finish (this summary stays on the login screen)... " _ 2>/dev/null || true
 exit 0
