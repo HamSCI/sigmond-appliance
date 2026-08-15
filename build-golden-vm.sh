@@ -29,6 +29,11 @@ say "VM up: $($SSH hostname 2>/dev/null)"
 
 $SCP provision.sh provision-components.sh rob.pub build@127.0.0.1:
 $SCP wisdomf-ryzen5825u build@127.0.0.1:wisdomf
+# radiod's own channel-filter plans — a DIFFERENT file from wisdomf, which
+# is planned non-threaded and which radiod's threaded plans never match.
+# Without this, radiod silently runs FFTW_ESTIMATE plans (see
+# provision-components.sh).
+$SCP wisdom-radiod-plans-ryzen5825u build@127.0.0.1:wisdom-radiod-plans
 say "stage 1: bootstrap (clone HamSCI/sigmond + install.sh)"
 $SSH "chmod +x provision*.sh && setsid ./provision.sh </dev/null >/dev/null 2>&1 &"
 for i in $(seq 1 120); do $SSH "grep -q 'BOOTSTRAP DONE' provision.log" 2>/dev/null && break; sleep 15; done

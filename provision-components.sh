@@ -87,6 +87,29 @@ if [ -f "$HOME/wisdomf" ]; then
     sudo cp "$HOME/wisdomf" /etc/fftw/wisdomf
     sudo chmod 644 /etc/fftw/wisdomf
     echo "### wisdom baked post-prep: $(wc -c < /etc/fftw/wisdomf) bytes (Ryzen 5825U / fftw 3.3.10)"
+fi
+
+# radiod's OWN channel-filter plans are a separate file and a separate
+# problem.  /etc/fftw/wisdomf above is planned non-threaded, while radiod
+# calls fftwf_plan_with_nthreads() and looks for
+# /var/lib/ka9q-radio/wisdom-fftw-<ver>-threaded — so its plans missed
+# system wisdom entirely.  On a miss radiod does NOT plan slowly, it
+# silently falls back to FFTW_ESTIMATE (filter.c:105-108): suboptimal
+# forever and invisible in startup time.  AC0G-B4 2026-08-15 was running
+# estimate plans for seven transforms (cif2400 cif300 cif512 cif600
+# cob2400 cob512 cof512) on an image that "shipped the wisdom".
+# This file is the one that took B4's miss count to zero, verified via
+# /var/lib/ka9q-radio/fft.log — which radiod writes ONLY on a miss, and
+# is therefore the check to run on any new host:
+#     wc -l /var/lib/ka9q-radio/fft.log   # 0 == fully planned
+# Same silicon/FFTW-version/thread-count caveat as wisdomf; on a foreign
+# CPU FFTW ignores it and radiod falls back as before.
+if [ -f "$HOME/wisdom-radiod-plans" ]; then
+    sudo mkdir -p /var/lib/ka9q-radio
+    sudo cp "$HOME/wisdom-radiod-plans" \
+        /var/lib/ka9q-radio/wisdom-fftw-3.3.10-sse2-avx-threaded
+    sudo chmod 644 /var/lib/ka9q-radio/wisdom-fftw-3.3.10-sse2-avx-threaded
+    echo "### radiod-plan wisdom baked: $(wc -c < /var/lib/ka9q-radio/wisdom-fftw-3.3.10-sse2-avx-threaded) bytes"
 else
     echo "### WARNING: no wisdom file supplied — planner will run on first boot"
 fi
