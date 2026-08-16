@@ -121,6 +121,17 @@ cp /mnt/sig-media/sigmond-site-timing "$APP"/ 2>/dev/null
 # operator shell helpers (rob's tm/ll/lrt): host now, VM via the wizard
 cp /mnt/sig-media/sigmond-operator.sh "$APP"/ 2>/dev/null
 cp /mnt/sig-media/sigmond-location-check "$APP"/ 2>/dev/null
+# component pin manifest (Stage 3): the record of what this image was built
+# from, so a host can later answer "am I what my image says I am" without
+# reaching GitHub. Absent on any image built before this shipped -- that is
+# expected, not an error: log one line and move on. Never fail firstboot
+# over an optional file.
+if [ -f /mnt/sig-media/manifest.txt ]; then
+  install -m 0644 -o root -g root /mnt/sig-media/manifest.txt /etc/sigmond-appliance/manifest.txt \
+    && say "import: component pin manifest installed (/etc/sigmond-appliance/manifest.txt)"
+else
+  say "import: no component pin manifest on this image (built before manifest support) — drift check unavailable"
+fi
 [ -f "$APP/sigmond-operator.sh" ] && install -m 644 "$APP/sigmond-operator.sh" /etc/profile.d/sigmond-operator.sh
 # profile.d only reaches LOGIN shells — hook bash.bashrc so interactive
 # non-login shells (plain `bash`, some tmux configs) get the helpers too

@@ -245,6 +245,37 @@ say "MBR active flag on partition entry 1 (legacy AMI BIOSes refuse disks"
 say "with no 0x80 active partition — Kamrui mini PC, 2026-07-27; UEFI ignores it)"
 printf '\x80' | dd of=pve-sc-v3.iso bs=1 seek=446 conv=notrunc status=none
 
+# Component pin manifest, host copy (Stage 3, Task 1): built now, before the
+# payload, so it can ride inside it. It CANNOT carry this build's
+# image_sha256 -- that is the hash of the finished .img, which does not
+# exist until after the payload (and whatever it contains) is already
+# sealed inside it; a self-referential hash would just be a lie the moment
+# mkfs writes it. Everything else a host needs to answer "am I what my
+# image says I am" -- version, commit, tag, build time, component pins --
+# is already known here. Same gate as the Release-attached copy below
+# (manifest-raw.txt must exist and look like a real ~20-component capture,
+# not truncated); re-checked independently there too, same reasoning as the
+# sigmond/sigmond-rac tarball re-checks: the file could go stale or get
+# hand-edited between the two checks.
+say "component pin manifest (host copy, pre-payload)"
+if [ ! -f manifest-raw.txt ]; then
+    die "manifest-raw.txt missing — the golden VM build did not capture smd version (see build-golden-vm.sh output); an image cannot be blessed without a manifest. Rebuild the golden VM or fix the capture before shipping."
+fi
+NCOMP_HOST=$(grep -c '^    [A-Za-z]' manifest-raw.txt 2>/dev/null || true); NCOMP_HOST=${NCOMP_HOST:-0}
+if [ "$NCOMP_HOST" -lt 10 ]; then
+    die "manifest-raw.txt has only $NCOMP_HOST component line(s) — looks truncated, not a real ~20-component capture; refusing to ship a manifest that lies. Rebuild the golden VM."
+fi
+BUILT_UTC="$(date -u -Iseconds)"
+{
+    echo "image_version: $VERSION"
+    echo "appliance_commit: $(git -C "$REPO" rev-parse HEAD)"
+    echo "appliance_tag: $VERSION"
+    echo "built_utc: $BUILT_UTC"
+    echo
+    cat manifest-raw.txt
+} > manifest-host.txt
+say "host manifest written: manifest-host.txt ($NCOMP_HOST component rows)"
+
 say "payload ext4 (template + wizard + sigmond + rac + quickstart)"
 PAYSZ_MB=$(( $(stat -c%s "$TPL")/1048576 + $(stat -c%s sigmond.tar.gz)/1048576 + $(stat -c%s sigmond-rac.tar.gz)/1048576 + 320 ))
 rm -f payload-v3.ext4
@@ -273,6 +304,10 @@ WSEED=""
 # location authority (GPSDO definitive over operator entry)
 [ -f sigmond-location-check ] && cp sigmond-location-check /tmp/sigpay.$$/
 echo "$VERSION sigmond@$SIGREV built $(date -Iseconds)" > /tmp/sigpay.$$/VERSION
+# component pin manifest (host copy, no image_sha256 -- see above); named
+# without the versioned/timestamped prefix so firstboot never has to know
+# it, unlike the *.manifest.txt filename this build also produces below
+cp manifest-host.txt /tmp/sigpay.$$/manifest.txt
 umount /tmp/sigpay.$$; rmdir /tmp/sigpay.$$
 
 STAMP="$(date +%Y%m%d)"
@@ -313,6 +348,10 @@ ls -la "$IMG"
 # gating on both presence and row count there. This is the hard gate: no
 # manifest, or a manifest that looks truncated, means no ship. A hand-typed
 # pin drifts silently, so this file is generated only, never edited by hand.
+# This is the Release-attached copy (with image_sha256); the payload already
+# got its own copy of the same content, minus that one field, before the
+# image existed to be hashed -- see "component pin manifest (host copy..."
+# above.
 say "component pin manifest"
 if [ ! -f manifest-raw.txt ]; then
     rm -f "$IMG" "${IMG%.img}.sha256"
@@ -334,12 +373,16 @@ if [ "$NCOMP" -lt 10 ]; then
     rm -f "$IMG" "${IMG%.img}.sha256"
     die "manifest-raw.txt has only $NCOMP component line(s) — looks truncated, not a real ~20-component capture; refusing to ship a manifest that lies. Rebuild the golden VM. ($IMG and its .sha256 removed so they don't linger for the next run)"
 fi
+# Same content as the payload's manifest.txt (host copy, written earlier
+# alongside the payload build) plus the one field that copy structurally
+# cannot carry: image_sha256, the hash of this now-finished .img. $BUILT_UTC
+# is reused rather than re-stamped so the two copies agree on build time too.
 MANIFEST="${IMG%.img}.manifest.txt"
 {
     echo "image_version: $VERSION"
     echo "appliance_commit: $(git -C "$REPO" rev-parse HEAD)"
     echo "appliance_tag: $VERSION"
-    echo "built_utc: $(date -u -Iseconds)"
+    echo "built_utc: $BUILT_UTC"
     echo "image_sha256: $(cut -d' ' -f1 < "${IMG%.img}.sha256")"
     echo
     cat manifest-raw.txt
