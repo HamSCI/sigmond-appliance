@@ -345,6 +345,45 @@ NOTES="$(mktemp)"
 # heard of, and the real test-v3.log on this rig already contains
 # /srv/build/v3/... paths that a denylist would also have missed.
 #
+# Scope: the changelog body ONLY, not the whole $NOTES file. Everything
+# else written into $NOTES above -- version, image filename, sha256,
+# appliance commit, the hardcoded test-verdict line -- is produced by this
+# script from values gate 0-6 already validated; none of it can carry a
+# leak this script did not put there itself. The changelog is different:
+# `git log --oneline` output, written by humans over years, is the entire
+# reason this check exists. Scanning the whole file conflated the two and
+# was self-defeating -- a reviewer found that the boilerplate itself
+# matches the shapes below on every single run ("- Image:
+# sigmond-appliance-v3.32-...img" matches the hyphenated-hostname shape as
+# "appliance-v3", and gate 0 forces every version to start v[0-9]*, so this
+# fired structurally on 100% of releases; "test-nested-v3.sh" matched the
+# same shape as "nested-v3" regardless of version). That made the flagged
+# tier permanent friction on every release, not occasional friction on
+# real risk, which defeats round 2's entire point. Scoping to the
+# changelog body removes the self-collision by construction rather than by
+# tuning the pattern around today's boilerplate text (which would just
+# break again the next time the template's wording changes).
+#
+# I considered two other things interpolated into $NOTES and deliberately
+# did NOT bring into scope:
+#   - $PREV_TAG, in the "### Changelog since <tag>" header: also
+#     human-chosen, technically. But it's a tag already pushed and merged
+#     into origin/main (gate 1's own reachability requirement, inherited
+#     here since PREV_TAG is drawn from `git tag --merged origin/main`) --
+#     if a tag name ever leaked something, it already leaked the moment it
+#     was pushed to this public repo's ref list, independent of whether
+#     this script later echoes that name in prose. Scanning it here adds
+#     no real coverage.
+#   - the attached manifest/sha256 files themselves are NOT interpolated
+#     into the notes TEXT at all (gh attaches them as separate binary/text
+#     assets), so they're out of scope for a check about what's IN the
+#     notes. Worth flagging anyway: a manifest captured off a long-lived,
+#     drifted install (not a fresh golden template) can carry a free-text
+#     "updates since install" section with operator-written entries -- see
+#     the Task 3 report's own sample. That is a real, separate risk
+#     surface this check does not cover, because it isn't text this script
+#     writes into $NOTES.
+#
 # Two tiers, split by how often the shape is legitimately part of ordinary
 # release-note prose on this fleet vs. how bad it is to miss:
 #
@@ -371,12 +410,13 @@ NOTES="$(mktemp)"
 # The changelog is raw `git log --oneline` text, so every line starts with
 # a short hex commit hash -- and a hex hash (e.g. "aca5772") itself matches
 # the letters-then-digits hostname shape below on nearly every line,
-# drowning any real signal. Stripping that column is scoped to ONLY the
-# fenced changelog block (between the ``` markers), not the whole notes
-# file, so a coincidentally hex-looking word starting some OTHER line can
-# never be silently blinded by this -- a gap a reviewer found in the
-# previous version, which stripped it everywhere. $NOTES itself is never
-# modified; the scrubbed copy exists only inside this check.
+# drowning any real signal. Now that the scan is scoped to a file
+# containing ONLY changelog lines (see CHANGELOG_FILE below), that strip
+# can be applied to the whole file safely and simply -- there is no longer
+# any non-changelog content in the same file it could bleed into by
+# accident (the fence-toggling awk state machine from the previous version
+# existed only to guard against that, and is no longer needed once the
+# scope itself excludes non-changelog text).
 #
 # Known gaps, left as gaps deliberately rather than papered over -- human
 # review (below) is load-bearing for these, not this regex:
@@ -387,60 +427,74 @@ NOTES="$(mktemp)"
 #     (e.g. a bare API key or token) matches nothing here
 #   - a description of internal topology in plain English ("the box next
 #     to the antenna switch") matches nothing here and never will by shape
+CHANGELOG_FILE="$(mktemp)"
+printf '%s\n' "$CHANGELOG" > "$CHANGELOG_FILE"
+
 HARD_HITS=""
-FLAG_HITS=""
 add_hard_hits(){ # add_hard_hits <label> <hits>
     [ -n "$2" ] || return 0
     HARD_HITS="${HARD_HITS}${HARD_HITS:+$'\n'}-- looks like $1 (hard stop, no override):
 $2"
 }
-add_flag_hits(){ # add_flag_hits <label> <hits>
-    [ -n "$2" ] || return 0
-    FLAG_HITS="${FLAG_HITS}${FLAG_HITS:+$'\n'}-- looks like $1:
-$2"
-}
 
 # ---- hard-abort tier ----
 add_hard_hits "an IPv4 address" \
-    "$(grep -inE '[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}' "$NOTES" || true)"
+    "$(grep -inE '[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}' "$CHANGELOG_FILE" || true)"
 add_hard_hits "a user@host reference" \
-    "$(grep -inE '[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+' "$NOTES" || true)"
+    "$(grep -inE '[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+' "$CHANGELOG_FILE" || true)"
 
 if [ -n "$HARD_HITS" ]; then
-    say "FATAL: release notes contain a hard-stop leak shape -- refusing to publish. No confirmation can override this; fix the source (usually the commit message) and re-tag."
+    say "FATAL: the changelog contains a hard-stop leak shape -- refusing to publish. No confirmation can override this; fix the source (usually the commit message) and re-tag."
     printf '%s\n' "$HARD_HITS"
-    rm -f "$NOTES"
+    rm -f "$NOTES" "$CHANGELOG_FILE"
     exit 1
 fi
 
 # ---- flagged tier ----
-add_flag_hits "an absolute Unix path" \
-    "$(grep -inE '/[A-Za-z0-9_.-]{2,}' "$NOTES" || true)"
-add_flag_hits "a Windows-style path (drive letter)" \
-    "$(grep -inE '\b[A-Za-z]:\\' "$NOTES" || true)"
-add_flag_hits "a domain name (name.tld shape)" \
-    "$(grep -inE '\b[A-Za-z0-9-]{1,63}\.(com|org|net|io|edu|gov|mil|local|lan|internal|dev|app|co)\b' "$NOTES" || true)"
-# Hash-column stripping scoped to the changelog fence only -- see comment
-# block above. Toggles on each literal ``` line; only lines *inside* the
-# fence get their leading hash-shaped token removed.
-SCRUBBED_FOR_HOSTNAME_CHECK="$(awk '
-    /^```$/ { infence = !infence; print; next }
-    infence { sub(/^[0-9a-f]{7,40}[[:space:]]+/, ""); print; next }
-    { print }
-' "$NOTES")"
-add_flag_hits "a short hostname-shaped token (letters+digits)" \
-    "$(printf '%s\n' "$SCRUBBED_FOR_HOSTNAME_CHECK" | grep -inE '\b[A-Za-z]{2,}[0-9]{1,4}\b' || true)"
-add_flag_hits "a hyphenated hostname-shaped token (e.g. b4-prox)" \
-    "$(printf '%s\n' "$SCRUBBED_FOR_HOSTNAME_CHECK" | grep -inE '\b[A-Za-z]{1,6}[0-9]{1,3}-[A-Za-z0-9]{1,20}\b|\b[A-Za-z0-9]{1,20}-[A-Za-z]{1,6}[0-9]{1,3}\b' || true)"
+# Collected per DISTINCT LINE, not per occurrence: a line matching two
+# shape categories (e.g. a path that also looks like a hostname) is
+# recorded once, with both reasons attached, and counted once. A reviewer
+# caught this the hard way in the previous version: counting occurrences
+# instead of lines meant the printed tally and the number the confirmation
+# phrase required could differ from what an operator would count by eye,
+# which makes an honest, careful operator fail the confirmation on the
+# first try -- exactly the muscle-memory-proof design fighting itself.
+declare -A LINE_LABELS=()
+note_flag(){ # note_flag <label> <newline-separated "N:..." grep -n output>
+    local label="$1" hits="$2" ln
+    [ -n "$hits" ] || return 0
+    while IFS= read -r ln; do
+        [ -n "$ln" ] || continue
+        if [ -n "${LINE_LABELS[$ln]:-}" ]; then
+            LINE_LABELS[$ln]="${LINE_LABELS[$ln]}, $label"
+        else
+            LINE_LABELS[$ln]="$label"
+        fi
+    done <<< "$(printf '%s\n' "$hits" | cut -d: -f1)"
+}
 
-if [ -n "$FLAG_HITS" ]; then
-    NFLAGGED=$(printf '%s\n' "$FLAG_HITS" | grep -cE '^[0-9]+:')
-    say "$NFLAGGED line(s) flagged -- shape-based, may be false positives, but must be read before publishing:"
-    printf '%s\n' "$FLAG_HITS"
+note_flag "an absolute Unix path" \
+    "$(grep -nE '/[A-Za-z0-9_.-]{2,}' "$CHANGELOG_FILE" || true)"
+note_flag "a Windows-style path (drive letter)" \
+    "$(grep -nE '\b[A-Za-z]:\\' "$CHANGELOG_FILE" || true)"
+note_flag "a domain name (name.tld shape)" \
+    "$(grep -nE '\b[A-Za-z0-9-]{1,63}\.(com|org|net|io|edu|gov|mil|local|lan|internal|dev|app|co)\b' "$CHANGELOG_FILE" || true)"
+SCRUBBED_FOR_HOSTNAME_CHECK="$(sed -E 's/^[0-9a-f]{7,40}[[:space:]]+//' "$CHANGELOG_FILE")"
+note_flag "a short hostname-shaped token (letters+digits)" \
+    "$(printf '%s\n' "$SCRUBBED_FOR_HOSTNAME_CHECK" | grep -nE '\b[A-Za-z]{2,}[0-9]{1,4}\b' || true)"
+note_flag "a hyphenated hostname-shaped token (e.g. b4-prox)" \
+    "$(printf '%s\n' "$SCRUBBED_FOR_HOSTNAME_CHECK" | grep -nE '\b[A-Za-z]{1,6}[0-9]{1,3}-[A-Za-z0-9]{1,20}\b|\b[A-Za-z0-9]{1,20}-[A-Za-z]{1,6}[0-9]{1,3}\b' || true)"
+
+NFLAGGED=${#LINE_LABELS[@]}
+if [ "$NFLAGGED" -gt 0 ]; then
+    say "$NFLAGGED distinct changelog line(s) flagged -- shape-based, may be false positives, but must be read before publishing:"
+    for ln in $(printf '%s\n' "${!LINE_LABELS[@]}" | sort -n); do
+        printf '  line %s: %s\n    matched: %s\n' "$ln" "$(sed -n "${ln}p" "$CHANGELOG_FILE")" "${LINE_LABELS[$ln]}"
+    done
 else
-    NFLAGGED=0
-    say "leakage self-check clean (no hard-stop or flagged shapes matched)"
+    say "leakage self-check clean (changelog: no hard-stop or flagged shapes matched)"
 fi
+rm -f "$CHANGELOG_FILE"
 
 # Human confirmation -- the only backstop that covers what the shapes above
 # cannot (see "Known gaps" in the comment above). Read from /dev/tty
@@ -448,9 +502,10 @@ fi
 # input) cannot be mistaken for consent -- it fails closed instead.
 #
 # A flagged run requires a MORE deliberate confirmation than a clean run --
-# the exact count of flagged lines must appear in the typed phrase, which
-# is only possible if the operator actually looked at the count just
-# printed, rather than reflexively retyping a memorized phrase.
+# the exact count of DISTINCT flagged lines (matching what was just
+# printed) must appear in the typed phrase, which is only possible if the
+# operator actually looked at the count just printed, rather than
+# reflexively retyping a memorized phrase.
 say "----- RELEASE NOTES ($VERSION) -- read before confirming -----"
 cat "$NOTES"
 say "----- END RELEASE NOTES -----"
@@ -458,7 +513,7 @@ if [ "$NFLAGGED" -eq 0 ]; then
     PROMPT="Type exactly 'publish $VERSION' to confirm publication to $GH_REPO (anything else aborts): "
     REQUIRED="publish $VERSION"
 else
-    PROMPT="$NFLAGGED line(s) were flagged above. Type exactly 'I reviewed $NFLAGGED flagged lines, publish $VERSION' to confirm anyway (anything else aborts): "
+    PROMPT="$NFLAGGED changelog line(s) were flagged above. Type exactly 'I reviewed $NFLAGGED flagged lines, publish $VERSION' to confirm anyway (anything else aborts): "
     REQUIRED="I reviewed $NFLAGGED flagged lines, publish $VERSION"
 fi
 if ! CONFIRM="$(read -r -p "$PROMPT" REPLY < /dev/tty && echo "$REPLY")"; then
