@@ -339,65 +339,134 @@ NOTES="$(mktemp)"
 } > "$NOTES"
 
 # Leakage self-check -- SHAPES, not an enumerated list of known hostnames.
-# A denylist of known names (the previous version of this check) only ever
-# catches names someone already thought to list; a reviewer found this the
-# hard way with a hypothetical commit message naming a runner this list had
-# never heard of, and the real test-v3.log on this rig already contains
-# /srv/build/v3/... paths that a denylist would also have missed. Every
-# check below fires on a SHAPE (an absolute path, a user@host, a dotted
-# name under a real-looking TLD, an IPv4 literal, a short alnum token that
-# looks like a hostname) so it also catches names nobody has enumerated yet.
-# False positives are accepted on purpose -- Finding 1 in review: "a
-# spurious refusal costs an operator thirty seconds; a leak is permanent."
+# A denylist of known names (the version before this one) only ever catches
+# names someone already thought to list; a reviewer found this the hard way
+# with a hypothetical commit message naming a runner this list had never
+# heard of, and the real test-v3.log on this rig already contains
+# /srv/build/v3/... paths that a denylist would also have missed.
+#
+# Two tiers, split by how often the shape is legitimately part of ordinary
+# release-note prose on this fleet vs. how bad it is to miss:
+#
+#   HARD ABORT (no recourse, ever): an IPv4 literal, a user@host reference.
+#   Both are near-unambiguous evidence of a specific network identity or
+#   credential context -- release notes never legitimately need either, so
+#   there is nothing for a human to "wave through."
+#
+#   FLAGGED (human must acknowledge, deliberately): everything shape-ier
+#   than that -- absolute paths (Unix and Windows), a dotted name under a
+#   real-looking TLD, and two hostname-shaped-token heuristics. A reviewer
+#   measured the false-positive cost of treating these as hard aborts: the
+#   Unix-path shape alone fires on a meaningful fraction of ordinary commit
+#   messages on this fleet (a date like 8/16, a ratio like 20/21, a version
+#   like 3.24.0/stable, a GitHub issue URL) because this fleet's commit
+#   messages are heavy on exactly that kind of text. A hard abort with no
+#   recourse but rewriting git history trains whoever hits it first to
+#   comment the check out -- a guard that gets removed protects nothing.
+#   So these inform the human instead of replacing them: they're printed
+#   with what matched and why, and acknowledging them requires a more
+#   deliberate confirmation than a clean run (below), not just a bigger
+#   red warning the operator learns to scroll past.
 #
 # The changelog is raw `git log --oneline` text, so every line starts with
 # a short hex commit hash -- and a hex hash (e.g. "aca5772") itself matches
-# the letters-then-digits hostname shape below on every single line,
-# drowning any real signal. That column is stripped before running ONLY
-# the hostname-shape check (never before the others, and never in what
-# actually gets published -- $NOTES itself is untouched).
-LEAK_HITS=""
-add_leak_hits(){ # add_leak_hits <label> <hits>
+# the letters-then-digits hostname shape below on nearly every line,
+# drowning any real signal. Stripping that column is scoped to ONLY the
+# fenced changelog block (between the ``` markers), not the whole notes
+# file, so a coincidentally hex-looking word starting some OTHER line can
+# never be silently blinded by this -- a gap a reviewer found in the
+# previous version, which stripped it everywhere. $NOTES itself is never
+# modified; the scrubbed copy exists only inside this check.
+#
+# Known gaps, left as gaps deliberately rather than papered over -- human
+# review (below) is load-bearing for these, not this regex:
+#   - a hostname that is pure letters with no digit (or a real word used
+#     as a hostname) matches no shape here at all
+#   - IPv6 literals are not matched (IPv4 is)
+#   - a credential or identity string with no @ and no path separator
+#     (e.g. a bare API key or token) matches nothing here
+#   - a description of internal topology in plain English ("the box next
+#     to the antenna switch") matches nothing here and never will by shape
+HARD_HITS=""
+FLAG_HITS=""
+add_hard_hits(){ # add_hard_hits <label> <hits>
     [ -n "$2" ] || return 0
-    LEAK_HITS="${LEAK_HITS}${LEAK_HITS:+$'\n'}-- looks like $1:
+    HARD_HITS="${HARD_HITS}${HARD_HITS:+$'\n'}-- looks like $1 (hard stop, no override):
 $2"
 }
-add_leak_hits "an IPv4 address" \
-    "$(grep -inE '[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}' "$NOTES" || true)"
-add_leak_hits "an absolute path" \
-    "$(grep -inE '/[A-Za-z0-9_.-]{2,}' "$NOTES" || true)"
-add_leak_hits "a user@host reference" \
-    "$(grep -inE '[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+' "$NOTES" || true)"
-add_leak_hits "a domain name (name.tld shape)" \
-    "$(grep -inE '\b[A-Za-z0-9-]{1,63}\.(com|org|net|io|edu|gov|mil|local|lan|internal|dev|app|co)\b' "$NOTES" || true)"
-SCRUBBED_FOR_HOSTNAME_CHECK="$(sed -E 's/^[0-9a-f]{7,40}[[:space:]]+//' "$NOTES")"
-add_leak_hits "a short hostname-shaped token (letters+digits)" \
-    "$(printf '%s\n' "$SCRUBBED_FOR_HOSTNAME_CHECK" | grep -inE '\b[A-Za-z]{2,}[0-9]{1,4}\b' || true)"
+add_flag_hits(){ # add_flag_hits <label> <hits>
+    [ -n "$2" ] || return 0
+    FLAG_HITS="${FLAG_HITS}${FLAG_HITS:+$'\n'}-- looks like $1:
+$2"
+}
 
-if [ -n "$LEAK_HITS" ]; then
-    say "FATAL: release notes leakage self-check failed -- refusing to publish."
-    printf '%s\n' "$LEAK_HITS"
+# ---- hard-abort tier ----
+add_hard_hits "an IPv4 address" \
+    "$(grep -inE '[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}' "$NOTES" || true)"
+add_hard_hits "a user@host reference" \
+    "$(grep -inE '[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+' "$NOTES" || true)"
+
+if [ -n "$HARD_HITS" ]; then
+    say "FATAL: release notes contain a hard-stop leak shape -- refusing to publish. No confirmation can override this; fix the source (usually the commit message) and re-tag."
+    printf '%s\n' "$HARD_HITS"
     rm -f "$NOTES"
     exit 1
 fi
-say "leakage self-check clean (shape-based: IPv4, absolute path, user@host, domain-name, hostname-shaped token)"
 
-# Human confirmation -- the leakage self-check is shape-based and will
-# never cover every way a real host, path, or name could appear in free
-# text (a nickname, an abbreviation, a nonstandard TLD, plain English
-# description of internal topology). The only backstop that covers the
-# rest is a person actually reading the text about to go public. Read from
-# /dev/tty explicitly so a non-interactive invocation (cron, CI, a script
-# piping input) cannot be mistaken for consent -- it fails closed instead.
+# ---- flagged tier ----
+add_flag_hits "an absolute Unix path" \
+    "$(grep -inE '/[A-Za-z0-9_.-]{2,}' "$NOTES" || true)"
+add_flag_hits "a Windows-style path (drive letter)" \
+    "$(grep -inE '\b[A-Za-z]:\\' "$NOTES" || true)"
+add_flag_hits "a domain name (name.tld shape)" \
+    "$(grep -inE '\b[A-Za-z0-9-]{1,63}\.(com|org|net|io|edu|gov|mil|local|lan|internal|dev|app|co)\b' "$NOTES" || true)"
+# Hash-column stripping scoped to the changelog fence only -- see comment
+# block above. Toggles on each literal ``` line; only lines *inside* the
+# fence get their leading hash-shaped token removed.
+SCRUBBED_FOR_HOSTNAME_CHECK="$(awk '
+    /^```$/ { infence = !infence; print; next }
+    infence { sub(/^[0-9a-f]{7,40}[[:space:]]+/, ""); print; next }
+    { print }
+' "$NOTES")"
+add_flag_hits "a short hostname-shaped token (letters+digits)" \
+    "$(printf '%s\n' "$SCRUBBED_FOR_HOSTNAME_CHECK" | grep -inE '\b[A-Za-z]{2,}[0-9]{1,4}\b' || true)"
+add_flag_hits "a hyphenated hostname-shaped token (e.g. b4-prox)" \
+    "$(printf '%s\n' "$SCRUBBED_FOR_HOSTNAME_CHECK" | grep -inE '\b[A-Za-z]{1,6}[0-9]{1,3}-[A-Za-z0-9]{1,20}\b|\b[A-Za-z0-9]{1,20}-[A-Za-z]{1,6}[0-9]{1,3}\b' || true)"
+
+if [ -n "$FLAG_HITS" ]; then
+    NFLAGGED=$(printf '%s\n' "$FLAG_HITS" | grep -cE '^[0-9]+:')
+    say "$NFLAGGED line(s) flagged -- shape-based, may be false positives, but must be read before publishing:"
+    printf '%s\n' "$FLAG_HITS"
+else
+    NFLAGGED=0
+    say "leakage self-check clean (no hard-stop or flagged shapes matched)"
+fi
+
+# Human confirmation -- the only backstop that covers what the shapes above
+# cannot (see "Known gaps" in the comment above). Read from /dev/tty
+# explicitly so a non-interactive invocation (cron, CI, a script piping
+# input) cannot be mistaken for consent -- it fails closed instead.
+#
+# A flagged run requires a MORE deliberate confirmation than a clean run --
+# the exact count of flagged lines must appear in the typed phrase, which
+# is only possible if the operator actually looked at the count just
+# printed, rather than reflexively retyping a memorized phrase.
 say "----- RELEASE NOTES ($VERSION) -- read before confirming -----"
 cat "$NOTES"
 say "----- END RELEASE NOTES -----"
-if ! CONFIRM="$(read -r -p "Type exactly 'publish $VERSION' to confirm publication to $GH_REPO (anything else aborts): " REPLY < /dev/tty && echo "$REPLY")"; then
+if [ "$NFLAGGED" -eq 0 ]; then
+    PROMPT="Type exactly 'publish $VERSION' to confirm publication to $GH_REPO (anything else aborts): "
+    REQUIRED="publish $VERSION"
+else
+    PROMPT="$NFLAGGED line(s) were flagged above. Type exactly 'I reviewed $NFLAGGED flagged lines, publish $VERSION' to confirm anyway (anything else aborts): "
+    REQUIRED="I reviewed $NFLAGGED flagged lines, publish $VERSION"
+fi
+if ! CONFIRM="$(read -r -p "$PROMPT" REPLY < /dev/tty && echo "$REPLY")"; then
     say "FATAL: could not read a confirmation from a terminal (/dev/tty) -- refusing to publish non-interactively"
     rm -f "$NOTES"
     exit 1
 fi
-if [ "$CONFIRM" != "publish $VERSION" ]; then
+if [ "$CONFIRM" != "$REQUIRED" ]; then
     say "confirmation not given -- aborting, nothing published"
     rm -f "$NOTES"
     exit 1
