@@ -126,24 +126,40 @@ cp /mnt/sig-media/sigmond-location-check "$APP"/ 2>/dev/null
 # reaching GitHub. Never fail firstboot over this file -- every branch below
 # just logs one clear line and moves on:
 #   - absent: expected on any image built before this shipped.
-#   - present but no "components (live):" header: same content check
-#     build-golden-vm.sh uses to gate manifest-raw.txt on the build side,
-#     applied here for the same reason -- a partial stick write, media
-#     fault, or hand-edit must not install as if it were a real manifest.
-#     manifest_drift() reports an absent manifest honestly ("cannot be
-#     assessed"); a present-but-truncated one would instead look like every
-#     component has drifted, which is worse than no signal at all.
+#   - present but truncated/malformed: gated on BOTH the "components
+#     (live):" header AND a row-count floor -- the same two-part check
+#     build-golden-vm.sh/build-usb-v3.sh use for manifest-raw.txt, ported
+#     in full here, not just the header half. A capture cut off right
+#     after the header (partial stick write, media fault, hand-edit)
+#     still contains that header and would pass a bare grep -q, installing
+#     a manifest that lies about having zero (or a handful of) component
+#     pins. manifest_drift() reports an absent manifest honestly ("cannot
+#     be assessed"); a header-only file would instead read as every live
+#     component having drifted -- a permanent false total-drift alarm
+#     baked in at first boot, worse than no signal at all. 10 is the same
+#     floor build-usb-v3.sh uses, for the same reason: well under today's
+#     ~20-22 component count, comfortably above anything a truncated
+#     capture produces.
 #   - present and valid but install fails (I/O error, disk pressure): report
 #     the failure explicitly, matching the decoder-copy failure path above.
 MF=/mnt/sig-media/manifest.txt
 if [ ! -f "$MF" ]; then
   say "import: no component pin manifest on this image (built before manifest support) — drift check unavailable"
-elif ! grep -q 'components (live):' "$MF"; then
-  say "import: manifest.txt present but has no components block — treating as absent (truncated/corrupt?) — drift check unavailable"
-elif install -m 0644 -o root -g root "$MF" /etc/sigmond-appliance/manifest.txt; then
-  say "import: component pin manifest installed (/etc/sigmond-appliance/manifest.txt)"
 else
-  say "import: manifest.txt present and valid but install failed — drift check unavailable"
+  # grep -c prints 0 and exits 1 on zero matches -- `|| true` is required
+  # so a bare assignment from it can't silently abort under set -e (this
+  # heredoc runs under set +e today, but the idiom is kept in step with
+  # the build-side code it mirrors so it stays correct if that ever changes).
+  NCOMP_MF=$(grep -c '^    [A-Za-z]' "$MF" 2>/dev/null || true); NCOMP_MF=${NCOMP_MF:-0}
+  if grep -q 'components (live):' "$MF" 2>/dev/null && [ "$NCOMP_MF" -ge 10 ]; then
+    if install -m 0644 -o root -g root "$MF" /etc/sigmond-appliance/manifest.txt; then
+      say "import: component pin manifest installed (/etc/sigmond-appliance/manifest.txt)"
+    else
+      say "import: manifest.txt present and valid but install failed — drift check unavailable"
+    fi
+  else
+    say "import: manifest.txt present but truncated/malformed ($NCOMP_MF component line(s)) — treating as absent — drift check unavailable"
+  fi
 fi
 [ -f "$APP/sigmond-operator.sh" ] && install -m 644 "$APP/sigmond-operator.sh" /etc/profile.d/sigmond-operator.sh
 # profile.d only reaches LOGIN shells — hook bash.bashrc so interactive
