@@ -55,16 +55,40 @@ boot_vm(){ # boot_vm <with_usb 0|1> <serial_log>
     vm_kill
     local usbargs=""
     [ "$usb" = 1 ] && usbargs="-drive if=none,id=ustick,format=raw,file=$PWD/$USBIMG -device usb-storage,id=usbdev,drive=ustick,bootindex=2"
+    # Launched as its OWN transient systemd unit, not backgrounded with
+    # qemu's -daemonize. -daemonize only detaches from the shell's
+    # session/process group via a double-fork+setsid; the resulting process
+    # still inherits the cgroup of whoever launched it. Under
+    # `systemd-run --unit=...` (this driver, when run that way;
+    # KillMode=control-group is the transient-unit default) that meant the
+    # guest was SIGTERM'd the instant this script exited, pass OR fail,
+    # destroying post-mortem evidence on every FATAL (2026-08-16
+    # investigation). `systemd-run` here creates a sibling top-level unit,
+    # independent of whatever unit (if any) is running this script, so the
+    # driver's exit never reaches it — verified directly (guest unit stays
+    # active/running after a `--wait`ed driver unit exits; a plain
+    # backgrounded child in the driver's own cgroup does not). RuntimeMaxSec
+    # is a backstop, not the normal path: vm_kill (called at the top of
+    # every boot_vm, and explicitly after Phase B/D power-offs) is still how
+    # the guest is normally stopped, by pid, same as before — that still
+    # works unchanged since systemd notices the tracked pid exit and
+    # (--collect) forgets the unit. The bound just guarantees that even an
+    # abnormal driver exit that skips vm_kill can't orphan a 12G/8vCPU guest
+    # forever: 1h comfortably covers a full single-phase run (the whole
+    # 4-phase test is documented as 20-30min) plus real post-mortem time.
     # -smp 8 cores=4 threads=2: nested PVE sees real HT pairs so the
     # importer's pinned layout path is exercised, not the fallback.
-    qemu-system-x86_64 -name guest=sigv3,debug-threads=on -enable-kvm -machine q35 -m 12288 \
+    local unit="sigv3-qemu-$$-$(date +%s)"
+    say "qemu unit: $unit (post-mortem: journalctl -u $unit)"
+    systemd-run --unit="$unit" --collect --property=RuntimeMaxSec=3600 -- \
+      qemu-system-x86_64 -name guest=sigv3,debug-threads=on -enable-kvm -machine q35 -m 12288 \
       -smp 8,sockets=1,cores=4,threads=2 -cpu host,topoext=on \
       -drive if=pflash,format=raw,readonly=on,file=$OVMF_CODE \
       -drive if=pflash,format=raw,file=$PWD/ovmf-vars-v3.fd \
       -drive if=none,id=nvme0,format=qcow2,file=$PWD/nvme-v3.qcow2 -device nvme,drive=nvme0,serial=sigv3nvme,bootindex=1 -device qemu-xhci \
       $usbargs \
       -netdev user,id=n0,hostfwd=tcp:127.0.0.1:5561-:22 -device virtio-net,netdev=n0 \
-      -qmp unix:/tmp/sigv3-qmp.sock,server,nowait -serial "file:$PWD/$slog" -display none -daemonize
+      -qmp unix:/tmp/sigv3-qmp.sock,server,nowait -serial "file:$PWD/$slog" -display none
 }
 
 # resolve_ssh <tries> <delay> [label]: wait for the nested host's ssh to
@@ -96,6 +120,29 @@ resolve_ssh(){
     return 1
 }
 
+# wait_firstboot_complete <tries> <delay>: poll the nested host over ssh for
+# firstboot-v3.sh's own completion line, "first-boot v3 complete" — the last
+# thing it writes to $LOG (firstboot-v3.sh:552), after installing the
+# importer/wizard/finalizer hooks and running the importer once itself.
+# sshd answering is NOT that signal: firstboot depends on
+# After=pveproxy.service and takes ~85s end to end, while ssh can answer in
+# under 20s — checking firstboot's products (the log line, the importer
+# script) right after ssh connects races a boot sequence firstboot hasn't
+# necessarily finished yet (always racy; only stopped losing the race when
+# the ssh-auth path got faster — 2026-08-16 investigation). Callers still
+# check the actual products afterward; this only gates on firstboot having
+# truly finished before those checks run, so "never completed" (this
+# function's timeout) and "completed but a product is missing" (a later
+# check's own FATAL) stay distinguishable instead of looking identical.
+wait_firstboot_complete(){
+    local tries="$1" delay="$2" i
+    for i in $(seq 1 "$tries"); do
+        $SSHN "grep -q 'first-boot v3 complete' /var/log/sigmond-firstboot.log" 2>/dev/null && return 0
+        sleep "$delay"
+    done
+    return 1
+}
+
 case "${1:-all}" in
 all|A)
 say "════ PHASE A: auto-install ($USBIMG) ════"
@@ -115,8 +162,11 @@ boot_vm 0 serialB-v3.log
 resolve_ssh 60 5 B || exit 1
 say "nested PVE up: $($SSHN 'pveversion; hostname' 2>/dev/null)"
 $SSHN "hostname | grep -q 'sigmond-appliance-v3'" && say "versioned hostname OK" || say "WARN: hostname not versioned: $($SSHN hostname)"
+say "waiting for firstboot to complete (up to 3 min)"
+wait_firstboot_complete 36 5 || { say "FATAL: firstboot never completed (no 'first-boot v3 complete' in /var/log/sigmond-firstboot.log within 3 min of ssh coming up)"; exit 1; }
+say "firstboot completed"
 $SSHN "grep -q 'no Sigmond USB present' /var/log/sigmond-firstboot.log" && say "firstboot ran, no media (expected)" || say "WARN: firstboot log unexpected"
-$SSHN "test -x /usr/local/sbin/sigmond-import.sh" && say "importer installed" || { say "FATAL: importer missing"; exit 1; }
+$SSHN "test -x /usr/local/sbin/sigmond-import.sh" && say "importer installed" || { say "FATAL: firstboot completed but importer is missing"; exit 1; }
 $SSHN "test -f /etc/udev/rules.d/99-sigmond-import.rules" && say "udev rule armed" || { say "FATAL: udev rule missing"; exit 1; }
 $SSHN "cat /etc/sigmond-appliance/version" && say "version file present" || say "WARN: version file missing"
 $SSHN "grep -q '^iface vmbr0 inet dhcp' /etc/network/interfaces" \
