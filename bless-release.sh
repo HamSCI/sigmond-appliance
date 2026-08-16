@@ -195,9 +195,20 @@ if [ -n "$IMG" ]; then
     if [ ! -f "$TESTLOG" ]; then
         gate_fail "5 (test evidence: PHASE D PASS)" "no test log at $TESTLOG"
     else
+        # `|| [ -n "$line" ]` is needed on both loops below: plain `while
+        # read -r line; do ... done` silently DROPS a final line that has
+        # no trailing newline (read returns nonzero at EOF even though it
+        # already populated $line, and a bare while-read treats that
+        # nonzero as loop-exit before the body runs). A killed or
+        # partially-flushed test-nested-v3.sh run is exactly the case
+        # where the log's last line could be missing its newline -- and
+        # that last line could be the PHASE D PASS marker itself. Same
+        # reasoning applies to TOTAL below: `wc -l` counts newlines, not
+        # lines, so it undercounts by one for the same reason; `awk
+        # 'END{print NR}'` counts records instead and doesn't.
         LASTLINE=0
         LN=0
-        while IFS= read -r line; do
+        while IFS= read -r line || [ -n "$line" ]; do
             LN=$((LN+1))
             case "$line" in
                 *"USB image under test: "*)
@@ -209,10 +220,10 @@ if [ -n "$IMG" ]; then
         if [ "$LASTLINE" -eq 0 ]; then
             gate_fail "5 (test evidence: PHASE D PASS)" "no test run found for $IMGBASE in $TESTLOG"
         else
-            TOTAL=$(wc -l < "$TESTLOG")
+            TOTAL=$(awk 'END{print NR}' "$TESTLOG")
             NEXTLINE=$TOTAL
             LN=0
-            while IFS= read -r line; do
+            while IFS= read -r line || [ -n "$line" ]; do
                 LN=$((LN+1))
                 if [ "$LN" -gt "$LASTLINE" ]; then
                     case "$line" in
@@ -266,9 +277,42 @@ if [ $APPLY -eq 0 ]; then
     exit 0
 fi
 
-# ---- --apply: build release notes, self-check for leakage, publish --------
+# ---- --apply: verify remote tag, build notes, self-check, confirm, publish
 # HamSCI/sigmond-appliance is PUBLIC. Release notes reference the image by
 # filename and sha256 only -- never a host, path, IP, or username.
+
+# Close the gap between gate 1 (verifies the LOCAL tag's commit) and what
+# `gh release create` actually does: if refs/tags/$VERSION does not exist
+# on the remote, gh silently creates a lightweight tag from the CURRENT tip
+# of the default branch -- not the commit gate 1 verified, and not the
+# commit the notes below claim under "Appliance commit:". An operator who
+# blessed a tag they forgot to push, with any commit landing on
+# origin/main in between, would get a Release tagged at the wrong place
+# describing a different commit than the one it actually points at.
+#
+# Fix chosen: refuse outright unless the remote tag already exists AND
+# matches the commit gate 1 verified -- this script does not push a tag
+# itself (every other push on this fleet is a distinct, operator-typed git
+# command; making --apply's blast radius "verify + create a Release" and
+# nothing more is easier to reason about) and does not force-update a
+# mismatched remote tag (silently overwriting someone else's tag is a worse
+# surprise than just refusing). `--target` and `--verify-tag` are then
+# passed to `gh release create` too, as redundant belt-and-suspenders: if
+# this check and the API call ever raced, --verify-tag makes gh itself
+# abort rather than auto-tag, and --target pins the commit if gh does end
+# up creating the tag.
+say "verifying remote tag matches the commit gate 1 verified"
+REMOTE_TAG_COMMIT="$(git -C "$REPO" ls-remote origin "refs/tags/${VERSION}" "refs/tags/${VERSION}^{}" 2>/dev/null \
+    | awk '{print $1}' | tail -1)"
+if [ -z "$REMOTE_TAG_COMMIT" ]; then
+    say "FATAL: tag '$VERSION' exists locally at $TAG_COMMIT but has not been pushed to $GH_REPO -- push it first (git push origin refs/tags/$VERSION) and re-run. Refusing to let 'gh release create' auto-tag the wrong commit."
+    exit 1
+elif [ "$REMOTE_TAG_COMMIT" != "$TAG_COMMIT" ]; then
+    say "FATAL: tag '$VERSION' exists on the remote but points at $REMOTE_TAG_COMMIT, not the commit gate 1 verified ($TAG_COMMIT) -- refusing to proceed. This script will not overwrite a mismatched tag; reconcile it manually."
+    exit 1
+fi
+say "remote tag OK: refs/tags/$VERSION -> $REMOTE_TAG_COMMIT"
+
 PREV_TAG="$(git -C "$REPO" tag --merged origin/main --sort=-v:refname 2>/dev/null \
     | grep -vE -- '-dev|\+' \
     | awk -v cur="$VERSION" 'found{print; exit} $0==cur{found=1}')"
@@ -294,13 +338,67 @@ NOTES="$(mktemp)"
     echo '```'
 } > "$NOTES"
 
-# Leakage self-check: hostnames, IPs, host:path/absolute-path strings,
-# usernames. Fails closed -- refuses to publish rather than guess.
-LEAK_PATTERN='[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}|/root/|/home/[A-Za-z]+|~/|\broot@|\b(wd30|b3|b4|bee1|bee2|gw2|dasi[0-9]*|b4-prox|hamsci@|sigmond@|mijahauan|michael\.j\.hauan)\b'
-LEAK_HITS="$(grep -inE "$LEAK_PATTERN" "$NOTES" || true)"
+# Leakage self-check -- SHAPES, not an enumerated list of known hostnames.
+# A denylist of known names (the previous version of this check) only ever
+# catches names someone already thought to list; a reviewer found this the
+# hard way with a hypothetical commit message naming a runner this list had
+# never heard of, and the real test-v3.log on this rig already contains
+# /srv/build/v3/... paths that a denylist would also have missed. Every
+# check below fires on a SHAPE (an absolute path, a user@host, a dotted
+# name under a real-looking TLD, an IPv4 literal, a short alnum token that
+# looks like a hostname) so it also catches names nobody has enumerated yet.
+# False positives are accepted on purpose -- Finding 1 in review: "a
+# spurious refusal costs an operator thirty seconds; a leak is permanent."
+#
+# The changelog is raw `git log --oneline` text, so every line starts with
+# a short hex commit hash -- and a hex hash (e.g. "aca5772") itself matches
+# the letters-then-digits hostname shape below on every single line,
+# drowning any real signal. That column is stripped before running ONLY
+# the hostname-shape check (never before the others, and never in what
+# actually gets published -- $NOTES itself is untouched).
+LEAK_HITS=""
+add_leak_hits(){ # add_leak_hits <label> <hits>
+    [ -n "$2" ] || return 0
+    LEAK_HITS="${LEAK_HITS}${LEAK_HITS:+$'\n'}-- looks like $1:
+$2"
+}
+add_leak_hits "an IPv4 address" \
+    "$(grep -inE '[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}' "$NOTES" || true)"
+add_leak_hits "an absolute path" \
+    "$(grep -inE '/[A-Za-z0-9_.-]{2,}' "$NOTES" || true)"
+add_leak_hits "a user@host reference" \
+    "$(grep -inE '[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+' "$NOTES" || true)"
+add_leak_hits "a domain name (name.tld shape)" \
+    "$(grep -inE '\b[A-Za-z0-9-]{1,63}\.(com|org|net|io|edu|gov|mil|local|lan|internal|dev|app|co)\b' "$NOTES" || true)"
+SCRUBBED_FOR_HOSTNAME_CHECK="$(sed -E 's/^[0-9a-f]{7,40}[[:space:]]+//' "$NOTES")"
+add_leak_hits "a short hostname-shaped token (letters+digits)" \
+    "$(printf '%s\n' "$SCRUBBED_FOR_HOSTNAME_CHECK" | grep -inE '\b[A-Za-z]{2,}[0-9]{1,4}\b' || true)"
+
 if [ -n "$LEAK_HITS" ]; then
-    say "FATAL: release notes leakage check failed -- refusing to publish. Offending lines:"
+    say "FATAL: release notes leakage self-check failed -- refusing to publish."
     printf '%s\n' "$LEAK_HITS"
+    rm -f "$NOTES"
+    exit 1
+fi
+say "leakage self-check clean (shape-based: IPv4, absolute path, user@host, domain-name, hostname-shaped token)"
+
+# Human confirmation -- the leakage self-check is shape-based and will
+# never cover every way a real host, path, or name could appear in free
+# text (a nickname, an abbreviation, a nonstandard TLD, plain English
+# description of internal topology). The only backstop that covers the
+# rest is a person actually reading the text about to go public. Read from
+# /dev/tty explicitly so a non-interactive invocation (cron, CI, a script
+# piping input) cannot be mistaken for consent -- it fails closed instead.
+say "----- RELEASE NOTES ($VERSION) -- read before confirming -----"
+cat "$NOTES"
+say "----- END RELEASE NOTES -----"
+if ! CONFIRM="$(read -r -p "Type exactly 'publish $VERSION' to confirm publication to $GH_REPO (anything else aborts): " REPLY < /dev/tty && echo "$REPLY")"; then
+    say "FATAL: could not read a confirmation from a terminal (/dev/tty) -- refusing to publish non-interactively"
+    rm -f "$NOTES"
+    exit 1
+fi
+if [ "$CONFIRM" != "publish $VERSION" ]; then
+    say "confirmation not given -- aborting, nothing published"
     rm -f "$NOTES"
     exit 1
 fi
@@ -308,6 +406,7 @@ fi
 say "publishing Release $VERSION on $GH_REPO"
 gh release create "$VERSION" --repo "$GH_REPO" \
     --title "sigmond-appliance $VERSION" --notes-file "$NOTES" \
+    --target "$TAG_COMMIT" --verify-tag \
     "$MANIFEST" "$SHAFILE"
 RC=$?
 rm -f "$NOTES"
