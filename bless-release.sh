@@ -345,24 +345,43 @@ NOTES="$(mktemp)"
 # heard of, and the real test-v3.log on this rig already contains
 # /srv/build/v3/... paths that a denylist would also have missed.
 #
-# Scope: the changelog body ONLY, not the whole $NOTES file. Everything
-# else written into $NOTES above -- version, image filename, sha256,
-# appliance commit, the hardcoded test-verdict line -- is produced by this
-# script from values gate 0-6 already validated; none of it can carry a
-# leak this script did not put there itself. The changelog is different:
-# `git log --oneline` output, written by humans over years, is the entire
-# reason this check exists. Scanning the whole file conflated the two and
-# was self-defeating -- a reviewer found that the boilerplate itself
-# matches the shapes below on every single run ("- Image:
-# sigmond-appliance-v3.32-...img" matches the hyphenated-hostname shape as
-# "appliance-v3", and gate 0 forces every version to start v[0-9]*, so this
-# fired structurally on 100% of releases; "test-nested-v3.sh" matched the
-# same shape as "nested-v3" regardless of version). That made the flagged
-# tier permanent friction on every release, not occasional friction on
-# real risk, which defeats round 2's entire point. Scoping to the
-# changelog body removes the self-collision by construction rather than by
-# tuning the pattern around today's boilerplate text (which would just
-# break again the next time the template's wording changes).
+# Scope is DIFFERENT PER TIER -- this took two attempts to get right, and
+# the failure mode of getting it wrong is instructive enough to leave both
+# attempts documented here rather than just the current answer.
+#
+# Attempt 1 scanned the whole $NOTES file with every shape. A reviewer
+# found this self-defeating: "- Image: sigmond-appliance-v3.32-...img"
+# matches the hyphenated-hostname shape as "appliance-v3" (gate 0 forces
+# every version to start v[0-9]*, so this fired structurally on 100% of
+# releases), and the hardcoded "...test-nested-v3.sh" verdict line matched
+# the same shape as "nested-v3" regardless of version. NFLAGGED was never
+# 0 in real usage, so the simple confirm phrase was unreachable and every
+# release paid the deliberate-confirmation cost meant for real risk.
+#
+# Attempt 2 (over-corrected) scoped EVERYTHING, including the hard-abort
+# checks, to the changelog body only -- on the reasoning that everything
+# else in $NOTES is script-generated from gate-validated values and "can't
+# carry a leak the script did not put there itself." That reasoning is
+# right for the FLAGGED-tier shapes (paths, domains, hostname-shaped
+# tokens -- these are exactly what matched the boilerplate above) but
+# wrong for $VERSION specifically: it's an operator-supplied git tag name,
+# and gate 0's positive check (v[0-9]*) barely constrains what follows the
+# leading digit. A reviewer proved this against the committed script by
+# creating the real tag `v1-root@192.168.1.14-leak` -- git accepts it
+# (only "@{" is special) -- which is echoed verbatim into the title, the
+# "- Version:" line, and (via $IMGBASE) the "- Image:" line. Scoping the
+# hard-abort checks to the changelog meant NONE of those lines were ever
+# scanned, so a poisoned tag sailed straight through to the simple confirm
+# phrase with a real IP and a real user@host string sitting in the
+# published notes.
+#
+# So: HARD-ABORT shapes (IPv4, user@host) scan the FULL $NOTES -- they
+# never collided with the boilerplate in the first place (verified
+# directly below), so there was never a reason to narrow them, and
+# $VERSION is exactly the kind of operator-supplied text they exist to
+# catch. FLAGGED shapes stay scoped to the changelog body -- that's where
+# the real boilerplate collision was, and where narrowing was actually
+# needed.
 #
 # I considered two other things interpolated into $NOTES and deliberately
 # did NOT bring into scope:
@@ -380,9 +399,18 @@ NOTES="$(mktemp)"
 #     notes. Worth flagging anyway: a manifest captured off a long-lived,
 #     drifted install (not a fresh golden template) can carry a free-text
 #     "updates since install" section with operator-written entries -- see
-#     the Task 3 report's own sample. That is a real, separate risk
-#     surface this check does not cover, because it isn't text this script
-#     writes into $NOTES.
+#     the Task 3 report's own sample. In practice this is narrower than it
+#     sounds -- Task 3's capture point runs immediately after
+#     provisioning, before any post-install drift can occur, so a fresh
+#     golden-template build structurally cannot produce that section, and
+#     a leakage grep against a realistic manifest sample came back clean.
+#     But UNLIKE the changelog, the manifest's contents are never PRINTED
+#     to the operator before the confirmation prompt below -- only the
+#     notes text is. So if this residual risk were ever hit (a manifest
+#     captured some other way, or the capture point's guarantee breaking
+#     later), there is no human backstop for it at all, not even the
+#     deliberate-confirmation one. That is a real gap, left as a gap
+#     rather than silently assumed covered.
 #
 # Two tiers, split by how often the shape is legitimately part of ordinary
 # release-note prose on this fleet vs. how bad it is to miss:
@@ -437,14 +465,35 @@ add_hard_hits(){ # add_hard_hits <label> <hits>
 $2"
 }
 
-# ---- hard-abort tier ----
+# ---- hard-abort tier: scans the FULL $NOTES, not just the changelog ----
+# $VERSION is operator-supplied (it is whatever the git tag on HEAD says)
+# and gate 0 barely constrains it -- it only rejects "-dev" and "+"; its
+# positive check is the case pattern v[0-9]*, which is "v" + one digit +
+# ANYTHING. git tags happily accept an "@" and dotted-quad-looking runs
+# too (only "@{" is special to git). $VERSION is echoed verbatim into the
+# title, the "- Version:" line, and (via $IMGBASE) the "- Image:" line --
+# none of which the changelog-only scope above ever looks at. A reviewer
+# proved this against this exact script by creating the real tag
+# `v1-root@192.168.1.14-leak`: it passed gates 0-5, the changelog-scoped
+# leak check reported clean, and the notes -- containing a real IP AND a
+# real user@host string, verbatim, twice -- reached the simple confirm
+# phrase with zero friction.
+#
+# So the two tiers are scoped differently, on purpose, because they have
+# different collision profiles. IPv4 and user@host NEVER collided with the
+# boilerplate (verified directly: neither shape matches any of the
+# version/commit/image/sha256/verdict lines for a normal release) -- the
+# boilerplate collision that justified narrowing the FLAGGED tier (below)
+# never applied to these two. Restoring full-$NOTES coverage here costs
+# nothing and closes the tag-name hole outright, with no override
+# possible -- exactly like every other hard-abort case.
 add_hard_hits "an IPv4 address" \
-    "$(grep -inE '[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}' "$CHANGELOG_FILE" || true)"
+    "$(grep -inE '[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}' "$NOTES" || true)"
 add_hard_hits "a user@host reference" \
-    "$(grep -inE '[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+' "$CHANGELOG_FILE" || true)"
+    "$(grep -inE '[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+' "$NOTES" || true)"
 
 if [ -n "$HARD_HITS" ]; then
-    say "FATAL: the changelog contains a hard-stop leak shape -- refusing to publish. No confirmation can override this; fix the source (usually the commit message) and re-tag."
+    say "FATAL: the release notes contain a hard-stop leak shape -- refusing to publish. No confirmation can override this; fix the source (a poisoned tag name, or a commit message) and re-tag."
     printf '%s\n' "$HARD_HITS"
     rm -f "$NOTES" "$CHANGELOG_FILE"
     exit 1
