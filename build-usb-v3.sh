@@ -239,10 +239,31 @@ rm -f "$IMG.xz"
 sha256sum "$IMG" | tee "${IMG%.img}.sha256"
 ls -la "$IMG"
 
+# The component pin manifest: what a Release attaches, and the only record
+# of which commit of each of the ~20 components (ka9q-radio, hf-timestd,
+# wspr-recorder, ...) rode into this image. build-golden-vm.sh captures the
+# raw `smd version` block from inside the template (the only place it can be
+# captured — smd version doesn't work on B3 itself) into manifest-raw.txt,
+# best-effort. This is the hard gate: no manifest, no ship. A hand-typed pin
+# drifts silently, so this file is generated only, never edited by hand.
+say "component pin manifest"
+[ -f manifest-raw.txt ] || die "manifest-raw.txt missing — the golden VM build did not capture smd version (see build-golden-vm.sh output); an image cannot be blessed without a manifest. Rebuild the golden VM or fix the capture before shipping."
+MANIFEST="${IMG%.img}.manifest.txt"
+{
+    echo "image_version: $VERSION"
+    echo "appliance_commit: $(git -C "$REPO" rev-parse HEAD)"
+    echo "appliance_tag: $VERSION"
+    echo "built_utc: $(date -u -Iseconds)"
+    echo "image_sha256: $(cut -d' ' -f1 < "${IMG%.img}.sha256")"
+    echo
+    cat manifest-raw.txt
+} > "$MANIFEST"
+say "manifest written: $MANIFEST"
+
 if [ "$SHIP" = 1 ]; then
     say "SHIPPING to wd30 NOW (untested — test verdict follows separately)"
-    scp -q "$IMG" "${IMG%.img}.sha256" wd30:~/ \
-        && say "shipped: wd30:~/$IMG + .sha256" \
+    scp -q "$IMG" "${IMG%.img}.sha256" "$MANIFEST" wd30:~/ \
+        && say "shipped: wd30:~/$IMG + .sha256 + .manifest.txt" \
         || say "WARNING: ship to wd30 FAILED — ship manually"
 fi
 say "USB IMAGE BUILD COMPLETE: $VERSION ($IMG)"

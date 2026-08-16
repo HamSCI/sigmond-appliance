@@ -75,6 +75,23 @@ say "capture gate READY"
 say "recording repo revisions for the build manifest"
 $SSH "for d in /opt/git/sigmond/*/; do printf '%s %s\n' \"\$(basename \$d)\" \"\$(git -C \$d rev-parse --short HEAD 2>/dev/null)\"; done" | tee golden-v3-revs.txt
 
+# The manifest that build-usb-v3.sh ships with the image and that a Release
+# attaches — this is the only point in the pipeline where components are
+# installed AND still reachable over ssh (smd version reports "no component
+# checkouts found" on B3 itself; it only works run inside the appliance).
+# Best-effort here, not fatal: a missing/malformed manifest-raw.txt must not
+# silently produce an unmanifested image, but it also shouldn't waste a
+# completed, otherwise-good template. build-usb-v3.sh is the hard gate — it
+# refuses to ship without this file.
+say "capturing component pin manifest (smd version) from the template"
+if $SSH 'smd version' > "$PWD/manifest-raw.txt" 2>/dev/null \
+   && grep -q 'components (live):' "$PWD/manifest-raw.txt"; then
+    say "manifest captured: $(grep -c '^    [A-Za-z]' "$PWD/manifest-raw.txt") component lines"
+else
+    say "WARNING: manifest capture FAILED — image will be unblessable (manifest-raw.txt missing or malformed); build-usb-v3.sh will refuse to ship without it"
+    rm -f "$PWD/manifest-raw.txt"
+fi
+
 say "shutting down VM (halt, not reboot — no machine-id now)"
 $SSH "sudo shutdown -h now" 2>/dev/null
 for i in $(seq 1 24); do pgrep -f "name goldenv3" >/dev/null || break; sleep 5; done
