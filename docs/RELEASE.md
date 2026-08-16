@@ -79,6 +79,20 @@ would notice — the whole point of a manifest is that it is a *record*, not
 an assertion. If `manifest-raw.txt` is missing, the build hard-refuses to
 ship rather than let an unmanifested image out the door.
 
+**The manifest also rides the payload, minus one field.** `build-usb-v3.sh`
+writes a second copy of the same `manifest-raw.txt` snapshot — same
+version/commit/tag/build time, same component rows — into the payload as
+`manifest.txt`, and `firstboot-v3.sh` installs it to
+`/etc/sigmond-appliance/manifest.txt` on every host built after this
+shipped (Stage 3). That copy has no `image_sha256` line: the field is the
+hash of the finished `.img`, which does not exist until after the payload
+is already sealed inside it, so a self-referential checksum can't be
+written into it. The file itself says so and points at the
+Release-attached copy for the checksum. Everything else needed to answer
+"am I what my image says I am" — the component pins in particular — is
+identical between the two copies, because both come from the same
+`manifest-raw.txt` read.
+
 **Verify the venv, not the checkout.** A component can be "updated" in its
 git checkout while the running process still imports from a stale venv —
 this happened on B4, where a fix was "verified" live for a full day while

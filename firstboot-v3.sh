@@ -123,14 +123,27 @@ cp /mnt/sig-media/sigmond-operator.sh "$APP"/ 2>/dev/null
 cp /mnt/sig-media/sigmond-location-check "$APP"/ 2>/dev/null
 # component pin manifest (Stage 3): the record of what this image was built
 # from, so a host can later answer "am I what my image says I am" without
-# reaching GitHub. Absent on any image built before this shipped -- that is
-# expected, not an error: log one line and move on. Never fail firstboot
-# over an optional file.
-if [ -f /mnt/sig-media/manifest.txt ]; then
-  install -m 0644 -o root -g root /mnt/sig-media/manifest.txt /etc/sigmond-appliance/manifest.txt \
-    && say "import: component pin manifest installed (/etc/sigmond-appliance/manifest.txt)"
-else
+# reaching GitHub. Never fail firstboot over this file -- every branch below
+# just logs one clear line and moves on:
+#   - absent: expected on any image built before this shipped.
+#   - present but no "components (live):" header: same content check
+#     build-golden-vm.sh uses to gate manifest-raw.txt on the build side,
+#     applied here for the same reason -- a partial stick write, media
+#     fault, or hand-edit must not install as if it were a real manifest.
+#     manifest_drift() reports an absent manifest honestly ("cannot be
+#     assessed"); a present-but-truncated one would instead look like every
+#     component has drifted, which is worse than no signal at all.
+#   - present and valid but install fails (I/O error, disk pressure): report
+#     the failure explicitly, matching the decoder-copy failure path above.
+MF=/mnt/sig-media/manifest.txt
+if [ ! -f "$MF" ]; then
   say "import: no component pin manifest on this image (built before manifest support) — drift check unavailable"
+elif ! grep -q 'components (live):' "$MF"; then
+  say "import: manifest.txt present but has no components block — treating as absent (truncated/corrupt?) — drift check unavailable"
+elif install -m 0644 -o root -g root "$MF" /etc/sigmond-appliance/manifest.txt; then
+  say "import: component pin manifest installed (/etc/sigmond-appliance/manifest.txt)"
+else
+  say "import: manifest.txt present and valid but install failed — drift check unavailable"
 fi
 [ -f "$APP/sigmond-operator.sh" ] && install -m 644 "$APP/sigmond-operator.sh" /etc/profile.d/sigmond-operator.sh
 # profile.d only reaches LOGIN shells — hook bash.bashrc so interactive

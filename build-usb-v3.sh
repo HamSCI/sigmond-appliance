@@ -271,6 +271,18 @@ BUILT_UTC="$(date -u -Iseconds)"
     echo "appliance_commit: $(git -C "$REPO" rev-parse HEAD)"
     echo "appliance_tag: $VERSION"
     echo "built_utc: $BUILT_UTC"
+    # Explained here, not just in this build script's comments, because a
+    # field engineer reads THIS file, not build-usb-v3.sh. Sits above the
+    # "components (live):" header, so manifest_drift()'s parser -- which
+    # only starts reading at that literal line -- never sees it.
+    echo "# image_sha256: intentionally absent from this host copy. It is the"
+    echo "#   hash of the finished .img, which does not exist until after this"
+    echo "#   payload is already sealed inside it -- a self-referential"
+    echo "#   checksum would just be wrong the moment it was written. This is"
+    echo "#   not corruption. For the image checksum, see the Release-attached"
+    echo "#   manifest for this exact build (same appliance_commit + built_utc"
+    echo "#   above): sigmond-appliance-${VERSION}-<stamp>.manifest.txt on the"
+    echo "#   GitHub Release, or the artifact store."
     echo
     cat manifest-raw.txt
 } > manifest-host.txt
