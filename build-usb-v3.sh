@@ -2,9 +2,10 @@
 # Sigmond appliance USB image builder v3 — runs on B3 in ~/appliance/v3.
 #
 # v3 over v2:
-#   - EXPLICIT VERSION per image (arg 1, e.g. v3.0) baked into: the image
-#     filename, the Proxmox host fqdn, the decoder VM name, /etc/motd,
-#     QUICKSTART — so test sticks are never confused (rob 2026-07-26).
+#   - EXPLICIT VERSION per image (from the git tag on HEAD, e.g. v3.0) baked
+#     into: the image filename, the Proxmox host fqdn, the decoder VM name,
+#     /etc/motd, QUICKSTART — so test sticks are never confused (rob
+#     2026-07-26; tag-derived since Stage 2 so every image traces to a commit).
 #   - the SIGMOND REPO rides in the payload (host tuning scripts:
 #     host-discover/host-apply/cpu-pin template used by the importer).
 #   - image is SHIPPED TO wd30 IMMEDIATELY after build, before testing,
@@ -15,23 +16,44 @@
 #     iso9660 volsize offset. NEVER a GPT partition for the payload.
 #   - reboot-mode = "power-off" stays: remove-the-stick cue + loop guard.
 #
-# Usage: build-usb-v3.sh <version> [--release] [--no-ship]
-#   e.g.: build-usb-v3.sh v3.0
+# Usage: build-usb-v3.sh [--release] [--no-ship] [--dev]
+#   Version comes from the git tag on HEAD in the sigmond-appliance checkout
+#   (tag it first: git tag v3.32).  --dev allows an untagged build instead,
+#   stamped v0.0-dev+<sha> so it can never pass as, or be blessed as, a
+#   release.  A dirty working tree aborts unless --dev is given.
 set -eu
 cd "$HOME/appliance/v3"
 LOG="$PWD/usb-build.log"
 exec > >(tee -a "$LOG") 2>&1
 say(){ echo "[usb $(date '+%T')] $*"; }
+die(){ say "FATAL: $*"; exit 1; }
 
-VERSION="${1:?usage: build-usb-v3.sh <version e.g. v3.0> [--release] [--no-ship]}"
-shift
-RELEASE=0; SHIP=1
+# REPO is the git checkout this script itself ships from -- not $PWD, which
+# is the build rig staging dir ($HOME/appliance/v3) and isn't under git.
+# Same override pattern as SIGMOND_REPO below.
+REPO="${APPLIANCE_REPO:-$HOME/appliance/repos/sigmond-appliance}"
+
+RELEASE=0; SHIP=1; DEV=0
 for a in "$@"; do
     case "$a" in
         --release) RELEASE=1 ;;
         --no-ship) SHIP=0 ;;
+        --dev) DEV=1 ;;
     esac
 done
+
+if [ -n "$(git -C "$REPO" status --porcelain)" ]; then
+    (( DEV )) || die "working tree is dirty ($REPO) — commit or stash before building a release image"
+fi
+
+VERSION="$(git -C "$REPO" describe --tags --exact-match HEAD 2>/dev/null || true)"
+if [ -z "$VERSION" ]; then
+    if (( DEV )); then
+        VERSION="v0.0-dev+$(git -C "$REPO" rev-parse --short HEAD)"
+    else
+        die "HEAD is not tagged. Tag the release first (git tag v3.32) or pass --dev."
+    fi
+fi
 case "$VERSION" in v[0-9]*) ;; *) say "FATAL: version must look like v3.0"; exit 1;; esac
 VTAG="${VERSION//./-}"
 
