@@ -256,7 +256,14 @@ fi
 # is the actual ship/no-ship gate, and manifest-raw.txt could in principle
 # be stale or hand-edited between a golden-VM run and this one. Same floor
 # as build-golden-vm.sh's capture-time check.
-NCOMP=$(grep -c '^    [A-Za-z]' manifest-raw.txt 2>/dev/null); NCOMP=${NCOMP:-0}
+# `|| true` is required here (unlike the read-only version of this check):
+# grep -c exits 1 on zero matches even though it prints "0", and this script
+# runs under `set -eu` -- a bare `VAR=$(grep -c ...)` with no `|| true`
+# aborts the WHOLE SCRIPT right there on a truncated (0-row) capture, before
+# the die() message and before the $IMG/.sha256 cleanup below ever run. That
+# is exactly the case this gate exists to catch, so a silent set -e exit
+# here would be worse than not having the gate at all.
+NCOMP=$(grep -c '^    [A-Za-z]' manifest-raw.txt 2>/dev/null || true); NCOMP=${NCOMP:-0}
 if [ "$NCOMP" -lt 10 ]; then
     rm -f "$IMG" "${IMG%.img}.sha256"
     die "manifest-raw.txt has only $NCOMP component line(s) — looks truncated, not a real ~20-component capture; refusing to ship a manifest that lies. Rebuild the golden VM. ($IMG and its .sha256 removed so they don't linger for the next run)"

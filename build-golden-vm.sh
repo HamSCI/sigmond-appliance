@@ -85,16 +85,24 @@ $SSH "for d in /opt/git/sigmond/*/; do printf '%s %s\n' \"\$(basename \$d)\" \"\
 # refuses to ship without this file.
 say "capturing component pin manifest (smd version) from the template"
 $SSH 'smd version' > manifest-raw.txt 2>/dev/null
-NCOMP=$(grep -c '^    [A-Za-z]' manifest-raw.txt 2>/dev/null); NCOMP=${NCOMP:-0}
+NCOMP=$(grep -c '^    [A-Za-z]' manifest-raw.txt 2>/dev/null || true); NCOMP=${NCOMP:-0}
 # Gate on the row COUNT, not just the "components (live):" header string.
 # A capture that connects and is cut off right after the header -- an ssh
 # drop, the remote smd process killed mid-write, the VM beginning to shut
 # down concurrently -- still contains that header and would pass a bare
 # grep -q, shipping a manifest that LIES about having zero component pins.
-# A real appliance reports ~20 components today (22 on B4 as of
-# 2026-08-15); 10 is a plausible floor -- well under today's count so a
-# handful of components coming and going over time won't false-positive,
-# but far above anything a truncated capture produces.
+# 10 is a plausible floor for THIS pipeline specifically: provision-components.sh
+# (run earlier in this script's stage 2+3) hardcodes the full dasi2 topology (radiod ka9q-web
+# igmp-querier gpsdo-monitor hf-timestd wspr-recorder psk-recorder
+# mag-recorder meteor-scatter, ~20+ repos total, 22 on B4 as of 2026-08-15)
+# with no profile parameter -- this script never builds smd's leaner
+# catalog.toml profiles (e.g. "base": 1 client + 2 infra, "client": 3
+# clients with no local radiod), which would legitimately report well
+# under 10. If this pipeline ever grows a profile argument, this constant
+# must move with it, or a legitimate lean build will trip the gate.
+# 10 itself is chosen well under today's dasi2 count so a handful of
+# components coming and going over time won't false-positive, but far
+# above anything a truncated capture produces.
 if grep -q 'components (live):' manifest-raw.txt 2>/dev/null && [ "$NCOMP" -ge 10 ]; then
     say "manifest captured: $NCOMP component lines"
 else
