@@ -322,6 +322,31 @@ else
     CHANGELOG="(no previous tag -- first release)"
 fi
 
+# $PREV_TAG is an operator-chosen git tag NAME -- a PRIOR release's tag,
+# not this one, so gate 0 never validated it and never will (gate 0 only
+# ever looks at $VERSION, the tag being blessed right now). It is used
+# above to compute the git log range and nowhere else: it must never reach
+# $NOTES itself. A reviewer proved why the hard way, against the real
+# hard-abort scan: tag a poisoned prior release (e.g.
+# `v9.0.0-root@10.0.0.5`), merge it to origin/main, then tag a completely
+# clean NEXT version -- the clean release's own notes would still contain
+# that old tag's name verbatim in the "### Changelog since <tag>" header,
+# and the hard-abort tier is RIGHT to refuse publishing it: the text
+# really would appear in a public Release if allowed through. That is a
+# true positive, not a false one, and excluding this line from the scan
+# (rather than fixing what gets published) would silence a real leak.
+#
+# The actual fix is to stop publishing the tag NAME at all -- the header
+# only exists to tell a reader what range the changelog covers, and a
+# short commit SHA does that job without dragging an arbitrary
+# operator-chosen string into published output. $PREV_TAG keeps doing its
+# job internally (the git log range above already used it); only the
+# SAFE, script-computed SHA derived from it goes into $NOTES.
+PREV_TAG_COMMIT=""
+if [ -n "$PREV_TAG" ]; then
+    PREV_TAG_COMMIT="$(git -C "$REPO" rev-parse --short "${PREV_TAG}^{commit}" 2>/dev/null)"
+fi
+
 NOTES="$(mktemp)"
 {
     echo "## sigmond-appliance $VERSION"
@@ -332,7 +357,11 @@ NOTES="$(mktemp)"
     echo "- SHA-256: $(cut -d' ' -f1 < "$SHAFILE")"
     echo "- Test verdict: PASS (PHASE D PASS -- NESTED TEST COMPLETE, test-nested-v3.sh)"
     echo
-    echo "### Changelog since ${PREV_TAG:-(none)}"
+    if [ -n "$PREV_TAG_COMMIT" ]; then
+        echo "### Changelog since $PREV_TAG_COMMIT"
+    else
+        echo "### Changelog (first release)"
+    fi
     echo '```'
     echo "$CHANGELOG"
     echo '```'
@@ -383,16 +412,22 @@ NOTES="$(mktemp)"
 # the real boilerplate collision was, and where narrowing was actually
 # needed.
 #
-# I considered two other things interpolated into $NOTES and deliberately
-# did NOT bring into scope:
-#   - $PREV_TAG, in the "### Changelog since <tag>" header: also
-#     human-chosen, technically. But it's a tag already pushed and merged
-#     into origin/main (gate 1's own reachability requirement, inherited
-#     here since PREV_TAG is drawn from `git tag --merged origin/main`) --
-#     if a tag name ever leaked something, it already leaked the moment it
-#     was pushed to this public repo's ref list, independent of whether
-#     this script later echoes that name in prose. Scanning it here adds
-#     no real coverage.
+# I considered other things interpolated into $NOTES and either brought
+# them into scope or deliberately did not:
+#   - $PREV_TAG itself does NOT reach $NOTES at all (see the block above
+#     this one) -- only its resolved commit SHA does, precisely so this
+#     scan never has to make a judgment call about whether an old tag
+#     name is safe to publish. An earlier version of this comment argued
+#     the tag name was fine to leave unscanned because "it already leaked
+#     the moment it was pushed" -- a reviewer correctly rejected that: a
+#     prior leak does not make republishing the same string in a NEW
+#     public Release harmless, and a reviewer proved the practical cost by
+#     tagging a poisoned prior release, merging it to origin/main, then
+#     tagging a completely clean next version -- whose own notes still
+#     carried the old tag's name in the header, correctly hard-aborting a
+#     release that had nothing wrong with it. Removing the tag name from
+#     published output fixes that at the source instead of arguing about
+#     whether to scan it.
 #   - the attached manifest/sha256 files themselves are NOT interpolated
 #     into the notes TEXT at all (gh attaches them as separate binary/text
 #     assets), so they're out of scope for a check about what's IN the
@@ -458,11 +493,22 @@ NOTES="$(mktemp)"
 CHANGELOG_FILE="$(mktemp)"
 printf '%s\n' "$CHANGELOG" > "$CHANGELOG_FILE"
 
-HARD_HITS=""
-add_hard_hits(){ # add_hard_hits <label> <hits>
-    [ -n "$2" ] || return 0
-    HARD_HITS="${HARD_HITS}${HARD_HITS:+$'\n'}-- looks like $1 (hard stop, no override):
-$2"
+# Collected per DISTINCT LINE, same reasoning as the flagged tier below:
+# a line matching both shapes (e.g. "root@192.168.1.14" is simultaneously
+# an IPv4 address AND a user@host reference) should report once, not
+# twice, with every reason attached.
+declare -A HARD_LINE_LABELS=()
+note_hard(){ # note_hard <label> <newline-separated "N:..." grep -n output>
+    local label="$1" hits="$2" ln
+    [ -n "$hits" ] || return 0
+    while IFS= read -r ln; do
+        [ -n "$ln" ] || continue
+        if [ -n "${HARD_LINE_LABELS[$ln]:-}" ]; then
+            HARD_LINE_LABELS[$ln]="${HARD_LINE_LABELS[$ln]}, $label"
+        else
+            HARD_LINE_LABELS[$ln]="$label"
+        fi
+    done <<< "$(printf '%s\n' "$hits" | cut -d: -f1)"
 }
 
 # ---- hard-abort tier: scans the FULL $NOTES, not just the changelog ----
@@ -487,14 +533,32 @@ $2"
 # never applied to these two. Restoring full-$NOTES coverage here costs
 # nothing and closes the tag-name hole outright, with no override
 # possible -- exactly like every other hard-abort case.
-add_hard_hits "an IPv4 address" \
-    "$(grep -inE '[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}' "$NOTES" || true)"
-add_hard_hits "a user@host reference" \
-    "$(grep -inE '[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+' "$NOTES" || true)"
+note_hard "an IPv4 address" \
+    "$(grep -nE '[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}' "$NOTES" || true)"
+note_hard "a user@host reference" \
+    "$(grep -nE '[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+' "$NOTES" || true)"
 
-if [ -n "$HARD_HITS" ]; then
-    say "FATAL: the release notes contain a hard-stop leak shape -- refusing to publish. No confirmation can override this; fix the source (a poisoned tag name, or a commit message) and re-tag."
-    printf '%s\n' "$HARD_HITS"
+if [ ${#HARD_LINE_LABELS[@]} -gt 0 ]; then
+    say "FATAL: the release notes contain a hard-stop leak shape -- refusing to publish. No confirmation can override this. Line-by-line remedy:"
+    for ln in $(printf '%s\n' "${!HARD_LINE_LABELS[@]}" | sort -n); do
+        LINE_TEXT="$(sed -n "${ln}p" "$NOTES")"
+        # The remedy depends on WHERE the match is, not just what matched.
+        # A hit in a script-generated field means the CURRENT tag itself
+        # is poisoned (the only operator-supplied text that reaches these
+        # specific lines is $VERSION, echoed at the title/Version/Image
+        # lines); a hit anywhere else is changelog content, where "fix
+        # the tag" does nothing -- the offending text lives in a past
+        # commit message already in history.
+        case "$LINE_TEXT" in
+            "## sigmond-appliance "*|"- Version: "*|"- Image: "*)
+                REMEDY="the CURRENT tag ($VERSION) is poisoned -- delete it (git tag -d $VERSION; git push origin :refs/tags/$VERSION if it was pushed) and re-tag with a clean name, then re-run" ;;
+            "- Appliance commit: "*|"- SHA-256: "*|"- Test verdict:"*)
+                REMEDY="this is a script-generated field that should be pure hex/literal text and should never match this shape -- something is wrong upstream of this script; do not trust anything else this run produced until that's understood" ;;
+            *)
+                REMEDY="this is changelog content -- a past commit message already in history. Re-tagging does not fix it; the commit needs to be excluded from what ships (adjust the release range) or the leak needs to be handled out of band (e.g. rewriting that commit's message and force-pushing, which has its own costs)" ;;
+        esac
+        printf '  line %s: %s\n    matched: %s\n    remedy: %s\n' "$ln" "$LINE_TEXT" "${HARD_LINE_LABELS[$ln]}" "$REMEDY"
+    done
     rm -f "$NOTES" "$CHANGELOG_FILE"
     exit 1
 fi
