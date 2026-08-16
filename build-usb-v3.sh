@@ -32,6 +32,15 @@ die(){ say "FATAL: $*"; exit 1; }
 # is the build rig staging dir ($HOME/appliance/v3) and isn't under git.
 # Same override pattern as SIGMOND_REPO below.
 REPO="${APPLIANCE_REPO:-$HOME/appliance/repos/sigmond-appliance}"
+# A bad REPO must abort, not degrade quietly: if $REPO is missing or not a
+# git checkout, `git -C "$REPO" status --porcelain` fails to stderr and the
+# command substitution below captures nothing, which reads as "clean" and
+# silently skips the dirty-tree gate this task exists to add.  Fail loudly
+# up front instead.
+git -C "$REPO" rev-parse --git-dir >/dev/null 2>&1 \
+    || die "not a git checkout: $REPO (check APPLIANCE_REPO)"
+git -C "$REPO" rev-parse --verify -q HEAD >/dev/null \
+    || die "no commits in $REPO — nothing to tag"
 
 RELEASE=0; SHIP=1; DEV=0
 for a in "$@"; do
@@ -39,11 +48,26 @@ for a in "$@"; do
         --release) RELEASE=1 ;;
         --no-ship) SHIP=0 ;;
         --dev) DEV=1 ;;
+        v[0-9]*) die "'$a' looks like the old positional version argument -- version now comes from the git tag on HEAD (git tag $a in $REPO), not from a typed argument. Pass --dev for an untagged build." ;;
+        *) die "unrecognized argument: $a" ;;
     esac
 done
 
-if [ -n "$(git -C "$REPO" status --porcelain)" ]; then
+# Loud, not quiet: a `git status` failure here (permissions, corruption) must
+# not read the same as "tree is clean" -- die rather than let $DIRTY default
+# to empty.
+DIRTY="$(git -C "$REPO" status --porcelain)" || die "git status failed in $REPO"
+if [ -n "$DIRTY" ]; then
     (( DEV )) || die "working tree is dirty ($REPO) — commit or stash before building a release image"
+fi
+
+# `describe --tags --exact-match` deterministically prefers an annotated tag
+# over a lightweight one on the same commit, so this isn't a correctness bug
+# today -- but a leftover test tag (see the verification steps for this
+# script) could silently outrank an intended release tag on a later build.
+TAGS_AT_HEAD="$(git -C "$REPO" tag --points-at HEAD)"
+if [ "$(printf '%s\n' "$TAGS_AT_HEAD" | grep -c .)" -gt 1 ]; then
+    say "WARN: multiple tags on HEAD in $REPO ($(printf '%s' "$TAGS_AT_HEAD" | tr '\n' ' ')) — describe prefers the annotated one; delete any stray tag if that's not the intended release"
 fi
 
 VERSION="$(git -C "$REPO" describe --tags --exact-match HEAD 2>/dev/null || true)"
