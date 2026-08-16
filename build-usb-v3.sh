@@ -165,9 +165,36 @@ SIGREV=$(git -C "$SIGMOND_REF_DIR" rev-parse --short HEAD)
 # logical one. Use SIGMOND_REF_DIR's own parent/basename instead so this
 # still works if APPLIANCE_SIGMOND_REF_DIR ever points somewhere other than
 # directly under RIG_ROOT.
-tar czf sigmond.tar.gz -C "$(dirname "$SIGMOND_REF_DIR")" \
-    --transform 's|^sigmond-ref|sigmond|' "$(basename "$SIGMOND_REF_DIR")"
-say "sigmond payload @ $SIGREV"
+#
+# SIGMOND_REF_DIR itself can be a symlink (it was made one during a rig disk
+# migration, 2026-08-16: RIG_ROOT/sigmond-ref -> /srv/build/sigmond-ref, to
+# get the checkout off B3's root disk). tar with no dereference flag stores
+# a symlink ARGUMENT as a symlink entry -- it does not follow it -- so the
+# archive ended up as one 127-byte "sigmond -> /srv/build/sigmond-ref" entry
+# instead of the tree, and every install got a broken symlink where the
+# sigmond payload should be. Resolve SIGMOND_REF_DIR to its physical path
+# before handing it to tar so the argument tar sees is a real directory.
+# Deliberately NOT `tar -h`/`--dereference`: that would also follow any
+# symlink tar finds WALKING THE TREE, silently changing what ships (e.g. a
+# vendored symlink turned into a copy of its target). Resolving only the
+# top-level path fixes exactly the broken thing.
+SIGMOND_REF_REAL="$(readlink -f "$SIGMOND_REF_DIR")" \
+    || die "cannot resolve sigmond ref dir: $SIGMOND_REF_DIR"
+[ -d "$SIGMOND_REF_REAL" ] \
+    || die "sigmond ref dir resolves to a non-directory: $SIGMOND_REF_DIR -> $SIGMOND_REF_REAL"
+tar czf sigmond.tar.gz -C "$(dirname "$SIGMOND_REF_REAL")" \
+    --transform 's|^sigmond-ref|sigmond|' "$(basename "$SIGMOND_REF_REAL")"
+# A source tree that shrinks to a broken-symlink-sized archive must fail the
+# build, not ship. 4096 bytes and 10 entries are both comfortably below any
+# real (hundreds of files) sigmond checkout, and comfortably above the
+# 127-byte, 1-entry archive this exact defect produced.
+SIGMOND_TAR_BYTES=$(stat -c%s sigmond.tar.gz)
+SIGMOND_TAR_ENTRIES=$(tar tzf sigmond.tar.gz | wc -l)
+[ "$SIGMOND_TAR_BYTES" -ge 4096 ] \
+    || die "sigmond.tar.gz is only ${SIGMOND_TAR_BYTES} bytes -- looks like a broken symlink, not the sigmond source tree (check $SIGMOND_REF_DIR)"
+[ "$SIGMOND_TAR_ENTRIES" -ge 10 ] \
+    || die "sigmond.tar.gz has only ${SIGMOND_TAR_ENTRIES} entries -- looks like a broken symlink, not the sigmond source tree (check $SIGMOND_REF_DIR)"
+say "sigmond payload @ $SIGREV ($SIGMOND_TAR_BYTES bytes, $SIGMOND_TAR_ENTRIES entries)"
 
 say "sigmond-rac payload"
 if [ ! -d sigmond-rac ]; then
@@ -175,6 +202,15 @@ if [ ! -d sigmond-rac ]; then
 fi
 git -C sigmond-rac pull -q 2>/dev/null || true
 tar czf sigmond-rac.tar.gz sigmond-rac
+# sigmond-rac is a fresh git clone directly under $PWD (not a rig-sibling
+# path that can be a symlink), but the same broken-payload class of bug is
+# cheap to guard against here too.
+SIGMOND_RAC_TAR_BYTES=$(stat -c%s sigmond-rac.tar.gz)
+SIGMOND_RAC_TAR_ENTRIES=$(tar tzf sigmond-rac.tar.gz | wc -l)
+[ "$SIGMOND_RAC_TAR_BYTES" -ge 1024 ] \
+    || die "sigmond-rac.tar.gz is only ${SIGMOND_RAC_TAR_BYTES} bytes -- looks broken, not the sigmond-rac source tree"
+[ "$SIGMOND_RAC_TAR_ENTRIES" -ge 2 ] \
+    || die "sigmond-rac.tar.gz has only ${SIGMOND_RAC_TAR_ENTRIES} entries -- looks broken, not the sigmond-rac source tree"
 
 say "prepare-iso (embed answer + firstboot)"
 # a stale .tmp from an interrupted run makes xorriso append to a full image
