@@ -84,12 +84,22 @@ $SSH "for d in /opt/git/sigmond/*/; do printf '%s %s\n' \"\$(basename \$d)\" \"\
 # completed, otherwise-good template. build-usb-v3.sh is the hard gate — it
 # refuses to ship without this file.
 say "capturing component pin manifest (smd version) from the template"
-if $SSH 'smd version' > "$PWD/manifest-raw.txt" 2>/dev/null \
-   && grep -q 'components (live):' "$PWD/manifest-raw.txt"; then
-    say "manifest captured: $(grep -c '^    [A-Za-z]' "$PWD/manifest-raw.txt") component lines"
+$SSH 'smd version' > manifest-raw.txt 2>/dev/null
+NCOMP=$(grep -c '^    [A-Za-z]' manifest-raw.txt 2>/dev/null); NCOMP=${NCOMP:-0}
+# Gate on the row COUNT, not just the "components (live):" header string.
+# A capture that connects and is cut off right after the header -- an ssh
+# drop, the remote smd process killed mid-write, the VM beginning to shut
+# down concurrently -- still contains that header and would pass a bare
+# grep -q, shipping a manifest that LIES about having zero component pins.
+# A real appliance reports ~20 components today (22 on B4 as of
+# 2026-08-15); 10 is a plausible floor -- well under today's count so a
+# handful of components coming and going over time won't false-positive,
+# but far above anything a truncated capture produces.
+if grep -q 'components (live):' manifest-raw.txt 2>/dev/null && [ "$NCOMP" -ge 10 ]; then
+    say "manifest captured: $NCOMP component lines"
 else
-    say "WARNING: manifest capture FAILED — image will be unblessable (manifest-raw.txt missing or malformed); build-usb-v3.sh will refuse to ship without it"
-    rm -f "$PWD/manifest-raw.txt"
+    say "WARNING: manifest capture FAILED or truncated ($NCOMP component lines) — image will be unblessable (manifest-raw.txt missing or malformed); build-usb-v3.sh will refuse to ship without it"
+    rm -f manifest-raw.txt
 fi
 
 say "shutting down VM (halt, not reboot — no machine-id now)"

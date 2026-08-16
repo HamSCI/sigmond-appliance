@@ -244,10 +244,23 @@ ls -la "$IMG"
 # wspr-recorder, ...) rode into this image. build-golden-vm.sh captures the
 # raw `smd version` block from inside the template (the only place it can be
 # captured — smd version doesn't work on B3 itself) into manifest-raw.txt,
-# best-effort. This is the hard gate: no manifest, no ship. A hand-typed pin
-# drifts silently, so this file is generated only, never edited by hand.
+# gating on both presence and row count there. This is the hard gate: no
+# manifest, or a manifest that looks truncated, means no ship. A hand-typed
+# pin drifts silently, so this file is generated only, never edited by hand.
 say "component pin manifest"
-[ -f manifest-raw.txt ] || die "manifest-raw.txt missing — the golden VM build did not capture smd version (see build-golden-vm.sh output); an image cannot be blessed without a manifest. Rebuild the golden VM or fix the capture before shipping."
+if [ ! -f manifest-raw.txt ]; then
+    rm -f "$IMG" "${IMG%.img}.sha256"
+    die "manifest-raw.txt missing — the golden VM build did not capture smd version (see build-golden-vm.sh output); an image cannot be blessed without a manifest. Rebuild the golden VM or fix the capture before shipping. ($IMG and its .sha256 removed so they don't linger for the next run)"
+fi
+# Defense in depth: re-check row count here too, not just existence -- this
+# is the actual ship/no-ship gate, and manifest-raw.txt could in principle
+# be stale or hand-edited between a golden-VM run and this one. Same floor
+# as build-golden-vm.sh's capture-time check.
+NCOMP=$(grep -c '^    [A-Za-z]' manifest-raw.txt 2>/dev/null); NCOMP=${NCOMP:-0}
+if [ "$NCOMP" -lt 10 ]; then
+    rm -f "$IMG" "${IMG%.img}.sha256"
+    die "manifest-raw.txt has only $NCOMP component line(s) — looks truncated, not a real ~20-component capture; refusing to ship a manifest that lies. Rebuild the golden VM. ($IMG and its .sha256 removed so they don't linger for the next run)"
+fi
 MANIFEST="${IMG%.img}.manifest.txt"
 {
     echo "image_version: $VERSION"
