@@ -18,7 +18,17 @@ LOG="$PWD/test-v3.log"
 exec >> "$LOG" 2>&1
 say(){ echo "[test $(date '+%T')] $*"; }
 KEY="$HOME/appliance/build/applkey"
-SSHN="ssh -i $KEY -p 5561 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=5 root@127.0.0.1"
+# --release builds strip root-ssh-keys from answer-v3.toml on purpose
+# (build-usb-v3.sh RELEASE branch) so the test key never lands on a
+# shipping image. Those images still take the documented image-default
+# root password (firstboot-v3.sh: "console/SSH login: root / hamsci-sigmond").
+# Overridable, not a new secret — this password is already public in the
+# wizard output and project docs.
+SSHPASSWORD="${SIGMOND_TEST_PASSWORD:-hamsci-sigmond}"
+SSHOPTS="-p 5561 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=5 root@127.0.0.1"
+SSHKEY="ssh -i $KEY $SSHOPTS"
+SSHPW="sshpass -p $SSHPASSWORD ssh $SSHOPTS"
+SSHN=""  # resolved once by resolve_ssh(); every call site below reads $SSHN
 OVMF_CODE=/usr/share/OVMF/OVMF_CODE_4M.fd
 [ -f "$OVMF_CODE" ] || OVMF_CODE=/usr/share/OVMF/OVMF_CODE_4M.secboot.fd
 USBIMG="${USBIMG:-$(ls -t sigmond-appliance-v3*.img 2>/dev/null | head -1)}"
@@ -57,6 +67,35 @@ boot_vm(){ # boot_vm <with_usb 0|1> <serial_log>
       -qmp unix:/tmp/sigv3-qmp.sock,server,nowait -serial "file:$PWD/$slog" -display none -daemonize
 }
 
+# resolve_ssh <tries> <delay> [label]: wait for the nested host's ssh to
+# answer and pin $SSHN to whichever auth method it accepts — key first
+# (fast path, works on non-release builds), password fallback (release
+# builds, whose test key build-usb-v3.sh strips on purpose). Resolves once:
+# if $SSHN is already pinned from an earlier call in this run, it just
+# retries that same command — it does not re-probe both methods every time.
+# On total failure it tells apart "host never came up" (qemu process gone)
+# from "host answered but no credential worked" (both auths rejected) —
+# those used to produce the same message, which is what made this bug take
+# an investigation to find.
+resolve_ssh(){
+    local tries="$1" delay="$2" label="${3:-}" i
+    if [ -n "$SSHN" ]; then
+        for i in $(seq 1 "$tries"); do $SSHN true 2>/dev/null && return 0; sleep "$delay"; done
+        say "FATAL: nested PVE ssh never came back${label:+ ($label)}"; return 1
+    fi
+    for i in $(seq 1 "$tries"); do
+        if $SSHKEY true 2>/dev/null; then SSHN="$SSHKEY"; say "auth: ssh test key accepted"; return 0; fi
+        if $SSHPW true 2>/dev/null; then SSHN="$SSHPW"; say "auth: test key not accepted, falling back to image-default password (release build)"; return 0; fi
+        sleep "$delay"
+    done
+    if vm_running; then
+        say "FATAL: nested host is up but neither ssh key nor password auth worked${label:+ ($label)}"
+    else
+        say "FATAL: nested PVE ssh never came up${label:+ ($label)}"
+    fi
+    return 1
+}
+
 case "${1:-all}" in
 all|A)
 say "════ PHASE A: auto-install ($USBIMG) ════"
@@ -73,8 +112,7 @@ say "PHASE A PASS: installer completed and powered off"
 B)
 say "════ PHASE B: first boot from NVMe, no USB ════"
 boot_vm 0 serialB-v3.log
-for i in $(seq 1 60); do $SSHN true 2>/dev/null && break; sleep 5; done
-$SSHN true 2>/dev/null || { say "FATAL: nested PVE ssh never came up"; exit 1; }
+resolve_ssh 60 5 B || exit 1
 say "nested PVE up: $($SSHN 'pveversion; hostname' 2>/dev/null)"
 $SSHN "hostname | grep -q 'sigmond-appliance-v3'" && say "versioned hostname OK" || say "WARN: hostname not versioned: $($SSHN hostname)"
 $SSHN "grep -q 'no Sigmond USB present' /var/log/sigmond-firstboot.log" && say "firstboot ran, no media (expected)" || say "WARN: firstboot log unexpected"
@@ -93,8 +131,7 @@ say "PHASE B PASS"
 C)
 say "════ PHASE C: boot with USB attached → auto-import, VM runs UNPINNED ════"
 boot_vm 1 serialC-v3.log
-for i in $(seq 1 60); do $SSHN true 2>/dev/null && break; sleep 5; done
-$SSHN true 2>/dev/null || { say "FATAL: nested PVE ssh never came up (C)"; exit 1; }
+resolve_ssh 60 5 C || exit 1
 say "waiting for decoder VM import (up to 10 min)"
 for i in $(seq 1 60); do $SSHN "qm status $VMID 2>/dev/null | grep -q running" 2>/dev/null && break; sleep 10; done
 $SSHN "qm status $VMID 2>/dev/null" | grep -q running || { say "FATAL: VM $VMID not running"; $SSHN "tail -20 /var/log/sigmond-firstboot.log"; exit 1; }
@@ -114,6 +151,9 @@ say "PHASE C PASS"
 ;&
 D)
 say "════ PHASE D: wizard → finalizer → tuning reboot → pinned production ════"
+# standalone `D` invocations start with $SSHN unresolved (no B/C ran in
+# this process); resolve_ssh no-ops quickly if it's already pinned.
+resolve_ssh 60 5 D || exit 1
 # require 2 consecutive agent pings — a lone success during guest boot
 # can be followed by an agent restart (observed 2026-07-26, false FATAL)
 AGENT_OK=0
