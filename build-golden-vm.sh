@@ -3,22 +3,41 @@
 # Same pipeline as v2 (provision.sh clones CURRENT HamSCI main at build time),
 # ssh port 5557 to avoid any stale v2 rig.
 set -u
-cd "$HOME/appliance/v3"
+say(){ echo "[driver $(date '+%T')] $*"; }
+die(){ say "FATAL: $*"; exit 1; }
+
+# RIG_ROOT is the parent that holds v3 plus its build-rig siblings (build/,
+# sigmond-ref/, vmbuild/). Resolved explicitly rather than via "../sibling"
+# from inside v3 -- the kernel resolves ".." PHYSICALLY, so a v3 that is a
+# symlink into a different physical location (it was, briefly, when the rig
+# moved off B3's root disk) makes every "../X" silently point at a
+# nonexistent sibling of the physical target while bash's own $PWD still
+# shows the pre-move path. Same pattern as build-usb-v3.sh.
+RIG_ROOT="${APPLIANCE_RIG_ROOT:-$HOME/appliance}"
+[ -d "$RIG_ROOT" ] || die "rig root missing: $RIG_ROOT (check APPLIANCE_RIG_ROOT)"
+cd "$RIG_ROOT/v3" || die "rig v3 checkout missing: $RIG_ROOT/v3 (check APPLIANCE_RIG_ROOT)"
 LOG="$PWD/build.log"
 exec > "$LOG" 2>&1
-say(){ echo "[driver $(date '+%T')] $*"; }
-KEY="$HOME/appliance/build/applkey"
+
+BUILD_DIR="${APPLIANCE_BUILD_DIR:-$RIG_ROOT/build}"
+VMBUILD_DIR="${APPLIANCE_VMBUILD_DIR:-$RIG_ROOT/vmbuild}"
+[ -d "$BUILD_DIR" ] || die "build dir missing: $BUILD_DIR (check APPLIANCE_BUILD_DIR)"
+[ -d "$VMBUILD_DIR" ] || die "vmbuild dir missing: $VMBUILD_DIR (check APPLIANCE_VMBUILD_DIR)"
+KEY="$BUILD_DIR/applkey"
 SSH="ssh -i $KEY -p 5557 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=5 build@127.0.0.1"
 SCP="scp -i $KEY -P 5557 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
 
 say "creating fresh build disk from debian-13 base"
 sudo pkill -f "name goldenv3" 2>/dev/null; sleep 2
-cp ../vmbuild/debian-13-genericcloud-amd64.qcow2 golden-v3.qcow2
+[ -f "$VMBUILD_DIR/debian-13-genericcloud-amd64.qcow2" ] \
+    || die "base qcow2 missing: $VMBUILD_DIR/debian-13-genericcloud-amd64.qcow2 (check APPLIANCE_VMBUILD_DIR)"
+cp "$VMBUILD_DIR/debian-13-genericcloud-amd64.qcow2" golden-v3.qcow2
 qemu-img resize golden-v3.qcow2 20G
 
 say "booting build VM (headless, ssh :5557)"
+[ -f "$VMBUILD_DIR/seed.iso" ] || die "seed iso missing: $VMBUILD_DIR/seed.iso (check APPLIANCE_VMBUILD_DIR)"
 sudo qemu-system-x86_64 -name goldenv3 -enable-kvm -m 8192 -smp 4 -cpu host \
-  -drive file=golden-v3.qcow2,if=virtio -drive file=../vmbuild/seed.iso,media=cdrom \
+  -drive file=golden-v3.qcow2,if=virtio -drive file="$VMBUILD_DIR/seed.iso",media=cdrom \
   -netdev user,id=n0,hostfwd=tcp:127.0.0.1:5557-:22 -device virtio-net,netdev=n0 \
   -display none -daemonize
 

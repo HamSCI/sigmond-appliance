@@ -22,14 +22,27 @@
 #   stamped v0.0-dev+<sha> so it can never pass as, or be blessed as, a
 #   release.  A dirty working tree aborts unless --dev is given.
 set -eu
-cd "$HOME/appliance/v3"
-LOG="$PWD/usb-build.log"
-exec > >(tee -a "$LOG") 2>&1
 say(){ echo "[usb $(date '+%T')] $*"; }
 die(){ say "FATAL: $*"; exit 1; }
 
+# RIG_ROOT is the parent that holds v3 plus its build-rig siblings (build/,
+# sigmond-ref/, vmbuild/). Everything below resolves off it explicitly
+# rather than via "../sibling" from inside v3: the kernel resolves ".."
+# PHYSICALLY, so if v3 is ever a symlink into a different physical location
+# (it was, briefly, when the rig moved off B3's root disk to relieve disk
+# pressure) every "../X" silently starts pointing at a nonexistent sibling
+# of the physical target instead of the logical one -- bash's own $PWD still
+# reports the pre-move path, so the breakage doesn't show until a build
+# fails partway through. Resolving from RIG_ROOT sidesteps that: normal
+# absolute-path symlink resolution is used instead of physical ".." lookup.
+RIG_ROOT="${APPLIANCE_RIG_ROOT:-$HOME/appliance}"
+[ -d "$RIG_ROOT" ] || die "rig root missing: $RIG_ROOT (check APPLIANCE_RIG_ROOT)"
+cd "$RIG_ROOT/v3" || die "rig v3 checkout missing: $RIG_ROOT/v3 (check APPLIANCE_RIG_ROOT)"
+LOG="$PWD/usb-build.log"
+exec > >(tee -a "$LOG") 2>&1
+
 # REPO is the git checkout this script itself ships from -- not $PWD, which
-# is the build rig staging dir ($HOME/appliance/v3) and isn't under git.
+# is the build rig staging dir ($RIG_ROOT/v3) and isn't under git.
 # Same override pattern as SIGMOND_REPO below.
 REPO="${APPLIANCE_REPO:-$HOME/appliance/repos/sigmond-appliance}"
 # A bad REPO must abort, not degrade quietly: if $REPO is missing or not a
@@ -41,6 +54,16 @@ git -C "$REPO" rev-parse --git-dir >/dev/null 2>&1 \
     || die "not a git checkout: $REPO (check APPLIANCE_REPO)"
 git -C "$REPO" rev-parse --verify -q HEAD >/dev/null \
     || die "no commits in $REPO — nothing to tag"
+
+# BUILD_DIR and SIGMOND_REF_DIR are the other two rig siblings this script
+# touches (vmbuild/ belongs to build-golden-vm.sh only). BUILD_DIR must
+# already exist and be populated (answer.toml lives there); SIGMOND_REF_DIR
+# is allowed to not exist yet -- it's created below by git clone the first
+# time this runs on a rig -- so only its parent (RIG_ROOT, already checked
+# above) needs to be real.
+BUILD_DIR="${APPLIANCE_BUILD_DIR:-$RIG_ROOT/build}"
+SIGMOND_REF_DIR="${APPLIANCE_SIGMOND_REF_DIR:-$RIG_ROOT/sigmond-ref}"
+[ -d "$BUILD_DIR" ] || die "build dir missing: $BUILD_DIR (check APPLIANCE_BUILD_DIR)"
 
 RELEASE=0; SHIP=1; DEV=0
 for a in "$@"; do
@@ -111,8 +134,9 @@ say "wizard sourced from sigmond $_wiz_head ($(wc -l < sigmond-wizard.sh) lines)
 say "=== building sigmond-appliance $VERSION (tag $VTAG, release=$RELEASE) ==="
 
 say "answer file (fqdn carries the version)"
+[ -f "$BUILD_DIR/answer.toml" ] || die "answer.toml missing: $BUILD_DIR/answer.toml (check APPLIANCE_BUILD_DIR)"
 sed -e "s|^fqdn = .*|fqdn = \"sigmond-appliance-${VTAG}.local\"|" \
-    ../build/answer.toml > answer-v3.toml
+    "$BUILD_DIR/answer.toml" > answer-v3.toml
 grep -q "sigmond-appliance-${VTAG}" answer-v3.toml || { say "FATAL: fqdn substitution failed"; exit 1; }
 if [ "$RELEASE" = 1 ]; then
     sed -i '/^root-ssh-keys/d' answer-v3.toml
@@ -131,12 +155,18 @@ if grep -q '120' sigmond-wizard-rendered.sh; then
 fi
 
 say "sigmond repo payload (host tuning scripts ride on the stick)"
-if [ ! -d ../sigmond-ref/.git ]; then
-    git clone -q --depth 1 git@github.com:HamSCI/sigmond ../sigmond-ref
+if [ ! -d "$SIGMOND_REF_DIR/.git" ]; then
+    git clone -q --depth 1 git@github.com:HamSCI/sigmond "$SIGMOND_REF_DIR"
 fi
-git -C ../sigmond-ref pull -q 2>/dev/null || true
-SIGREV=$(git -C ../sigmond-ref rev-parse --short HEAD)
-tar czf sigmond.tar.gz -C .. --transform 's|^sigmond-ref|sigmond|' sigmond-ref
+git -C "$SIGMOND_REF_DIR" pull -q 2>/dev/null || true
+SIGREV=$(git -C "$SIGMOND_REF_DIR" rev-parse --short HEAD)
+# `tar -C ..` is the same physical-vs-logical trap as a bare "../X": it
+# changes tar's cwd to the physical parent of the process cwd, not the
+# logical one. Use SIGMOND_REF_DIR's own parent/basename instead so this
+# still works if APPLIANCE_SIGMOND_REF_DIR ever points somewhere other than
+# directly under RIG_ROOT.
+tar czf sigmond.tar.gz -C "$(dirname "$SIGMOND_REF_DIR")" \
+    --transform 's|^sigmond-ref|sigmond|' "$(basename "$SIGMOND_REF_DIR")"
 say "sigmond payload @ $SIGREV"
 
 say "sigmond-rac payload"
