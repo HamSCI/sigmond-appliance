@@ -9,3 +9,10 @@
 sigmond-rac/
 sigmond-rac.tar.gz
 .claude/
+
+# Build artifacts: build-usb-v3.sh copies the wizard here from HamSCI/sigmond
+# (scripts/proxmox/sigmond-wizard.sh, the authoritative home) and renders it.
+# Committing them created a stale duplicate that silently regressed four shipped
+# fixes -- the second time this file has drifted that way.
+sigmond-wizard.sh
+sigmond-wizard-rendered.sh
