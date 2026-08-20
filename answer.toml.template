@@ -18,3 +18,29 @@ filter.DEVNAME = "/dev/nvme*"
 [first-boot]
 source = "from-iso"
 ordering = "fully-up"
+
+# --- fleet situational-awareness heartbeat (sigmond#task-8) -----------------
+# NOT a real section of this file -- the Proxmox VE automated installer only
+# understands [global]/[network]/[disk-setup]/[first-boot] above, and this
+# whole block is a comment so it can never confuse that parser. It's left
+# here as the one per-repo pointer to where heartbeat config ACTUALLY lives,
+# since a from-scratch search of this repo turns up nothing (verified:
+# neither this file nor complete-profile.sh ever touch coordination.toml or
+# site identity -- that pipeline is entirely on the HamSCI/sigmond side).
+#
+# The real place to configure it is /etc/sigmond/site-profile.toml on the
+# decoder VM (guest), which `smd admin personalize` -> `smd config render`
+# (bin/smd, HamSCI/sigmond) turns into coordination.toml [heartbeat] on
+# every firstboot / re-personalize. Uncomment the block below in that file,
+# not this one:
+#
+#   [heartbeat]
+#   enabled       = false            # opt in explicitly
+#   station       = ""               # blank defaults to your reporter id
+#   host          = "wd30.wsprdaemon.org"
+#   port          = 38222            # your router's forward to the fleet
+#                                     # server; public/self-hosted installs
+#                                     # point this at their own fleetboard
+#   sftp_user     = "hamsci-hb"
+#   remote_path   = "incoming"
+#   interval_sec  = 300
