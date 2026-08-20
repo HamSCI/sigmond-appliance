@@ -368,6 +368,20 @@ echo "$LC" | grep -q NOT-STAGED && { say "FATAL: sigmond-location-check not stag
 echo "$LC" | grep -q 'FN21ej' && echo "$LC" | grep -q '41.4' \
     && say "location authority re-gridded the station from the (fake) GPSDO ✓" \
     || { say "FATAL: location authority did not apply GPSDO position"; echo "$LC" | head -4; exit 1; }
+say "── fleet awareness: heartbeat CLI contract on an unconfigured image"
+# Ruled contract (fleet-awareness plan, Phase 6): a fresh image has no
+# [heartbeat] block, so emit --dry-run must exit 2 WITH the not-enabled
+# message — that proves the CLI is wired and the awareness code rides the
+# image.  Exit 0 here would mean a config leaked into the golden template;
+# any other exit means the CLI is broken.  The exit-0 path is proven live
+# on a configured station, not here.
+HB=$($SSHN "qm guest exec $VMID --timeout 30 -- bash -lc 'smd admin heartbeat emit --dry-run; echo rc=\$?'" 2>&1)
+echo "$HB" | grep -q "rc=2" && echo "$HB" | grep -q "heartbeat: not enabled" \
+    && say "heartbeat emit --dry-run: exit 2 + not-enabled message ✓" \
+    || { say "FATAL: heartbeat CLI contract broken on unconfigured image"; echo "$HB" | head -4; exit 1; }
+$SSHN "qm guest exec $VMID --timeout 30 -- bash -lc 'systemctl list-unit-files sigmond-heartbeat.timer sigmond-gap-hourly.timer'" 2>&1 | grep -q "sigmond-heartbeat.timer" \
+    && say "heartbeat + gap-hourly units present in image ✓" \
+    || { say "FATAL: awareness units missing from image"; exit 1; }
 say "PHASE D PASS — NESTED TEST COMPLETE"
 ;;
 esac
