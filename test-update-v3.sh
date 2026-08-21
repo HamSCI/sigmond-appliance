@@ -40,6 +40,34 @@
 #   * git run as root rewrites .git/index and recreates the exact damage
 #     `smd doctor --fix` exists to repair — every guest snippet exports
 #     GIT_OPTIONAL_LOCKS=0 and every git call passes --no-optional-locks.
+#
+# ── CONTRACT STRINGS ────────────────────────────────────────────────────
+# Every product string and exit code this rig ASSERTS on, with where it is
+# produced.  Line numbers are approximate and will drift; the point is that
+# a `grep` for any of these across sigmond finds both the producer and this
+# consumer, so a rename shows up in review instead of forty minutes into a
+# nested run.  Checked against sigmond ac01bb7 (2026-08-21).
+#
+#   "components (live):"                lib/sigmond/provenance.py:130
+#                                       parsed: lib/sigmond/doctor.py:292
+#   "    <kind>: <detail>" (doctor)     lib/sigmond/doctor.py:519
+#   "detached" finding kind             bin/smd:4443
+#   "nothing to do"                     bin/smd:3060, 3062
+#   "HELD"                              bin/smd:3451; exit 3 = bin/smd:3036
+#   "heartbeat: not enabled" + exit 2   bin/smd:4135
+#   "plan OK — "                        bin/smd:3759, 3764
+#   "sanctioned superset"               bin/smd:3761
+#   "installed live (<sha>) but not in the manifest"
+#                                       lib/sigmond/manifest_adopt.py:104
+#   "admin manifest restore: restored to manifest — <n> component(s) moved"
+#                                       bin/smd:4085
+#   "adopt-strict verifies clean"       REMOVED by sigmond ac01bb7; accepted
+#                                       only to report a pre-ac01bb7 guest
+#   /etc/sigmond-appliance/manifest.txt bin/smd:168; firstboot-v3.sh:155
+#   10-row components floor             lib/sigmond/doctor.py:289
+#   4-char sha prefix floor             lib/sigmond/doctor.py:354
+#   "USB image under test: ", "PHASE D PASS"
+#                                       test-nested-v3.sh:36, :385
 set -u
 
 # ── arguments ───────────────────────────────────────────────────────────
@@ -94,14 +122,25 @@ exec >> "$LOG" 2>&1
 say(){ echo "[upd $(date '+%T')] $*"; }
 
 # Evidence dir: every raw guest-exec capture of THIS run, kept for
-# post-mortem.  Cleared at the start of each run rather than accumulating,
-# so "the last run's captures" is never ambiguous.
+# post-mortem.  The previous run's captures are ROTATED to <dir>.prev, never
+# deleted on the way in: this repo has already lost its only usb-build.log to
+# a start-of-run cleanup that ran before the run had earned anything, and a
+# guard that aborts the save must abort the delete too.  .prev is released
+# only after the target guard has passed — i.e. once this run is committed to
+# actually doing something — so an immediate refusal leaves TWO generations
+# of evidence on disk rather than none.
 WORK="$PWD/update-evidence"
-rm -rf "$WORK"; mkdir -p "$WORK" || { say "FATAL: cannot create $WORK"; exit 1; }
+WORK_PREV="$WORK.prev"
+if [ -d "$WORK" ]; then
+    rm -rf "$WORK_PREV.dying"
+    [ -d "$WORK_PREV" ] && mv -f "$WORK_PREV" "$WORK_PREV.dying"
+    mv -f "$WORK" "$WORK_PREV" || { say "FATAL: cannot rotate $WORK to $WORK_PREV"; exit 1; }
+fi
+mkdir -p "$WORK" || { say "FATAL: cannot create $WORK"; exit 1; }
 
 say "════════════════════════════════════════════════════════════════"
 say "test-update-v3.sh starting (rig=$RIG_DIR resume=$RESUME target=$TARGET)"
-say "raw guest captures: $WORK"
+say "raw guest captures: $WORK$([ -d "$WORK_PREV" ] && echo "  (previous run rotated to $WORK_PREV)")"
 
 # ── ssh into the nested PM: the sibling's idiom, kept identical ─────────
 # These four helpers (SSHOPTS/SSHKEY/SSHPW/resolve_ssh and vm_running) are
@@ -260,9 +299,13 @@ PYEOF
         *TRUNC=1*) say "WARN: qm truncated the output of $tag — assertions below see a partial capture" ;;
     esac
     # The rc line is found by token ANYWHERE in the capture, not assumed to
-    # be line 1: a chatty /etc/profile.d would otherwise shift it.
+    # be line 1: a chatty /etc/profile.d would otherwise shift it.  FIRST
+    # match, not last: the wrapper emits exactly one, and the command's own
+    # output could contain a token-shaped line (an `smd` diagnostic echoing
+    # this rig's environment would do it) — taking the last would then read
+    # the command's text as the command's status.
     local rcline
-    rcline="$(grep -E "^${GX_TOKEN}=[0-9]+\$" "$GX_OUT" | tail -1)"
+    rcline="$(grep -E "^${GX_TOKEN}=[0-9]+\$" "$GX_OUT" | head -1)"
     if [ -n "$rcline" ]; then
         GX_RC="${rcline#*=}"
         grep -v -E "^${GX_TOKEN}=[0-9]+\$" "$GX_OUT" > "$GX_OUT.tmp"
@@ -318,6 +361,23 @@ sha_equal(){
 }
 sha_of(){ awk -v n="$2" '$1==n {print $2; exit}' "$1"; }
 
+# rows_match <a-rows> <b-rows>: same component set, each pair sha-equal.
+# Prints the first disagreements it finds (for the caller to log) and
+# returns nonzero.  Used to tie a candidate manifest to the one the running
+# guest was actually laid down from.
+rows_match(){
+    local a="$1" b="$2" n sa sb bad=0
+    while read -r n sa; do
+        sb="$(sha_of "$b" "$n")"
+        if [ -z "$sb" ]; then echo "  $n: in $(basename "$a") ($sa), absent from $(basename "$b")"; bad=1
+        elif ! sha_equal "$sa" "$sb"; then echo "  $n: $(basename "$a")=$sa vs $(basename "$b")=$sb"; bad=1; fi
+    done < "$a"
+    while read -r n sa; do
+        [ -n "$(sha_of "$a" "$n")" ] || { echo "  $n: in $(basename "$b") ($sa), absent from $(basename "$a")"; bad=1; }
+    done < "$b"
+    [ "$bad" = 0 ]
+}
+
 # doctor_kinds <doctor-output> <outfile>: the KINDS of finding, sorted and
 # deduped.  doctor.summarise prints "<component>:" then "    <kind>: detail".
 # Comparing kinds (not whole lines) is what makes "no NEW findings" a
@@ -325,6 +385,19 @@ sha_of(){ awk -v n="$2" '$1==n {print $2; exit}' "$1"; }
 doctor_kinds(){
     awk '/^    [A-Za-z][A-Za-z0-9_-]*:/ { k=$1; sub(/:$/, "", k); print k }' "$1" | sort -u > "$2"
 }
+# assert_kinds_parsed <label> <doctor-rc> <kinds-file> <doctor-output>: a
+# doctor that REPORTED findings (exit 1) but from which this parser
+# extracted no kinds means summarise()'s "    <kind>: detail" shape has
+# moved — and every "no NEW finding kinds" assertion downstream of it would
+# then be comparing two empty sets and passing vacuously.  A check that
+# cannot fail is worse than no check, so this is FATAL rather than a WARN.
+assert_kinds_parsed(){
+    local label="$1" rc="$2" kinds="$3" out="$4"
+    [ "$rc" = "1" ] || return 0
+    [ ! -s "$kinds" ] || return 0
+    fatal "$out" "$label: doctor kind parser matched nothing while doctor reported findings (exit 1) — smd doctor's finding format has moved, and every no-new-kinds assertion in this rig would pass vacuously"
+}
+
 # new_kinds <pre> <post> : kinds present in post and absent from pre, minus
 # any the operator has explicitly sanctioned, minus any named as expected.
 new_kinds(){
@@ -423,8 +496,15 @@ if [ "$RESUME" = 0 ]; then
     # without logging a PASS, or logged a PASS and exited nonzero, is a
     # rig that is lying in one direction or the other — refuse either way.
     [ "$NRC" -eq 0 ] || fatal - "$(basename "$NESTED_TEST") exited $NRC — the install this update test builds on did not pass (see $NESTED_LOG)"
-    require_phase_d_pass "$NESTED_LOG" "$PRELINES" "$IMGBASE" \
-        || fatal - "no PHASE D PASS for $IMGBASE in the lines $(basename "$NESTED_TEST") just appended to $NESTED_LOG"
+    if ! require_phase_d_pass "$NESTED_LOG" "$PRELINES" "$IMGBASE"; then
+        # The sibling logs elsewhere, so its evidence has to be pulled into
+        # THIS log — otherwise the reader is told a rig failed and sent to
+        # find out why somewhere else.
+        say "── $NESTED_LOG, the block $(basename "$NESTED_TEST") just appended ──"
+        awk -v from="$PRELINES" 'NR > from' "$NESTED_LOG" | tail -40
+        say "── end ──"
+        fatal - "no PHASE D PASS for $IMGBASE in the lines $(basename "$NESTED_TEST") just appended to $NESTED_LOG"
+    fi
     say "INSTALL evidence OK: PHASE D PASS for $IMGBASE in this run's block"
 else
     say "════ RESUME: reusing the nested production PM/VM from a previous run ════"
@@ -447,15 +527,123 @@ case "$SSHN" in
     *) fatal - "target guard: \$SSHN does not name the nested rig's loopback forward (-p 5561 root@127.0.0.1): $SSHN" ;;
 esac
 PMHOST="$($SSHN hostname 2>/dev/null)"
-NESTED_PM_RE="${NESTED_PM_RE:-^(N0CALL-T1-PM|sigmond-appliance-v3)}"
-printf '%s\n' "$PMHOST" | grep -qE "$NESTED_PM_RE" \
-    || fatal - "target guard: nested PM hostname '$PMHOST' does not match the nested naming $NESTED_PM_RE — refusing to touch it (this is how the rig stays incapable of reaching the real fleet)"
+# NARROWING ONLY.  The built-in pattern is the allowlist; $NESTED_PM_RE is
+# ANDed with it, never substituted for it.  An env var that could REPLACE
+# this regex would be a one-line path to pointing the rig at a live station
+# — exactly the capability the guard exists to remove — so the effective
+# check is (built-in) AND (env, if set): an operator can make the guard
+# stricter, and cannot make it looser.
+NESTED_PM_RE_BUILTIN='^(N0CALL-T1-PM|sigmond-appliance-v3)'
+printf '%s\n' "$PMHOST" | grep -qE "$NESTED_PM_RE_BUILTIN" \
+    || fatal - "target guard: nested PM hostname '$PMHOST' does not match the nested naming $NESTED_PM_RE_BUILTIN — refusing to touch it (this is how the rig stays incapable of reaching the real fleet)"
+if [ -n "${NESTED_PM_RE:-}" ]; then
+    printf '%s\n' "$PMHOST" | grep -qE "$NESTED_PM_RE" \
+        || fatal - "target guard: nested PM hostname '$PMHOST' matches the built-in nested naming but not the narrowing NESTED_PM_RE=$NESTED_PM_RE"
+fi
 VMNAME="$($SSHN "qm config $VMID 2>/dev/null" | sed -n 's/^name: //p')"
 case "$VMNAME" in
     N0CALL-T1|sigmond-decoder-v3) : ;;
     *) fatal - "target guard: VM $VMID on $PMHOST is named '$VMNAME', not the nested rig's wizard-configured name — refusing to exec into it" ;;
 esac
 say "target guard OK: loopback forward → nested PM '$PMHOST' → VM $VMID '$VMNAME'"
+
+# The guard has passed, so this run is committed: release the run before
+# last.  (IMP-2 — the delete happens only once the save has been earned.)
+rm -rf "$WORK_PREV.dying"
+
+# ── the guest's RuntimeMaxSec fuse ─────────────────────────────────────
+# test-nested-v3.sh boots the guest under `systemd-run --property=
+# RuntimeMaxSec=3600` as a backstop against an abnormal driver exit
+# orphaning a 12G/8vCPU guest.  That fuse keeps burning while THIS rig
+# works, and when it fires systemd SIGTERMs qemu — from in here that looks
+# exactly like a wedged guest agent, which is a diagnosis that would send
+# someone restarting qemu-guest-agent for an hour.  So: read the fuse, log
+# what is left of it, and refuse up front when there plainly is not enough.
+#
+# NOTE the unit lives HERE, on the rig host, not inside the nested PM: it
+# is the local systemd-run scope that owns the qemu process, so it is read
+# with a local `systemctl`, not over $SSHN.  The unit name is not assumed
+# (the sibling stamps it with its own pid and a timestamp) — it is read
+# back from the running qemu process's cgroup, which cannot be stale.
+#
+# The budget is a realistic end-to-end cost, NOT the sum of the per-command
+# timeout ceilings below: those ceilings total ~12900 s because each is a
+# generous "this has hung" bound, and summing them would exceed a 3600 s
+# fuse by 3.6x and refuse every possible run.  U2_BUDGET_SEC overrides it.
+U2_BUDGET_SEC="${U2_BUDGET_SEC:-2400}"
+FUSE_MARGIN=300
+QPID="$(ps -C qemu-system-x86_64 -o pid=,args= 2>/dev/null | awk '/guest=sigv3/{print $1; exit}')"
+GUEST_UNIT=""
+# .service OR .scope: `systemd-run --unit=` makes a service (what the
+# sibling does), `systemd-run --scope` makes a scope, and a fuse can be set
+# on either — matching only one would silently fail open to the WARN below.
+[ -n "$QPID" ] && [ -r "/proc/$QPID/cgroup" ] && \
+    GUEST_UNIT="$(sed -n 's/.*\/\([^/]*\.\(service\|scope\)\)$/\1/p' "/proc/$QPID/cgroup" | head -1)"
+if [ -z "$GUEST_UNIT" ]; then
+    say "WARN: cannot identify the systemd unit owning the nested guest (pid=${QPID:-none}) — RuntimeMaxSec fuse NOT assessed; a mid-run SIGTERM will be indistinguishable from an agent wedge"
+else
+    FUSE_USEC="$(systemctl show -p RuntimeMaxUSec --value "$GUEST_UNIT" 2>/dev/null)"
+    START_USEC="$(systemctl show -p ActiveEnterTimestampMonotonic --value "$GUEST_UNIT" 2>/dev/null)"
+    NOW_USEC="$(awk '{printf "%d", $1 * 1000000}' /proc/uptime)"
+    case "$FUSE_USEC" in
+        ''|infinity|0)
+            say "guest unit $GUEST_UNIT has no RuntimeMaxSec fuse (${FUSE_USEC:-unreadable}) — nothing to run out of" ;;
+        *)
+            FUSE_SEC="$(awk -v u="$FUSE_USEC" 'BEGIN{printf "%d", u / 1000000}')"
+            AGE_SEC="$(awk -v n="$NOW_USEC" -v st="${START_USEC:-0}" 'BEGIN{printf "%d", (n - st) / 1000000}')"
+            REMAIN_SEC=$((FUSE_SEC - AGE_SEC))
+            NEED_SEC=$((U2_BUDGET_SEC + FUSE_MARGIN))
+            say "guest unit $GUEST_UNIT: RuntimeMaxSec=${FUSE_SEC}s, running ${AGE_SEC}s, ${REMAIN_SEC}s left; this rig needs ${U2_BUDGET_SEC}s + ${FUSE_MARGIN}s margin"
+            if [ "$REMAIN_SEC" -lt "$NEED_SEC" ]; then
+                fatal - "the nested guest's RuntimeMaxSec fuse leaves only ${REMAIN_SEC}s of the ${FUSE_SEC}s $GUEST_UNIT was started with, short of the ${NEED_SEC}s this rig needs — systemd would SIGTERM the guest mid-run and the failure would read as a wedged guest agent. Re-run WITHOUT --resume (a fresh boot restarts the fuse), or raise the budget deliberately with U2_BUDGET_SEC= if you know this run is shorter."
+            fi ;;
+    esac
+fi
+
+# ── tie the chosen manifest to what the running guest was INSTALLED from ──
+# `ls -t` picks the newest .manifest.txt in the rig dir, which says nothing
+# about the image the guest currently running was laid down from — under
+# --resume those can be different builds, and PHASES F/G would then measure
+# the guest against a baseline it never had.  firstboot-v3.sh installs the
+# image's own payload manifest at /etc/sigmond-appliance/manifest.txt on the
+# PM (it gates on the same "components (live):" header plus 10-row floor
+# used here), so the PM can be asked directly.  Read-only ssh probe — no
+# mutation goes down this path.
+PMMAN="$WORK/pm-manifest.txt"
+$SSHN "cat /etc/sigmond-appliance/manifest.txt 2>/dev/null" > "$PMMAN" 2>/dev/null
+components_rows "$PMMAN" "$WORK/pm-manifest.rows"
+PMROWS="$(rows_count "$WORK/pm-manifest.rows")"
+if [ "$PMROWS" -lt "$MIN_ROWS" ]; then
+    say "WARN: the nested PM has no usable /etc/sigmond-appliance/manifest.txt ($PMROWS component rows) — cannot tie $(basename "$MANIFEST") to the image this guest was actually installed from; PHASES F/G will measure against the manifest chosen from the rig dir"
+elif rows_match "$WORK/pm-manifest.rows" "$WORK/manifest.rows" > "$WORK/manifest-tie.txt"; then
+    say "manifest tie OK: $(basename "$MANIFEST") matches the PM's installed manifest ($PMROWS rows) ✓"
+else
+    say "── $(basename "$MANIFEST") does NOT match the manifest this guest was installed from ──"
+    sed 's/^/    /' "$WORK/manifest-tie.txt" | head -20
+    RESELECTED=""
+    if [ "$RESUME" = 1 ]; then
+        # Under --resume the image was chosen by mtime, so a mismatch is a
+        # bookkeeping accident, not necessarily a defect: look for the
+        # rig-dir manifest that DOES match and switch to it, loudly.
+        for cand in "$RIG_DIR"/sigmond-appliance-*.manifest.txt; do
+            [ -f "$cand" ] || continue
+            components_rows "$cand" "$WORK/cand.rows"
+            [ "$(rows_count "$WORK/cand.rows")" -ge "$MIN_ROWS" ] || continue
+            if rows_match "$WORK/pm-manifest.rows" "$WORK/cand.rows" > /dev/null; then
+                RESELECTED="$cand"; break
+            fi
+        done
+    fi
+    if [ -n "$RESELECTED" ]; then
+        MANIFEST="$RESELECTED"
+        IMGBASE="$(basename "${MANIFEST%.manifest.txt}").img"
+        components_rows "$MANIFEST" "$WORK/manifest.rows"
+        MROWS="$(rows_count "$WORK/manifest.rows")"
+        say "re-selected the manifest that matches the running guest: $(basename "$MANIFEST") ($MROWS rows); image of record is now $IMGBASE"
+    else
+        fatal "$WORK/manifest-tie.txt" "the manifest chosen from the rig dir ($(basename "$MANIFEST")) is not the one this guest was installed from (the PM's /etc/sigmond-appliance/manifest.txt, $PMROWS rows), and no other .manifest.txt in $RIG_DIR matches it either — PHASES F/G would measure the guest against a baseline it never had. Pass --image for the build this guest actually came from."
+    fi
+fi
 
 # The guest agent must answer twice in a row: a lone success during guest
 # boot can be followed by an agent restart (observed 2026-07-26, false
@@ -500,6 +688,7 @@ gx_ok 900 e2-doctor-pre 'smd doctor' "pre-state: smd doctor"
 DOCTOR_PRE_RC="$GX_RC"
 cp "$GX_OUT" "$WORK/doctor-pre.txt"
 doctor_kinds "$WORK/doctor-pre.txt" "$WORK/kinds-pre.txt"
+assert_kinds_parsed "pre-update doctor" "$DOCTOR_PRE_RC" "$WORK/kinds-pre.txt" "$WORK/doctor-pre.txt"
 say "pre-update smd doctor exit $DOCTOR_PRE_RC; finding kinds: $(tr '\n' ' ' < "$WORK/kinds-pre.txt")"
 excerpt "$WORK/doctor-pre.txt" 20
 
@@ -588,14 +777,22 @@ sed 's/^/      /' "$WORK/e6-behind.out"
 BEHIND_BAD="$(awk '$1=="BEHIND" && $3!="0" {printf "%s(%s) ", $2, $3}' "$WORK/e6-behind.out")"
 [ -z "$BEHIND_BAD" ] || fatal "$WORK/e6-behind.out" "components still behind their upstream after smd update --apply: $BEHIND_BAD"
 NOUP="$(awk '$1=="NOUPSTREAM" {printf "%s ", $2}' "$WORK/e6-behind.out")"
-[ -z "$NOUP" ] && say "every component checkout is level with its upstream ✓" \
-               || say "every component with an upstream is level ✓ (no upstream, not assessed: $NOUP)"
+# "no component is behind" is only reassuring if components were ASSESSED.
+# Every checkout detached or missing an upstream would produce zero BEHIND
+# rows and sail through the test above having measured nothing — the exact
+# shape of the defect this rig was built to catch, reproduced inside the
+# rig.  Same row floor the manifest uses, for the same reason.
+ASSESSED="$(awk '$1=="BEHIND"' "$WORK/e6-behind.out" | awk 'END{print NR}')"
+[ "$ASSESSED" -ge "$MIN_ROWS" ] || fatal "$WORK/e6-behind.out" "only $ASSESSED component(s) could be assessed for upstream distance (floor $MIN_ROWS) — the level-with-upstream check measured almost nothing and would have passed regardless. Not assessed: ${NOUP:-none reported}"
+[ -z "$NOUP" ] && say "every component checkout is level with its upstream ✓ ($ASSESSED assessed)" \
+               || say "every component with an upstream is level ✓ ($ASSESSED assessed; no upstream, not assessed: $NOUP)"
 
 # ── doctor gained no NEW finding kinds ──────────────────────────────────
 gx_ok 900 e7-doctor-post 'smd doctor' "post-update: smd doctor"
 DOCTOR_POST_RC="$GX_RC"
 cp "$GX_OUT" "$WORK/doctor-post.txt"
 doctor_kinds "$WORK/doctor-post.txt" "$WORK/kinds-post.txt"
+assert_kinds_parsed "post-update doctor" "$DOCTOR_POST_RC" "$WORK/kinds-post.txt" "$WORK/doctor-post.txt"
 say "post-update smd doctor exit $DOCTOR_POST_RC; finding kinds: $(tr '\n' ' ' < "$WORK/kinds-post.txt")"
 NEWK="$(new_kinds "$WORK/kinds-pre.txt" "$WORK/kinds-post.txt" | tr '\n' ' ')"
 if [ -n "$NEWK" ]; then
@@ -640,7 +837,20 @@ say "manifest landed in the guest at $GMANIFEST, sha256 verified ✓"
 
 gx_ok 600 f2-adopt "smd admin manifest adopt $GMANIFEST --allow-superset --apply" "manifest adopt --allow-superset --apply"
 sed 's/^/      /' "$WORK/f2-adopt.out"
-[ "$GX_RC" -eq 0 ] || fatal "$WORK/f2-adopt.out" "smd admin manifest adopt --allow-superset --apply exited $GX_RC — the updated guest is not even a sanctioned superset of the blessed baseline"
+if [ "$GX_RC" -ne 0 ]; then
+    # plan_adopt refuses on ANY live component absent from the manifest
+    # ("installed live (<sha>) but not in the manifest" — manifest_adopt.py
+    # ~:104), and --allow-superset does not cover that case: it reasons
+    # about ancestry within a component, not about the component SET.  A
+    # component added to main after the image was cut therefore refuses an
+    # otherwise perfect adopt.  That is a fact about the calendar, not an
+    # update defect, and it must not be reported as one.
+    LIVE_ONLY="$(sed -n 's/^.*\([A-Za-z0-9_.-]\+\): installed live (.*) but not in the manifest.*$/\1/p' "$WORK/f2-adopt.out" | tr '\n' ' ')"
+    if [ -n "$LIVE_ONLY" ]; then
+        fatal "$WORK/f2-adopt.out" "adopt refused because the COMPONENT SET changed between $IMGBASE and $TARGET: $LIVE_ONLY installed live but absent from the blessed manifest. This is not an update defect — --allow-superset reasons about ancestry within a component, never about components the image predates. Re-run this rig against an image built after those components landed."
+    fi
+    fatal "$WORK/f2-adopt.out" "smd admin manifest adopt --allow-superset --apply exited $GX_RC — the updated guest is not even a sanctioned superset of the blessed baseline"
+fi
 grep -q 'plan OK' "$WORK/f2-adopt.out" \
     || fatal "$WORK/f2-adopt.out" "adopt exited 0 without printing 'plan OK' — the verb's contract changed"
 # Superset presence is REPORTED, never asserted: whether main has moved past
@@ -702,9 +912,27 @@ fi
 gx_ok 1800 g3-restore-apply "smd admin manifest restore $GMANIFEST --apply $NOFETCH" "manifest restore --apply"
 sed 's/^/      /' "$WORK/g3-restore-apply.out"
 [ "$GX_RC" -eq 0 ] || fatal "$WORK/g3-restore-apply.out" "smd admin manifest restore --apply $NOFETCH exited $GX_RC — the rollback path is broken, which is worse than the forward path being broken"
-grep -q 'adopt-strict verifies clean' "$WORK/g3-restore-apply.out" \
-    || fatal "$WORK/g3-restore-apply.out" "restore --apply exited 0 without 'adopt-strict verifies clean' — it did not self-verify, so its success is unproven"
-say "restore --apply exit 0, self-verified ✓"
+# The success line is `admin manifest restore: restored to manifest — N
+# component(s) moved, re-plan verifies all-keep (...)` (bin/smd ~:4085).
+# The older wording, 'adopt-strict verifies clean', was removed by sigmond
+# ac01bb7 when post-apply verification switched from plan_adopt to
+# plan_restore — it is accepted here only so a guest that has not yet
+# reached that commit reports a version skew rather than a phantom failure.
+if grep -q 'restore: restored to manifest' "$WORK/g3-restore-apply.out"; then
+    :
+elif grep -q 'adopt-strict verifies clean' "$WORK/g3-restore-apply.out"; then
+    say "WARN: this guest's restore verb still prints the pre-ac01bb7 'adopt-strict verifies clean' wording — it is older than the sigmond that defines the current contract"
+else
+    fatal "$WORK/g3-restore-apply.out" "restore --apply exited 0 without 'admin manifest restore: restored to manifest' — it did not self-verify, so its success is unproven"
+fi
+# How many checkouts restore actually MOVED, from its own success line.
+# Everything below that asks "did the rollback change the tree" has to be
+# conditioned on this: on a same-day release PHASE E is a no-op, restore
+# moves nothing, and asserting that the tree changed would fail the rig for
+# the calendar.
+MOVED="$(sed -n 's/.*restored to manifest — \([0-9]\+\) component(s) moved.*/\1/p' "$WORK/g3-restore-apply.out" | head -1)"
+[ -n "$MOVED" ] || MOVED=unknown
+say "restore --apply exit 0, self-verified ✓ (components moved: $MOVED)"
 
 # ── the live tree must now BE the manifest, read back independently ────
 gx_ok 300 g4-version 'smd version' "post-restore: smd version"
@@ -739,19 +967,34 @@ gx_ok 900 g6-doctor 'smd doctor' "post-restore: smd doctor"
 DOCTOR_G_RC="$GX_RC"
 cp "$GX_OUT" "$WORK/doctor-post-restore.txt"
 doctor_kinds "$WORK/doctor-post-restore.txt" "$WORK/kinds-restored.txt"
+assert_kinds_parsed "post-restore doctor" "$DOCTOR_G_RC" "$WORK/kinds-restored.txt" "$WORK/doctor-post-restore.txt"
 say "post-restore smd doctor exit $DOCTOR_G_RC; finding kinds: $(tr '\n' ' ' < "$WORK/kinds-restored.txt")"
-# `detached` is EXPECTED here, and its absence is the interesting failure:
-# restore pins each checkout to a sha, which detaches HEAD by construction.
-# A clean-looking doctor after a restore would mean the restore did not
-# actually move the checkouts — success reported for work not done, the
-# failure shape this whole project keeps hitting.
-grep -qx 'detached' "$WORK/kinds-restored.txt" \
-    || fatal "$WORK/doctor-post-restore.txt" "smd doctor reports NO 'detached' finding after a restore — restore is supposed to pin checkouts to the manifest shas, so either it did not move them or doctor stopped seeing it"
-say "expected 'detached' finding present — restore pinned the checkouts as designed ✓"
+# `detached` is EXPECTED here when restore actually moved something:
+# `git checkout --detach <sha>` is how it pins a checkout (bin/smd ~:4025),
+# so a clean-looking doctor after a real rollback would mean success was
+# reported for work not done — the failure shape this whole project keeps
+# hitting.  But when main has NOT moved past the image, PHASE E is a no-op,
+# restore moves zero components, and every checkout is legitimately still
+# on its branch.  Asserting `detached` there would fail the rig for the
+# calendar, so the assertion follows restore's own moved-count.
+case "$MOVED" in
+    unknown)
+        say "WARN: could not read a moved-count from restore's output — asserting 'detached' presence on the assumption that a rollback moved something"
+        grep -qx 'detached' "$WORK/kinds-restored.txt" \
+            || fatal "$WORK/doctor-post-restore.txt" "smd doctor reports NO 'detached' finding after a restore — restore is supposed to pin checkouts to the manifest shas, so either it did not move them or doctor stopped seeing it" ;;
+    0)
+        grep -qx 'detached' "$WORK/kinds-restored.txt" \
+            && fatal "$WORK/doctor-post-restore.txt" "restore reported 0 components moved, yet doctor now finds 'detached' checkouts — something detached HEADs that restore does not account for"
+        say "restore moved 0 components and no checkout is detached ✓ — $TARGET has not moved past $IMGBASE, so the forward roll was a no-op and there was nothing to roll back (a calendar fact, not a defect)" ;;
+    *)
+        grep -qx 'detached' "$WORK/kinds-restored.txt" \
+            || fatal "$WORK/doctor-post-restore.txt" "restore reported $MOVED component(s) moved but smd doctor finds NO 'detached' checkout — restore pins with 'git checkout --detach', so either it did not move them or doctor stopped seeing it"
+        say "expected 'detached' finding present after $MOVED moved component(s) — restore pinned the checkouts as designed ✓" ;;
+esac
 NEWG="$(new_kinds "$WORK/kinds-pre.txt" "$WORK/kinds-restored.txt" detached | tr '\n' ' ')"
 if [ -n "$NEWG" ]; then
     excerpt "$WORK/doctor-post-restore.txt" 40
-    fatal - "smd doctor gained NEW finding kinds across the rollback (beyond the expected 'detached'): $NEWG (pre-E baseline: $(tr '\n' ' ' < "$WORK/kinds-pre.txt"))"
+    fatal - "smd doctor gained NEW finding kinds across the rollback (beyond the expected 'detached'): $NEWG (pre-E baseline: $(tr '\n' ' ' < "$WORK/kinds-pre.txt")). If one of these is a ruled-on, sanctioned consequence of the rollback's install.sh runs, re-run with U2_ALLOW_NEW_KINDS=$(printf '%s' "$NEWG" | tr ' ' ',' | sed 's/,$//')"
 fi
 say "no NEW doctor finding kinds across the rollback beyond the expected 'detached' ✓"
 
