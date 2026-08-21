@@ -552,13 +552,21 @@ say "target guard OK: loopback forward → nested PM '$PMHOST' → VM $VMID '$VM
 rm -rf "$WORK_PREV.dying"
 
 # ── the guest's RuntimeMaxSec fuse ─────────────────────────────────────
-# test-nested-v3.sh boots the guest under `systemd-run --property=
+# test-nested-v3.sh's boot_vm asks for `systemd-run --property=
 # RuntimeMaxSec=3600` as a backstop against an abnormal driver exit
-# orphaning a 12G/8vCPU guest.  That fuse keeps burning while THIS rig
-# works, and when it fires systemd SIGTERMs qemu — from in here that looks
-# exactly like a wedged guest agent, which is a diagnosis that would send
-# someone restarting qemu-guest-agent for an hour.  So: read the fuse, log
-# what is left of it, and refuse up front when there plainly is not enough.
+# orphaning a 12G/8vCPU guest.  When that fuse exists it keeps burning
+# while THIS rig works, and when it fires systemd SIGTERMs qemu — from in
+# here that looks exactly like a wedged guest agent, a diagnosis that would
+# send someone restarting qemu-guest-agent for an hour.  So: read the fuse,
+# log what is left of it, and refuse up front when there plainly is not
+# enough.
+#
+# But do NOT assume the fuse is there.  The first live run on B3
+# (2026-08-21) found the running unit reporting no usable RuntimeMaxUSec at
+# all, and this gate refused a healthy guest over it.  Whether that is the
+# unit outliving its property, a systemd version difference, or a boot path
+# that never got the property set, the rig cannot tell and does not need to:
+# see the fail-open parse below.
 #
 # NOTE the unit lives HERE, on the rig host, not inside the nested PM: it
 # is the local systemd-run scope that owns the qemu process, so it is read
@@ -582,22 +590,50 @@ GUEST_UNIT=""
 if [ -z "$GUEST_UNIT" ]; then
     say "WARN: cannot identify the systemd unit owning the nested guest (pid=${QPID:-none}) — RuntimeMaxSec fuse NOT assessed; a mid-run SIGTERM will be indistinguishable from an agent wedge"
 else
-    FUSE_USEC="$(systemctl show -p RuntimeMaxUSec --value "$GUEST_UNIT" 2>/dev/null)"
-    START_USEC="$(systemctl show -p ActiveEnterTimestampMonotonic --value "$GUEST_UNIT" 2>/dev/null)"
+    FUSE_RAW="$(systemctl show -p RuntimeMaxUSec --value "$GUEST_UNIT" 2>/dev/null)"
+    START_RAW="$(systemctl show -p ActiveEnterTimestampMonotonic --value "$GUEST_UNIT" 2>/dev/null)"
     NOW_USEC="$(awk '{printf "%d", $1 * 1000000}' /proc/uptime)"
-    case "$FUSE_USEC" in
-        ''|infinity|0)
-            say "guest unit $GUEST_UNIT has no RuntimeMaxSec fuse (${FUSE_USEC:-unreadable}) — nothing to run out of" ;;
-        *)
-            FUSE_SEC="$(awk -v u="$FUSE_USEC" 'BEGIN{printf "%d", u / 1000000}')"
-            AGE_SEC="$(awk -v n="$NOW_USEC" -v st="${START_USEC:-0}" 'BEGIN{printf "%d", (n - st) / 1000000}')"
-            REMAIN_SEC=$((FUSE_SEC - AGE_SEC))
-            NEED_SEC=$((U2_BUDGET_SEC + FUSE_MARGIN))
-            say "guest unit $GUEST_UNIT: RuntimeMaxSec=${FUSE_SEC}s, running ${AGE_SEC}s, ${REMAIN_SEC}s left; this rig needs ${U2_BUDGET_SEC}s + ${FUSE_MARGIN}s margin"
-            if [ "$REMAIN_SEC" -lt "$NEED_SEC" ]; then
-                fatal - "the nested guest's RuntimeMaxSec fuse leaves only ${REMAIN_SEC}s of the ${FUSE_SEC}s $GUEST_UNIT was started with, short of the ${NEED_SEC}s this rig needs — systemd would SIGTERM the guest mid-run and the failure would read as a wedged guest agent. Re-run WITHOUT --resume (a fresh boot restarts the fuse), or raise the budget deliberately with U2_BUDGET_SEC= if you know this run is shorter."
-            fi ;;
-    esac
+    # STRICT parse, fail-OPEN.  The first live run on B3 refused a perfectly
+    # good guest with "leaves only -276s of the 0s ... was started with":
+    # the unit reported a RuntimeMaxUSec this arithmetic turned into 0, and
+    # `0 - age` is always negative, so the gate fired on a guest that had no
+    # fuse to run out of at all.  Two lessons, both encoded here:
+    #   * anything that is not a FINITE POSITIVE INTEGER of microseconds —
+    #     `infinity`, empty, 0, an unreadable property, a formatted value
+    #     this parser does not recognise — means "no fuse", and the right
+    #     response is to say so and PROCEED.  Fail-open is correct in this
+    #     one place precisely because the check exists only to pre-empt a
+    #     fuse that EXISTS; a guest with no fuse cannot be killed by one,
+    #     so refusing on an unparseable reading protects nothing and blocks
+    #     everything.  (Every other guard in this rig fails CLOSED.)
+    #   * the message must carry the raw evidence.  The live failure was
+    #     diagnosable only because it printed its own derived numbers; the
+    #     raw property string is what actually identifies the cause, so it
+    #     now appears in the no-fuse line AND in the refusal.
+    # `--value` renders USec properties as bare microseconds or `infinity`;
+    # a `us` suffix is tolerated defensively, anything else is "no fuse".
+    fuse_int(){ # fuse_int <raw> -> echoes a positive integer, or nothing
+        local v; v="$(printf '%s' "${1:-}" | tr -d '[:space:]')"; v="${v%us}"
+        case "$v" in ''|*[!0-9]*) return 1 ;; esac
+        [ "$v" -gt 0 ] 2>/dev/null || return 1
+        printf '%s' "$v"
+    }
+    FUSE_NUM="$(fuse_int "$FUSE_RAW")"
+    START_NUM="$(fuse_int "$START_RAW")"
+    if [ -z "$FUSE_NUM" ]; then
+        say "guest unit $GUEST_UNIT has no runtime fuse (RuntimeMaxUSec=${FUSE_RAW:-<unreadable>}) — no budget gate needed"
+    elif [ -z "$START_NUM" ]; then
+        say "WARN: guest unit $GUEST_UNIT reports RuntimeMaxUSec=$FUSE_RAW but no usable start time (ActiveEnterTimestampMonotonic=${START_RAW:-<unreadable>}) — fuse NOT assessed; a mid-run SIGTERM would be indistinguishable from an agent wedge"
+    else
+        FUSE_SEC=$(( FUSE_NUM / 1000000 ))
+        AGE_SEC=$(( (NOW_USEC - START_NUM) / 1000000 ))
+        REMAIN_SEC=$(( FUSE_SEC - AGE_SEC ))
+        NEED_SEC=$(( U2_BUDGET_SEC + FUSE_MARGIN ))
+        say "guest unit $GUEST_UNIT: RuntimeMaxSec=${FUSE_SEC}s (RuntimeMaxUSec=$FUSE_RAW), running ${AGE_SEC}s, ${REMAIN_SEC}s left; this rig needs ${U2_BUDGET_SEC}s + ${FUSE_MARGIN}s margin"
+        if [ "$REMAIN_SEC" -lt "$NEED_SEC" ]; then
+            fatal - "the nested guest's RuntimeMaxSec fuse leaves only ${REMAIN_SEC}s of the ${FUSE_SEC}s $GUEST_UNIT was started with (raw RuntimeMaxUSec=$FUSE_RAW, ActiveEnterTimestampMonotonic=$START_RAW, now=${NOW_USEC}us), short of the ${NEED_SEC}s this rig needs — systemd would SIGTERM the guest mid-run and the failure would read as a wedged guest agent. Re-run WITHOUT --resume (a fresh boot restarts the fuse), or raise the budget deliberately with U2_BUDGET_SEC= if you know this run is shorter."
+        fi
+    fi
 fi
 
 # ── tie the chosen manifest to what the running guest was INSTALLED from ──
