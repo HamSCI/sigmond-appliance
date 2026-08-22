@@ -382,6 +382,20 @@ echo "$HB" | grep -q "rc=2" && echo "$HB" | grep -q "heartbeat: not enabled" \
 $SSHN "qm guest exec $VMID --timeout 30 -- bash -lc 'systemctl list-unit-files sigmond-heartbeat.timer sigmond-gap-hourly.timer'" 2>&1 | grep -q "sigmond-heartbeat.timer" \
     && say "heartbeat + gap-hourly units present in image ✓" \
     || { say "FATAL: awareness units missing from image"; exit 1; }
+say "── gmag-webui (v3.34): pinned Deno + dashboard unit baked into the VM"
+# sigmond 9833c25 added gmag-webui (HamSCI magnetometer dashboard) as a dasi2
+# core client installed by the smd-native recipe: a pinned Deno under
+# /usr/local/lib/deno/<ver>/ with /usr/local/bin/deno, the checkout under
+# /opt/git/sigmond/gmag-webui, our gmag-webui.service, .env PORT=8082.  The
+# nest has no magnetometer so the unit is DORMANT (not started) — assert the
+# payload, not the listener.
+GW=$($SSHN "qm guest exec $VMID --timeout 60 -- bash -lc '/usr/local/bin/deno --version 2>/dev/null | head -1; test -f /opt/git/sigmond/gmag-webui/ts/main.ts && echo CHECKOUT-OK; test -f /opt/git/sigmond/gmag-webui/.env && grep -q 8082 /opt/git/sigmond/gmag-webui/.env && echo ENV-OK; systemctl cat gmag-webui.service >/dev/null 2>&1 && echo UNIT-OK; id gmagweb >/dev/null 2>&1 && echo USER-OK'" 2>&1)
+echo "$GW" | grep -q "^deno "      || { say "FATAL: pinned deno missing from VM"; echo "$GW" | head -4; exit 1; }
+echo "$GW" | grep -q CHECKOUT-OK   || { say "FATAL: gmag-webui checkout missing from VM"; echo "$GW" | head -4; exit 1; }
+echo "$GW" | grep -q ENV-OK        || { say "FATAL: gmag-webui .env (PORT=8082) missing"; echo "$GW" | head -4; exit 1; }
+echo "$GW" | grep -q UNIT-OK       || { say "FATAL: gmag-webui.service not installed"; echo "$GW" | head -4; exit 1; }
+echo "$GW" | grep -q USER-OK       || { say "FATAL: gmagweb service user missing"; echo "$GW" | head -4; exit 1; }
+say "gmag-webui payload in VM: $(echo "$GW" | grep '^deno ' | head -1) + checkout + .env + unit + user ✓"
 say "PHASE D PASS — NESTED TEST COMPLETE"
 ;;
 esac

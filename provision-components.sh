@@ -37,8 +37,16 @@ enabled = true
 # Declared here so the image's topology matches the profile.
 [component.meteor-scatter]
 enabled = true
+
+# gmag-webui is a dasi2 CORE client as of sigmond 9833c25 (2026-08-22): the
+# HamSCI magnetometer real-time dashboard (HamSCI/gmag_webui), served by a
+# pinned Deno from our own unit, reading mag-usb's WebSocket feed. The DASI2
+# PI wants it on every deployment VM. Declared here so the image's topology
+# matches the profile (same reason as meteor-scatter above).
+[component.gmag-webui]
+enabled = true
 EOF
-echo "### topology enabled: dasi2 set (radiod ka9q-web igmp-querier gpsdo-monitor hf-timestd wspr-recorder psk-recorder mag-recorder meteor-scatter)"
+echo "### topology enabled: dasi2 set (radiod ka9q-web igmp-querier gpsdo-monitor hf-timestd wspr-recorder psk-recorder mag-recorder gmag-webui meteor-scatter)"
 echo "### smd install  (self-elevates; compiles ka9q-radio — long) ..."
 smd install --yes
 RC=$?
