@@ -1,5 +1,12 @@
 # Sigmond Station — Installation Guide for Everyone
 
+> **Audience:** operator
+> **Status:** current
+> **Verified against:** sigmond-appliance e4ffca0 on 2026-08-23 — wording only; install flow last exercised by the v3.34 build (2026-08-22) and the nested rig
+> **Canonical for:** burning, booting and first-boot wizard of the appliance image
+
+Day-2 operation, troubleshooting beyond §11, remote access and what-not-to-touch live in the [Operator guide](https://github.com/HamSCI/sigmond/blob/main/docs/operator/README.md).
+
 This walks you through turning a small computer into a complete
 HamSCI/WsprDaemon receiving station. **No Linux experience needed.** You
 answer about six questions with a keyboard, plug and unplug one USB
@@ -49,14 +56,13 @@ login screen).
 
 Ask your fleet admin for the current release — two files:
 
-- `sigmond-appliance-v3.16-20260730.img`  (about 5 GB)
-- `sigmond-appliance-v3.16-20260730.sha256`  (its checksum)
+- `sigmond-appliance-v3.34-20260822.img`  (about 5 GB)
+- `sigmond-appliance-v3.34-20260822.sha256`  (its checksum)
 
-If what you received ends in **`.img.xz`, decompress it first** (Mac:
-double-click it; Windows: right-click → 7-Zip → Extract). **Never write
-the compressed file to the stick** — that is the single most common
-installation failure, and the machine gives no error, it just silently
-doesn't boot.
+The image is published **uncompressed** (`.img`) — there is nothing to
+decompress. (Images before v3.24 shipped as `.img.xz`; if you were handed
+one of those, ask for a current image instead.) Check the checksum if you
+like: `sha256sum -c sigmond-appliance-<version>.sha256`.
 
 ---
 
@@ -64,14 +70,26 @@ doesn't boot.
 
 Easiest reliable way on any OS: **balenaEtcher** (free,
 balena.io/etcher). Select the **`.img`** file, select your stick, Flash.
-Etcher verifies the write for you.
+Etcher verifies the write for you. **Raspberry Pi Imager** also works —
+choose "Use custom" and select the `.img` file.
 
 Command-line alternative (Mac):
 ```
 diskutil list                      # find your stick, e.g. /dev/disk4
 diskutil unmountDisk /dev/disk4
-sudo dd if=sigmond-appliance-v3.16-20260730.img of=/dev/rdisk4 bs=4m
+sudo dd if=sigmond-appliance-v3.34-20260822.img of=/dev/rdisk4 bs=4m
 ```
+
+Command-line alternative (Linux):
+```
+lsblk                              # find your stick, e.g. /dev/sdX
+sudo dd if=sigmond-appliance-v3.34-20260822.img of=/dev/sdX bs=4M \
+        oflag=direct conv=fsync status=progress
+```
+
+**Before you boot from it, check the stick really took the image:**
+`sudo file -s /dev/sdX` must say `DOS/MBR boot sector`. If it doesn't,
+re-write the image — booting a bad stick fails silently, with no error.
 
 After writing, your computer may pop up one small drive (often called
 "EFI" or "NO NAME") — that's normal, ignore it (or see step 4).
@@ -199,7 +217,7 @@ step 4, this is already done.)
 
 | Symptom | Fix |
 |---|---|
-| Machine ignores the stick / boots its old OS | Re-burn using the **decompressed** `.img` (not `.xz`); try another USB port; turn off Fast Boot in BIOS; use the boot-menu key |
+| Machine ignores the stick / boots its old OS | Re-burn and verify with `file -s` (step 3); try another USB port; turn off Fast Boot in BIOS; use the boot-menu key |
 | Installer finished but screen is stuck, stick still in | Remove the stick, power-cycle |
 | `no Sigmond USB present` on screen | Plug the stick back in — any port, machine running |
 | Wizard: no RX888 found | Re-seat the RX888's USB cable in a **blue** port; it retries automatically every 2 minutes |

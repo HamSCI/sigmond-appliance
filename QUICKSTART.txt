@@ -41,6 +41,9 @@ designator (e.g. AC0G-B4), Proxmox host = designator-PM (AC0G-B4-PM).
 The image version stays visible in /etc/sigmond-appliance/version and
 the login panel.
 
+AFTER INSTALL — the operator guide (day-2 checks, troubleshooting, what not
+to touch): https://github.com/HamSCI/sigmond/blob/main/docs/operator/README.md
+
 RETURNING STATION? (key restore)
   If this replaces an existing Sigmond station, its registered PSWS/upload
   keys can ride the stick so no portal re-registration is needed:
