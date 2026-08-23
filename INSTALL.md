@@ -12,10 +12,7 @@ HamSCI/WsprDaemon receiving station. **No Linux experience needed.** You
 answer about six questions with a keyboard, plug and unplug one USB
 stick when told, and the machine does everything else itself.
 
-Total hands-on time: about 20 minutes. Written for appliance image
-**v3.16** (any machine will tell you its version with
-`cat /etc/sigmond-appliance/version`, and it's the first line of the
-login screen).
+Total hands-on time: about 20 minutes. Written for the current appliance image line (v3.34 at the time of this revision; the image version is printed on the stick's QUICKSTART and in `/etc/sigmond-appliance/version` after install, and it's the first line of the login screen).
 
 ---
 
