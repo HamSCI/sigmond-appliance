@@ -26,13 +26,17 @@ Total hands-on time: about 20 minutes. Written for the current appliance image l
   kind of network with automatic addresses and internet — if other
   devices "just work" when plugged in, you're fine).
 - An **RX888 Mk2** SDR receiver and your antenna feed.
+- A **Leo Bodnar LBE-1421 GPSDO** (GPS-disciplined oscillator) and its GPS
+  antenna. This is required, not a nicety: it supplies the receiver's
+  sampling clock and it is what the station's timing tiers are measured
+  against.
 - A **USB stick, 8 GB or larger** (16–32 GB ideal).
   ⚠ Everything on the stick will be erased too.
 - A monitor and USB keyboard plugged into the station computer — you
   need them once, for the setup questions.
 - Any other computer (Mac, Windows, or Linux) to prepare the stick.
-- Optional extras the station finds by itself if present: Leo Bodnar
-  GPSDO, RM3100 magnetometer, a local GPS-disciplined time server.
+- Optional extras the station finds by itself if present: RM3100
+  magnetometer, a local GPS-disciplined time server.
 
 **Facts — write these down before you start**
 | Question you'll be asked | Example |
@@ -222,6 +226,8 @@ step 4, this is already done.)
 | Remote access shows FAILED | Later, from the host: `sigmond-setup --reconfigure` |
 | No spots after 30 minutes | Antenna actually connected? Then `ssh hamsci@<VM>` and run `smd status` — send its output to your fleet admin |
 | Anything else | If you enabled remote access, your fleet admin can log in and fix it — just ask |
+
+More symptoms and the decision tree: [operator troubleshooting](https://github.com/HamSCI/sigmond/blob/main/docs/operator/troubleshooting.md).
 
 ---
 
