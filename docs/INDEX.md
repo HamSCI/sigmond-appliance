@@ -11,6 +11,6 @@
 | Doc | Audience | What it gives you |
 |-----|----------|-------------------|
 | [../INSTALL.md](../INSTALL.md) ★ | operator | burn the USB stick, boot, first-boot wizard |
-| [../QUICKSTART.txt](../QUICKSTART.txt) ★ | operator | on-stick quick-start card (dd, boot, power-off cue) |
+| [../QUICKSTART.txt](../QUICKSTART.txt) | operator | on-stick quick-start card (dd, boot, power-off cue) |
 | [../README.md](../README.md) | contributor | build pipeline + packaging rules |
 | [RELEASE.md](RELEASE.md) ★ | contributor | release process: build/test/bless/roll through the four rungs |
