@@ -2,7 +2,7 @@
 
 > **Audience:** operator
 > **Status:** current
-> **Verified against:** sigmond-appliance e4ffca0 on 2026-08-23 — wording only; install flow last exercised by the v3.34 build (2026-08-22) and the nested rig
+> **Verified against:** sigmond-appliance 3341ebb on 2026-08-24 — wording + cross-checked referenced scripts/links (`sigmond-setup`, operator README/troubleshooting); install flow last exercised by the v3.34 build (2026-08-22) and the nested rig
 > **Canonical for:** burning, booting and first-boot wizard of the appliance image
 
 Day-2 operation, troubleshooting beyond §11, remote access and what-not-to-touch live in the [Operator guide](https://github.com/HamSCI/sigmond/blob/main/docs/operator/README.md).

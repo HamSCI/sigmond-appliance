@@ -2,7 +2,7 @@
 
 > **Audience:** all
 > **Status:** current
-> **Verified against:** sigmond-appliance b0723d7 on 2026-08-23 — code
+> **Verified against:** sigmond-appliance 3341ebb on 2026-08-24 — code: all four listed files exist and their content matches the table's description
 > **Canonical for:** the map of this repo's docs
 
 ★ = canonical; when two docs disagree the ★ one wins. Suite-wide front door:
