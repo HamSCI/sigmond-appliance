@@ -324,8 +324,14 @@ $SSHN "systemctl is-active getty@tty1.service" 2>/dev/null | grep -q '^active' \
     || { say "FATAL: getty@tty1 not active (blank console)"; exit 1; }
 $SSHN "grep -q 'Sigmond appliance' /etc/issue" 2>/dev/null \
     && say "access panel present in /etc/issue ✓" || say "WARN: no access panel in /etc/issue"
-V34=$($SSHN "qm guest exec $VMID --timeout 60 -- bash -lc 'systemctl is-enabled sigmond-sdr-sentinel.timer 2>&1; test -s /etc/fftw/wisdomf && echo WISDOM-OK; test -x /usr/local/sbin/sigmond-site-timing && echo TIMING-OK; grep -q \"^v3\" /etc/sigmond-appliance/version 2>/dev/null && echo VMVER-OK'" 2>&1)
-echo "$V34" | grep -q enabled   || { say "FATAL: sdr-sentinel timer not enabled in VM"; exit 1; }
+# The location-authority timer replaced sigmond-sdr-sentinel on 2026-09-02.
+# The sentinel also ran `smd bringup` whenever it saw an RX888, which started a
+# station's whole stack unattended; `smd adopt` replaced that and asks first.
+# So this asserts BOTH that the survivor is armed and that the retired one is
+# gone — a leftover sentinel would quietly restore the auto-start.
+V34=$($SSHN "qm guest exec $VMID --timeout 60 -- bash -lc 'echo LOC-\$(systemctl is-enabled sigmond-location-check.timer 2>&1); echo SENT-\$(systemctl is-enabled sigmond-sdr-sentinel.timer 2>&1); test -s /etc/fftw/wisdomf && echo WISDOM-OK; test -x /usr/local/sbin/sigmond-site-timing && echo TIMING-OK; grep -q \"^v3\" /etc/sigmond-appliance/version 2>/dev/null && echo VMVER-OK'" 2>&1)
+echo "$V34" | grep -q "LOC-enabled" || { say "FATAL: location-check timer not enabled in VM"; exit 1; }
+echo "$V34" | grep -q "SENT-enabled" && { say "FATAL: retired sdr-sentinel timer still armed in VM"; exit 1; }
 echo "$V34" | grep -q WISDOM-OK || { say "FATAL: FFT wisdom not seeded in VM"; exit 1; }
 echo "$V34" | grep -q TIMING-OK || { say "FATAL: sigmond-site-timing not installed in VM"; exit 1; }
 echo "$V34" | grep -q VMVER-OK  || { say "FATAL: appliance version not stamped into VM"; exit 1; }
@@ -347,7 +353,7 @@ MAGC=$($SSHN "qm guest exec $VMID --timeout 30 -- bash -lc 'grep -E \"psws_stati
 echo "$MAGC" | grep -q "S000998" && echo "$MAGC" | grep -q "N0CALL" && echo "$MAGC" | grep -q "EM00aa" \
     && say "mag-recorder identity filled (own PSWS station) ✓" \
     || { say "FATAL: mag-recorder identity not filled"; echo "$MAGC" | head -3; exit 1; }
-say "SDR sentinel armed + wisdom seeded + site-timing staged in VM ✓"
+say "location authority armed (sentinel retired) + wisdom seeded + site-timing staged in VM ✓"
 $SSHN "hostname" | grep -q "N0CALL-T1-PM" \
     && say "Proxmox host renamed to N0CALL-T1-PM ✓" \
     || { say "FATAL: host not renamed (naming convention)"; $SSHN hostname; exit 1; }

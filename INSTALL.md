@@ -25,7 +25,9 @@ Total hands-on time: about 20 minutes. Written for the current appliance image l
 - Wired Ethernet from the computer to your home/site router (the normal
   kind of network with automatic addresses and internet — if other
   devices "just work" when plugged in, you're fine).
-- An **RX888 Mk2** SDR receiver and your antenna feed.
+- An **RX888 Mk2** SDR receiver and your antenna feed. *(You can install
+  without it and add it later — see step 6 — but nothing decodes until it
+  arrives.)*
 - A **Leo Bodnar LBE-1421 GPSDO** (GPS-disciplined oscillator) and its GPS
   antenna. This is required, not a nicety: it supplies the receiver's
   sampling clock and it is what the station's timing tiers are measured
@@ -50,6 +52,16 @@ Total hands-on time: about 20 minutes. Written for the current appliance image l
 | — magnetometer instrument number (if any) | `84` |
 | — magnetometer's own PSWS station (if different) | `S000082` |
 | Station name (Enter accepts the suggestion) | `AC0G-B4` |
+
+⚠ **Names beginning `DASI` followed by three digits are reserved** for the
+NSF-funded DASI2 fleet, and are checked against a roster shipped with the
+software. If you were issued one — `DASI007`, say — use exactly that: your PSWS
+station and instrument IDs come from the roster, and you can skip those
+questions. A `DASI`-numbered name that is *not* in the roster is **refused**
+rather than guessed at, because guessing is wrong in both directions. If that
+happens, either the name has a typo or your machine is newer than the roster —
+ask your fleet admin. Any other name is an ordinary station and nothing here
+applies.
 
 ---
 
@@ -154,8 +166,19 @@ this line:
 SDR/radiod: radiod ACTIVE ✓
 ```
 
-If it instead asks you to plug in or re-seat the RX888, do that — the
-station recovers by itself within two minutes.
+If it instead says no RX888 was found, that is not a failure. The station
+installs anyway and waits, dormant — nothing is lost. Re-seat the RX888 in a
+**blue** USB-3 port (straight into the machine, no hub), then bring it up
+yourself:
+
+```
+sigmond-vm smd status          # the RX888 appears under "adoptable:"
+sigmond-vm smd adopt <name>    # use the name smd status printed; it asks first
+```
+
+The same two commands are how you add *any* hardware later — a GPSDO, a
+magnetometer, a radio you did not have on install day. The station reports what
+it finds and starts nothing until you ask it to.
 
 (If the remote-access line says FAILED, don't worry — the support
 server may be busy; the station works fine and you can enable it later
@@ -221,7 +244,7 @@ step 4, this is already done.)
 | Machine ignores the stick / boots its old OS | Re-burn and verify with `file -s` (step 3); try another USB port; turn off Fast Boot in BIOS; use the boot-menu key |
 | Installer finished but screen is stuck, stick still in | Remove the stick, power-cycle |
 | `no Sigmond USB present` on screen | Plug the stick back in — any port, machine running |
-| Wizard: no RX888 found | Re-seat the RX888's USB cable in a **blue** port; it retries automatically every 2 minutes |
+| Wizard: no RX888 found | Not a failure — the station installs dormant. Re-seat the cable in a **blue** port, then `sigmond-vm smd status` and `sigmond-vm smd adopt <name>` |
 | Typed a wrong answer | From the host: `sigmond-setup --reconfigure` |
 | Remote access shows FAILED | Later, from the host: `sigmond-setup --reconfigure` |
 | No spots after 30 minutes | Antenna actually connected? Then `ssh hamsci@<VM>` and run `smd status` — send its output to your fleet admin |
