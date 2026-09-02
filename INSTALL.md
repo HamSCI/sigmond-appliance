@@ -2,7 +2,7 @@
 
 > **Audience:** operator
 > **Status:** current
-> **Verified against:** sigmond-appliance 3341ebb on 2026-08-24 — wording + cross-checked referenced scripts/links (`sigmond-setup`, operator README/troubleshooting); install flow last exercised by the v3.34 build (2026-08-22) and the nested rig
+> **Verified against:** sigmond-appliance 4934001 on 2026-09-02 — wording + cross-checked referenced scripts/links (`sigmond-setup`, operator README/troubleshooting); install flow last exercised by the v3.36 build (2026-09-02) and the nested rig
 > **Canonical for:** burning, booting and first-boot wizard of the appliance image
 
 Day-2 operation, troubleshooting beyond §11, remote access and what-not-to-touch live in the [Operator guide](https://github.com/HamSCI/sigmond/blob/main/docs/operator/README.md).
@@ -12,7 +12,7 @@ HamSCI/WsprDaemon receiving station. **No Linux experience needed.** You
 answer about six questions with a keyboard, plug and unplug one USB
 stick when told, and the machine does everything else itself.
 
-Total hands-on time: about 20 minutes. Written for the current appliance image line (v3.34 at the time of this revision; the image version is printed on the stick's QUICKSTART and in `/etc/sigmond-appliance/version` after install, and it's the first line of the login screen).
+Total hands-on time: about 20 minutes. Written for the current appliance image line (v3.36 at the time of this revision; the image version is printed on the stick's QUICKSTART and in `/etc/sigmond-appliance/version` after install, and it's the first line of the login screen).
 
 ---
 
@@ -69,8 +69,12 @@ applies.
 
 Ask your fleet admin for the current release — two files:
 
-- `sigmond-appliance-v3.34-20260822.img`  (about 5 GB)
-- `sigmond-appliance-v3.34-20260822.sha256`  (its checksum)
+- `sigmond-appliance-v3.36-20260902-release.img`  (about 5 GB)
+- `sigmond-appliance-v3.36-20260902-release.sha256`  (its checksum)
+
+Every release carries its own version and date in the filename, so the two
+files you receive may well read differently from the two above. Use the names
+you were actually given wherever this guide shows a filename.
 
 The image is published **uncompressed** (`.img`) — there is nothing to
 decompress. (Images before v3.24 shipped as `.img.xz`; if you were handed
@@ -90,13 +94,13 @@ Command-line alternative (Mac):
 ```
 diskutil list                      # find your stick, e.g. /dev/disk4
 diskutil unmountDisk /dev/disk4
-sudo dd if=sigmond-appliance-v3.34-20260822.img of=/dev/rdisk4 bs=4m
+sudo dd if=sigmond-appliance-v3.36-20260902-release.img of=/dev/rdisk4 bs=4m
 ```
 
 Command-line alternative (Linux):
 ```
 lsblk                              # find your stick, e.g. /dev/sdX
-sudo dd if=sigmond-appliance-v3.34-20260822.img of=/dev/sdX bs=4M \
+sudo dd if=sigmond-appliance-v3.36-20260902-release.img of=/dev/sdX bs=4M \
         oflag=direct conv=fsync status=progress
 ```
 
