@@ -120,11 +120,26 @@ WIZ_SRC="$SIGMOND_REPO/scripts/proxmox/sigmond-wizard.sh"
 if [ -n "$(git -C "$SIGMOND_REPO" status --porcelain -- scripts/proxmox/sigmond-wizard.sh 2>/dev/null)" ]; then
     say "FATAL: $WIZ_SRC has uncommitted changes — commit and push first"; exit 1
 fi
-git -C "$SIGMOND_REPO" fetch origin >/dev/null 2>&1 || true
+git -C "$SIGMOND_REPO" fetch origin >/dev/null 2>&1 \
+    || die "cannot fetch origin in $SIGMOND_REPO — cannot tell whether the wizard is current, and a build must not guess"
 _wiz_head=$(git -C "$SIGMOND_REPO" rev-parse --short HEAD 2>/dev/null || echo unknown)
-if [ "$(git -C "$SIGMOND_REPO" rev-parse HEAD 2>/dev/null)" \
-   != "$(git -C "$SIGMOND_REPO" rev-parse origin/main 2>/dev/null)" ]; then
-    say "WARN: sigmond checkout at $_wiz_head is not origin/main — wizard may be stale"
+_wiz_full=$(git -C "$SIGMOND_REPO" rev-parse HEAD 2>/dev/null || echo unknown)
+# ⛔ REFUSE, do not warn. This was a warning until 2026-09-02, and on that day
+# it printed as line 1 of a 33-line build log while the image shipped a wizard
+# 64 commits stale -- the sentinel retirement, the adoption model and the
+# operator prose all missing from the one file the operator actually runs. The
+# nested test caught it four rungs later. A warning is not a control: the rig
+# holds THREE sigmond checkouts (this one for the wizard, sigmond-ref for the
+# payload tarball, and a fresh clone inside the golden VM), the other two
+# update themselves, and only this one drifts silently. The manifest records
+# the VM's pins, so it said 161948e while the wizard was 54f4b1c and nothing
+# downstream could tell.
+if [ "$_wiz_full" != "$(git -C "$SIGMOND_REPO" rev-parse origin/main 2>/dev/null)" ]; then
+    say "FATAL: the wizard checkout is not at origin/main."
+    say "  $SIGMOND_REPO is at $_wiz_head"
+    say "  the image would ship that wizard while the manifest records the golden VM's sigmond."
+    say "  fix: git -C $SIGMOND_REPO fetch origin && git -C $SIGMOND_REPO merge --ff-only origin/main"
+    exit 1
 fi
 cp "$WIZ_SRC" sigmond-wizard.sh
 say "wizard sourced from sigmond $_wiz_head ($(wc -l < sigmond-wizard.sh) lines)"
@@ -270,6 +285,7 @@ BUILT_UTC="$(date -u -Iseconds)"
     echo "image_version: $VERSION"
     echo "appliance_commit: $(git -C "$REPO" rev-parse HEAD)"
     echo "appliance_tag: $VERSION"
+    echo "wizard_commit: $_wiz_full"
     echo "built_utc: $BUILT_UTC"
     # Explained here, not just in this build script's comments, because a
     # field engineer reads THIS file, not build-usb-v3.sh. Sits above the
@@ -394,6 +410,7 @@ MANIFEST="${IMG%.img}.manifest.txt"
     echo "image_version: $VERSION"
     echo "appliance_commit: $(git -C "$REPO" rev-parse HEAD)"
     echo "appliance_tag: $VERSION"
+    echo "wizard_commit: $_wiz_full"
     echo "built_utc: $BUILT_UTC"
     echo "image_sha256: $(cut -d' ' -f1 < "${IMG%.img}.sha256")"
     echo
