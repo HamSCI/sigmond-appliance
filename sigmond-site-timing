@@ -18,10 +18,39 @@ CFG=/etc/hf-timestd/timestd-config.toml
 SUBNET=$(ip -4 route | awk '/proto kernel/{print $1; exit}')
 
 # ── 1. chrony refclocks (FUSE/HPPS) ─────────────────────────────────────────
+#
+# ⛔ ONE canonical drop-in name: timestd-refclocks.conf.
+#
+# hf-timestd's own installer (scripts/install.sh:849-861) copies the same
+# source file to that name AND retires a legacy `chrony-timestd-refclocks.conf`
+# if it finds one — "Disabled legacy duplicate refclock drop-in".  This block
+# used to copy the source under ITS OWN basename and guard only on that name,
+# so it was blind to the canonical file and re-created the very duplicate
+# hf-timestd had just removed.  Both files then declared `refclock SHM 1 FUSE`
+# and `refclock SHM 2 HPPS`, chrony loaded each twice, and the second copy of
+# each sat at Reach 0 forever — it reads the same SHM segment after the first
+# has consumed the sample.
+#
+# Observed live on AC0G-ND 2026-09-03: install.sh wrote the canonical file at
+# 23:48, this script wrote the duplicate at 00:23, and line ~52 below then
+# restarted chrony onto a doubled source list.  B4 shows the same collision
+# was hit and hand-cleaned on 2026-08-16 (chrony-timestd-refclocks.conf
+# .legacy-removed-20260816 still sits in its conf.d) without the code being
+# fixed, so every station rebuilt since has re-created it.
 CHANGED=0
 RC=/opt/git/sigmond/hf-timestd/config/chrony-timestd-refclocks.conf
-if [ -f "$RC" ] && [ ! -f /etc/chrony/conf.d/chrony-timestd-refclocks.conf ]; then
-    cp "$RC" /etc/chrony/conf.d/ && CHANGED=1 && say "chrony FUSE/HPPS refclocks installed"
+RC_CANON=/etc/chrony/conf.d/timestd-refclocks.conf
+RC_LEGACY=/etc/chrony/conf.d/chrony-timestd-refclocks.conf
+if [ -f "$RC" ] && [ ! -f "$RC_CANON" ]; then
+    install -m 0644 "$RC" "$RC_CANON" \
+        && CHANGED=1 && say "chrony FUSE/HPPS refclocks installed"
+fi
+# Retire the legacy duplicate whoever wrote it — an older image, an earlier
+# run of this script, or a hand edit.  Same verb hf-timestd's installer uses.
+if [ -e "$RC_LEGACY" ]; then
+    mv -f "$RC_LEGACY" "$RC_LEGACY.legacy-disabled" \
+        && CHANGED=1 \
+        && say "retired duplicate refclock drop-in (chrony-timestd-refclocks.conf)"
 fi
 
 # ── 2. LAN stratum-1 NTP servers ────────────────────────────────────────────

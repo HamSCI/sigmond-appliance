@@ -353,6 +353,23 @@ MAGC=$($SSHN "qm guest exec $VMID --timeout 30 -- bash -lc 'grep -E \"psws_stati
 echo "$MAGC" | grep -q "S000998" && echo "$MAGC" | grep -q "N0CALL" && echo "$MAGC" | grep -q "EM00aa" \
     && say "mag-recorder identity filled (own PSWS station) ✓" \
     || { say "FATAL: mag-recorder identity not filled"; echo "$MAGC" | head -3; exit 1; }
+# ⛔ Exactly ONE chrony refclock drop-in.  hf-timestd's installer writes
+# /etc/chrony/conf.d/timestd-refclocks.conf and retires a legacy
+# chrony-timestd-refclocks.conf; sigmond-site-timing used to copy the same
+# source back under that legacy name, so chrony loaded `refclock SHM 1 FUSE`
+# and `refclock SHM 2 HPPS` TWICE and the second copy of each sat at Reach 0
+# forever.  Live on AC0G-ND 2026-09-03, and hand-cleaned on B4 2026-08-16
+# without the code being fixed — so it recurred on every station built since.
+# Counting the files is the whole test: a duplicate is invisible in any
+# single-file check, and chrony reports it only as a source that never
+# reaches.
+RCD=$($SSHN "qm guest exec $VMID --timeout 30 -- bash -lc 'ls -1 /etc/chrony/conf.d/*refclocks*.conf 2>/dev/null | wc -l'" 2>&1)
+RCN=$(echo "$RCD" | grep -oE '[0-9]+' | tail -1)
+[ "${RCN:-0}" = "1" ] \
+    && say "exactly one chrony refclock drop-in ✓" \
+    || { say "FATAL: expected 1 chrony refclock drop-in, found ${RCN:-0} — duplicate FUSE/HPPS refclocks"; \
+         $SSHN "qm guest exec $VMID --timeout 30 -- bash -lc 'ls -l /etc/chrony/conf.d/'" 2>&1 | head -8; exit 1; }
+
 say "location authority armed (sentinel retired) + wisdom seeded + site-timing staged in VM ✓"
 $SSHN "hostname" | grep -q "N0CALL-T1-PM" \
     && say "Proxmox host renamed to N0CALL-T1-PM ✓" \
