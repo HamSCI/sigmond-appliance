@@ -647,4 +647,34 @@ gh release create "$VERSION" --repo "$GH_REPO" \
     "$MANIFEST" "$SHAFILE"
 RC=$?
 rm -f "$NOTES"
+
+# ── promote the image out of wd30:~/pending/ ────────────────────────────────
+#
+# build-usb-v3.sh ships every build to wd30:~/pending/ the moment it exists, so
+# an operator can download and burn in parallel with the nested test.  Nothing
+# used to gate that copy: it landed directly in the download directory, where a
+# built-but-untested image was indistinguishable from a blessed one.  AC0G-ND
+# spent its first days on v3.36, which was marked FAILED at 19:44Z on the day
+# it was pulled.
+#
+# Promotion happens HERE and only here, after every gate above has passed, so
+# "in wd30's download directory" means "blessed" and nothing weaker.
+#
+# A wd30 that is unreachable does NOT fail the bless: the GitHub Release is the
+# authoritative artifact and it is already published by this point.  Say so
+# loudly and leave the operator a one-line command instead of unwinding a
+# Release over a download convenience.
+if [ $RC -eq 0 ]; then
+    IMGBASE="$(basename "${SHAFILE%.sha256}.img")"
+    say "promoting $IMGBASE out of wd30:~/pending/"
+    if ssh -o BatchMode=yes wd30 \
+        "cd ~/pending 2>/dev/null && mv -f '$IMGBASE' '${IMGBASE%.img}.sha256' '$(basename "$MANIFEST")' ~/ " 2>/dev/null
+    then
+        say "promoted: wd30:~/$IMGBASE is now the blessed download"
+    else
+        say "WARNING: could not promote on wd30 — the Release is published and"
+        say "         authoritative, but the download directory still lacks it."
+        say "         Run by hand:  ssh wd30 'mv ~/pending/${IMGBASE%.img}.* ~/'"
+    fi
+fi
 exit $RC

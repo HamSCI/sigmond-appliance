@@ -8,8 +8,9 @@
 #     2026-07-26; tag-derived since Stage 2 so every image traces to a commit).
 #   - the SIGMOND REPO rides in the payload (host tuning scripts:
 #     host-discover/host-apply/cpu-pin template used by the importer).
-#   - image is SHIPPED TO wd30 IMMEDIATELY after build, before testing,
-#     so rob/Michael can download+burn in parallel with the nested test.
+#   - image is SHIPPED TO wd30 IMMEDIATELY after build, before testing, so
+#     rob/Michael can download+burn in parallel with the nested test -- but
+#     into wd30:~/pending/, NOT the download directory. See below.
 #
 # Packaging rules (hard-won, June 2026):
 #   - ISO bytes stay PRISTINE; payload appended at the 1MiB-aligned
@@ -418,10 +419,21 @@ MANIFEST="${IMG%.img}.manifest.txt"
 } > "$MANIFEST"
 say "manifest written: $MANIFEST"
 
+# ⛔ Ship into pending/, never the download directory.  AC0G-ND, 2026-09-03.
+#
+# This step used to scp straight to wd30:~/, where a built-but-untested image
+# sat beside blessed ones and was indistinguishable from them.  v3.36 was
+# marked FAILED at 19:44Z; Michael had already pulled it inside that window,
+# and a funded DASI2 station spent its first days on an image that failed its
+# own gate.  Parallel download is genuinely useful, so it stays -- but "in the
+# download directory" now MEANS blessed, and bless-release.sh is what moves a
+# file there.  Anyone fetching from pending/ is knowingly taking an untested
+# build.
 if [ "$SHIP" = 1 ]; then
-    say "SHIPPING to wd30 NOW (untested — test verdict follows separately)"
-    scp -q "$IMG" "${IMG%.img}.sha256" "$MANIFEST" wd30:~/ \
-        && say "shipped: wd30:~/$IMG + .sha256 + .manifest.txt" \
+    say "SHIPPING to wd30:~/pending/ (UNTESTED — bless promotes it after the test)"
+    ssh wd30 'mkdir -p ~/pending' 2>/dev/null
+    scp -q "$IMG" "${IMG%.img}.sha256" "$MANIFEST" wd30:~/pending/ \
+        && say "shipped: wd30:~/pending/$IMG + .sha256 + .manifest.txt (UNTESTED)" \
         || say "WARNING: ship to wd30 FAILED — ship manually"
 fi
 say "USB IMAGE BUILD COMPLETE: $VERSION ($IMG)"

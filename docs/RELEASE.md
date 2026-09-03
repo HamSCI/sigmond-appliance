@@ -25,6 +25,19 @@ came from is a real annotated/lightweight tag on a clean `HEAD`, and the
 image ships to the artifact store (wd30) immediately, before testing —
 built is not the same claim as tested.
 
+**Untested builds land in `wd30:~/pending/`, never the download
+directory.** ⛔ They used to go straight to `wd30:~/`, where a
+built-but-untested image sat beside blessed ones and could not be told
+apart. AC0G-ND was installed from v3.36 — an image marked FAILED at
+19:44Z the same day — because the operator pulled it inside that window,
+and a funded DASI2 station spent its first days on an image that had
+failed its own gate.
+
+Parallel download stays: fetching from `pending/` is fine and useful, and
+it is now an explicit act of taking an untested build. What changed is
+that "in wd30's download directory" now *means* blessed, and step 3 is
+the only thing that puts a file there.
+
 ### 2. Tested
 
 `test-nested-v3.sh` drives the image through a four-phase nested boot
@@ -55,7 +68,14 @@ GitHub Release unless all seven checks pass (version format, tag reachable
 from `origin/main`, clean tree, verified checksum, manifest with a
 components block, tied test evidence, no pre-existing Release for the tag).
 Dry-run by default — `--apply` is required to create anything, and even
-then only after every gate has passed. See the script's own header comment
+then only after every gate has passed.
+
+On success it also **promotes the image out of `wd30:~/pending/`** into
+the download directory — the second half of the staging rule above. A wd30
+that is unreachable does not fail the bless: the GitHub Release is the
+authoritative artifact and is already published by that point, so the
+script warns and prints the one-line manual promotion rather than
+unwinding a Release over a download convenience. See the script's own header comment
 for the exact gate list and the reasoning behind gate 0 in particular (a
 `--dev` build's `v0.0-dev+<sha>` stamp passes the *build* script's format
 check; blessing is the only remaining backstop).
