@@ -419,16 +419,24 @@ MANIFEST="${IMG%.img}.manifest.txt"
 } > "$MANIFEST"
 say "manifest written: $MANIFEST"
 
-# ⛔ Ship into pending/, never the download directory.  AC0G-ND, 2026-09-03.
+# ⛔ Ship into pending/, never the download directory.  v3.36 build day,
+# 2026-09-02.
 #
 # This step used to scp straight to wd30:~/, where a built-but-untested image
-# sat beside blessed ones and was indistinguishable from them.  v3.36 was
-# marked FAILED at 19:44Z; Michael had already pulled it inside that window,
-# and a funded DASI2 station spent its first days on an image that failed its
-# own gate.  Parallel download is genuinely useful, so it stays -- but "in the
-# download directory" now MEANS blessed, and bless-release.sh is what moves a
-# file there.  Anyone fetching from pending/ is knowingly taking an untested
-# build.
+# sat beside blessed ones and nothing told them apart.  That day the builder
+# shipped an 18:22Z image built from a wizard 64 commits stale; the nested test
+# stopped it at 18:45Z on "location-check timer not enabled in VM"; the 18:50Z
+# rebuild overwrote it on wd30 at 19:01Z under the SAME FILENAME, .sha256 and
+# all; and the rebuild went on to pass and to carry the v3.36 Release.  So a
+# failed image occupied the download directory for 37 minutes wearing the name
+# of a blessed one, anyone who fetched the pair inside that window got a clean
+# checksum on the wrong build, and no host installed that day can now say which
+# v3.36 it came from -- a filename carries the version, never the checksum.
+#
+# Parallel download is genuinely useful, so it stays -- but "in the download
+# directory" now MEANS blessed, and bless-release.sh is what moves a file
+# there.  Anyone fetching from pending/ knowingly takes an untested build, and
+# a rebuild that overwrites its predecessor does so where that costs nothing.
 if [ "$SHIP" = 1 ]; then
     say "SHIPPING to wd30:~/pending/ (UNTESTED — bless promotes it after the test)"
     ssh wd30 'mkdir -p ~/pending' 2>/dev/null

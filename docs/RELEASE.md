@@ -28,10 +28,29 @@ built is not the same claim as tested.
 **Untested builds land in `wd30:~/pending/`, never the download
 directory.** ⛔ They used to go straight to `wd30:~/`, where a
 built-but-untested image sat beside blessed ones and could not be told
-apart. AC0G-ND was installed from v3.36 — an image marked FAILED at
-19:44Z the same day — because the operator pulled it inside that window,
-and a funded DASI2 station spent its first days on an image that had
-failed its own gate.
+apart. The v3.36 build day shows what that costs.
+
+On 2026-09-02 the builder produced an image at 18:22Z from a wizard
+checkout 64 commits stale, and shipped it to the download directory two
+minutes later. The nested test then stopped that image at 18:45Z on
+`FATAL: location-check timer not enabled in VM` — the stale wizard never
+enabled the timer. A second build followed at 18:50Z, carrying the
+current wizard, and at 19:01Z it overwrote the first on wd30: image,
+`.sha256` and manifest, all under the same filename. That second image
+passed PHASE D at 19:44Z, and the v3.36 Release blesses it.
+
+So the download directory held a failed image for 37 minutes, under the
+very name that now denotes a blessed release. Two things make the window
+worse than it sounds. Anyone who fetched the `.img` and the `.sha256`
+together inside it holds a self-consistent pair that verifies clean —
+the checksum confirms an honest download of the wrong build. And the
+rebuild erased the evidence: a filename records the version, not the
+checksum, so no host installed that day can now say which v3.36 it came
+from. AC0G-ND, installed from v3.36, cannot answer that question.
+
+Staging closes the window rather than narrowing it. A rebuild still
+overwrites its predecessor, but it does so inside `pending/`, where
+overwriting an untested build with another untested build costs nothing.
 
 Parallel download stays: fetching from `pending/` is fine and useful, and
 it is now an explicit act of taking an untested build. What changed is

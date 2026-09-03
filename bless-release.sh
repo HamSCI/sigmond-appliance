@@ -652,10 +652,12 @@ rm -f "$NOTES"
 #
 # build-usb-v3.sh ships every build to wd30:~/pending/ the moment it exists, so
 # an operator can download and burn in parallel with the nested test.  Nothing
-# used to gate that copy: it landed directly in the download directory, where a
-# built-but-untested image was indistinguishable from a blessed one.  AC0G-ND
-# spent its first days on v3.36, which was marked FAILED at 19:44Z on the day
-# it was pulled.
+# used to gate that copy: it landed directly in the download directory, where
+# nothing told a built-but-untested image apart from a blessed one.  On
+# 2026-09-02 a v3.36 build that the nested test went on to stop at 18:45Z sat
+# in that directory from 18:24Z until the rebuild overwrote it at 19:01Z --
+# same filename, same .sha256 name, so the overwrite also erased the record of
+# which build a given download held.
 #
 # Promotion happens HERE and only here, after every gate above has passed, so
 # "in wd30's download directory" means "blessed" and nothing weaker.
