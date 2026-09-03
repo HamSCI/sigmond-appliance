@@ -45,8 +45,96 @@ enabled = true
 # matches the profile (same reason as meteor-scatter above).
 [component.gmag-webui]
 enabled = true
+
+# hamsci-physics is a dasi2 CORE client as of sigmond e08d82c (2026-09-03): the
+# profile description promises GRAPE and this is what produces it, while
+# hf-timestd's installer enables grape-daily and hamsci-physics-reanalysis
+# against its venv unconditionally.  Declared here so the image's topology
+# matches the profile (same reason as meteor-scatter and gmag-webui above --
+# the THIRD time this list has drifted from the catalog, which is why the
+# check below now exists).
+[component.hamsci-physics]
+enabled = true
 EOF
-echo "### topology enabled: dasi2 set (radiod ka9q-web igmp-querier gpsdo-monitor hf-timestd wspr-recorder psk-recorder mag-recorder gmag-webui meteor-scatter)"
+echo "### topology enabled: dasi2 set (radiod ka9q-web igmp-querier gpsdo-monitor hf-timestd wspr-recorder psk-recorder mag-recorder gmag-webui meteor-scatter hamsci-physics)"
+
+# ⛔ The topology above restates the dasi2 profile BY HAND, and it has drifted
+# from the catalog three times: meteor-scatter (2026-08-08), gmag-webui
+# (2026-08-22), hamsci-physics (2026-09-03).  Each time the mechanism was the
+# same and it was silent -- `smd install` installs what TOPOLOGY enables, not
+# what the PROFILE lists, so a client added to the profile never reached the
+# template, `smd install` exited 0, and the gap surfaced later: on the capture
+# gate if we were lucky, on a live station if we were not.  AC0G-ND ran for
+# days with a hamsci-physics checkout, no venv and no GRAPE.
+#
+# So assert the two agree, and stop the build here if they do not.  The catalog
+# is the source of truth; this reads it through sigmond's own loader rather
+# than hand-parsing a second copy of it.  A missing component now names itself
+# in one line, instead of appearing as five capture-gate failures six minutes
+# later (or as a warning nobody reads).
+echo "### verifying the template topology covers the dasi2 profile"
+MISSING=$(python3 - <<'PYGUARD'
+import sys, tomllib, warnings
+from pathlib import Path
+
+# Resolving the `radiod` topology key through the catalog is deliberate here,
+# so its deprecation notice is noise, and it would otherwise land in
+# provision.log looking like a build problem.
+warnings.simplefilter('ignore', DeprecationWarning)
+
+smd = Path('/usr/local/bin/smd').resolve()
+for cand in (smd.parent.parent / 'lib', Path('/opt/sigmond/lib'),
+             Path('/usr/local/lib/sigmond')):
+    if (cand / 'sigmond' / '__init__.py').exists():
+        sys.path.insert(0, str(cand))
+        break
+else:
+    print('GUARD-BROKEN: cannot locate sigmond lib to read the catalog')
+    raise SystemExit(0)
+
+from sigmond.catalog import load_catalog, load_profiles, resolve_name
+
+catalog = load_catalog()
+profile = load_profiles()['dasi2']
+wanted = list(profile.clients) + list(profile.local_radiod_infra)
+
+with open('/etc/sigmond/topology.toml', 'rb') as fh:
+    topo = tomllib.load(fh)
+# Resolve every topology key through the catalog, so `radiod` and `ka9q-radio`
+# name the same component here as they do everywhere else.
+enabled = set()
+for name, block in (topo.get('component') or {}).items():
+    if isinstance(block, dict) and block.get('enabled'):
+        enabled.add(name)
+        try:
+            enabled.add(resolve_name(name, catalog))
+        except Exception:
+            pass
+
+print(' '.join(c for c in wanted if c not in enabled))
+PYGUARD
+) || {
+    # ⛔ FAIL CLOSED.  A guard that dies (missing import, unreadable topology,
+    # a catalog that will not parse) leaves MISSING empty, which reads exactly
+    # like "nothing missing".  This fleet has shipped that mistake before -- a
+    # dependency check that failed open and passed an image with no lsof.  A
+    # check whose own result cannot be trusted must stop the build.
+    echo "### FATAL: the topology/profile guard itself failed to run"
+    echo "###   refusing to build blind — an empty result from a broken check"
+    echo "###   is indistinguishable from a passing one"
+    exit 1
+}
+case "$MISSING" in
+    GUARD-BROKEN*) echo "### FATAL: $MISSING"; exit 1 ;;
+esac
+if [ -n "${MISSING// }" ]; then
+    echo "### FATAL: the dasi2 profile lists components this template topology does not enable:"
+    echo "###   $MISSING"
+    echo '###   smd install installs what topology enables, so the image would ship WITHOUT them.'
+    echo '###   fix: add [component.<name>] enabled = true to the heredoc above in provision-components.sh'
+    exit 1
+fi
+echo "### topology covers the dasi2 profile ✓"
 echo "### smd install  (self-elevates; compiles ka9q-radio — long) ..."
 smd install --yes
 RC=$?
