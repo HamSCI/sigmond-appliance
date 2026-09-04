@@ -452,7 +452,13 @@ true
 RCOUT=$($SSHN "qm guest exec $VMID --timeout 600 -- bash -lc \"echo $(echo "$RCSCRIPT" | base64 -w0) | base64 -d | bash\"" 2>&1)
 echo "$RCOUT" | grep -q "PLANT-FAILED" \
     && { say "FATAL: could not plant the legacy duplicate — check the source file in the VM"; echo "$RCOUT" | head -6; exit 1; }
-say "refclock drop-ins: $(echo "$RCOUT" | grep -oE 'PRE:[0-9]+' | head -1) (0 expected in the nest) -> $(echo "$RCOUT" | grep -oE 'PLANTED:[0-9]+' | head -1) planted -> $(echo "$RCOUT" | grep -oE 'ACTIVE:[0-9]+' | head -1) after site-timing"
+# PRE is 1 in a passing run, not 0: the location-authority check above moves
+# the station's position, and that path runs sigmond-site-timing, which writes
+# the canonical drop-in.  So planting the legacy name on top reproduces AC0G-ND
+# exactly — canonical AND legacy present together — which is a stronger start
+# than an empty conf.d.  Either value is fine here; the assertions below are
+# about what site-timing CONVERGES to, and PRE only says where it started.
+say "refclock drop-ins: $(echo "$RCOUT" | grep -oE 'PRE:[0-9]+' | head -1) before -> $(echo "$RCOUT" | grep -oE 'PLANTED:[0-9]+' | head -1) with the legacy duplicate planted -> $(echo "$RCOUT" | grep -oE 'ACTIVE:[0-9]+' | head -1) after site-timing"
 # Compare the NUMBER, not the string: `grep -q ACTIVE:1` also matches
 # ACTIVE:10, which is the shape of the very failure this is here to catch.
 RCACT=$(echo "$RCOUT" | grep -oE 'ACTIVE:[0-9]+' | head -1 | cut -d: -f2)
