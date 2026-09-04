@@ -353,23 +353,6 @@ MAGC=$($SSHN "qm guest exec $VMID --timeout 30 -- bash -lc 'grep -E \"psws_stati
 echo "$MAGC" | grep -q "S000998" && echo "$MAGC" | grep -q "N0CALL" && echo "$MAGC" | grep -q "EM00aa" \
     && say "mag-recorder identity filled (own PSWS station) ✓" \
     || { say "FATAL: mag-recorder identity not filled"; echo "$MAGC" | head -3; exit 1; }
-# ⛔ Exactly ONE chrony refclock drop-in.  hf-timestd's installer writes
-# /etc/chrony/conf.d/timestd-refclocks.conf and retires a legacy
-# chrony-timestd-refclocks.conf; sigmond-site-timing used to copy the same
-# source back under that legacy name, so chrony loaded `refclock SHM 1 FUSE`
-# and `refclock SHM 2 HPPS` TWICE and the second copy of each sat at Reach 0
-# forever.  Live on AC0G-ND 2026-09-03, and hand-cleaned on B4 2026-08-16
-# without the code being fixed — so it recurred on every station built since.
-# Counting the files is the whole test: a duplicate is invisible in any
-# single-file check, and chrony reports it only as a source that never
-# reaches.
-RCD=$($SSHN "qm guest exec $VMID --timeout 30 -- bash -lc 'ls -1 /etc/chrony/conf.d/*refclocks*.conf 2>/dev/null | wc -l'" 2>&1)
-RCN=$(echo "$RCD" | grep -oE '[0-9]+' | tail -1)
-[ "${RCN:-0}" = "1" ] \
-    && say "exactly one chrony refclock drop-in ✓" \
-    || { say "FATAL: expected 1 chrony refclock drop-in, found ${RCN:-0} — duplicate FUSE/HPPS refclocks"; \
-         $SSHN "qm guest exec $VMID --timeout 30 -- bash -lc 'ls -l /etc/chrony/conf.d/'" 2>&1 | head -8; exit 1; }
-
 say "location authority armed (sentinel retired) + wisdom seeded + site-timing staged in VM ✓"
 $SSHN "hostname" | grep -q "N0CALL-T1-PM" \
     && say "Proxmox host renamed to N0CALL-T1-PM ✓" \
@@ -419,6 +402,75 @@ echo "$GW" | grep -q ENV-OK        || { say "FATAL: gmag-webui .env (PORT=8082) 
 echo "$GW" | grep -q UNIT-OK       || { say "FATAL: gmag-webui.service not installed"; echo "$GW" | head -4; exit 1; }
 echo "$GW" | grep -q USER-OK       || { say "FATAL: gmagweb service user missing"; echo "$GW" | head -4; exit 1; }
 say "gmag-webui payload in VM: $(echo "$GW" | grep -o 'deno [0-9][^ ]*' | head -1) + checkout + .env + unit + user ✓"
+say "── chrony refclocks: sigmond-site-timing converges on ONE drop-in"
+# ⛔ The duplicate-refclock regression, exercised rather than assumed.
+#
+# hf-timestd's installer writes /etc/chrony/conf.d/timestd-refclocks.conf and
+# retires a legacy chrony-timestd-refclocks.conf.  sigmond-site-timing used to
+# copy the same source back under that legacy name, so chrony loaded
+# `refclock SHM 1 FUSE` and `refclock SHM 2 HPPS` TWICE and the second copy of
+# each sat at Reach 0 forever — it reads the same SHM segment after the first
+# has consumed the sample.  Live on AC0G-ND 2026-09-03, hand-cleaned on B4
+# 2026-08-16 without the code being fixed, so it recurred on every station
+# built since.  7d5865a fixed it.
+#
+# ⚠ An earlier version of this check simply counted the drop-ins here and
+# demanded exactly one.  It could never pass.  In the NEST there is no RX888,
+# so `smd bringup` never writes /etc/radio/radiod@*.conf, so the wizard's
+# relocation branch never reruns sigmond-site-timing, so NOTHING creates the
+# drop-in and the count is 0.  hf-timestd's own installer does not create it
+# either: with no station config in a golden template it stops after phase 4b
+# ("Install partially complete — phases 5-8 deferred"), and the refclock block
+# is phase 6.  So the assertion asserted a live-station post-condition in a
+# hardware-free nest, and v3.37 failed on it — the first build to run it.
+#
+# Counting a file the environment cannot produce proves nothing.  Running the
+# script that produces it proves the fix, and does so here, without hardware:
+# plant the legacy duplicate exactly as an older image would have left it, run
+# sigmond-site-timing, and require it to converge on one canonical file.
+# The VM-side script echoes tokens rather than returning a file list: qm guest
+# exec wraps stdout in JSON with escaped newlines, and every other check in
+# this phase greps for tokens for exactly that reason.
+RCSCRIPT='
+set -u
+CD=/etc/chrony/conf.d
+echo "PRE:$(ls -1 $CD/*refclocks*.conf 2>/dev/null | wc -l)"
+# Plant the legacy duplicate exactly as an older image would have left it.
+install -m 0644 /opt/git/sigmond/hf-timestd/config/chrony-timestd-refclocks.conf \
+        $CD/chrony-timestd-refclocks.conf || { echo "PLANT-FAILED"; exit 0; }
+echo "PLANTED:$(ls -1 $CD/*refclocks*.conf 2>/dev/null | wc -l)"
+# Run twice: once to converge, once to prove it stays converged (the sentinel
+# reruns it after every bringup).
+/usr/local/sbin/sigmond-site-timing >/dev/null 2>&1 || true
+/usr/local/sbin/sigmond-site-timing >/dev/null 2>&1 || true
+echo "ACTIVE:$(ls -1 $CD/*refclocks*.conf 2>/dev/null | wc -l)"
+[ -f $CD/timestd-refclocks.conf ] && echo "CANON-OK"
+[ -e $CD/chrony-timestd-refclocks.conf.legacy-disabled ] && echo "RETIRED-OK"
+[ -e $CD/chrony-timestd-refclocks.conf ] && echo "LEGACY-STILL-ACTIVE"
+true
+'
+RCOUT=$($SSHN "qm guest exec $VMID --timeout 600 -- bash -lc \"echo $(echo "$RCSCRIPT" | base64 -w0) | base64 -d | bash\"" 2>&1)
+echo "$RCOUT" | grep -q "PLANT-FAILED" \
+    && { say "FATAL: could not plant the legacy duplicate — check the source file in the VM"; echo "$RCOUT" | head -6; exit 1; }
+say "refclock drop-ins: $(echo "$RCOUT" | grep -oE 'PRE:[0-9]+' | head -1) (0 expected in the nest) -> $(echo "$RCOUT" | grep -oE 'PLANTED:[0-9]+' | head -1) planted -> $(echo "$RCOUT" | grep -oE 'ACTIVE:[0-9]+' | head -1) after site-timing"
+# Compare the NUMBER, not the string: `grep -q ACTIVE:1` also matches
+# ACTIVE:10, which is the shape of the very failure this is here to catch.
+RCACT=$(echo "$RCOUT" | grep -oE 'ACTIVE:[0-9]+' | head -1 | cut -d: -f2)
+[ "${RCACT:-x}" = "1" ] \
+    && say "site-timing converged on exactly one active refclock drop-in ✓" \
+    || { say "FATAL: site-timing left ${RCACT:-?} active refclock drop-in(s) — the FUSE/HPPS duplicate is back"; \
+         echo "$RCOUT" | head -8; \
+         $SSHN "qm guest exec $VMID --timeout 30 -- bash -lc 'ls -l /etc/chrony/conf.d/'" 2>&1 | head -8; exit 1; }
+echo "$RCOUT" | grep -q "CANON-OK" \
+    && say "the surviving drop-in carries the canonical name ✓" \
+    || { say "FATAL: canonical timestd-refclocks.conf absent after site-timing"; echo "$RCOUT" | head -8; exit 1; }
+echo "$RCOUT" | grep -q "RETIRED-OK" \
+    && say "the planted legacy duplicate was retired, not deleted ✓" \
+    || { say "FATAL: site-timing did not retire the legacy duplicate"; echo "$RCOUT" | head -8; exit 1; }
+echo "$RCOUT" | grep -q "LEGACY-STILL-ACTIVE" \
+    && { say "FATAL: chrony-timestd-refclocks.conf is still an ACTIVE .conf — chrony would load FUSE/HPPS twice"; echo "$RCOUT" | head -8; exit 1; } \
+    || say "legacy name no longer matches conf.d/*.conf ✓"
+
 say "PHASE D PASS — NESTED TEST COMPLETE"
 ;;
 esac
