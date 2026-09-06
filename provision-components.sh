@@ -139,6 +139,15 @@ echo "### smd install  (self-elevates; compiles ka9q-radio — long) ..."
 smd install --yes
 RC=$?
 echo "### smd install exit=$RC"
+# The client installers run as root and leave egg-info / build products
+# root-owned inside checkouts that belong to the client users.  `smd doctor`
+# then flags every one of them on the first boot of every image -- 12 findings
+# on v3.37 (AI6VN 2026-09-05), all "repairable with smd doctor --fix".  Repair
+# in the template so the image ships clean; the real fix belongs in sigmond's
+# installer (run build steps as the checkout owner) and this line becomes a
+# no-op the day it lands.
+echo "### smd doctor --fix (ownership left behind by the installers)"
+sudo smd doctor --fix 2>&1 | tail -20 || true
 echo "### --- smd list ---"
 smd component list 2>&1 | head -30 || true
 echo "### COMPONENTS DONE (rc=$RC) $(date -u)"
