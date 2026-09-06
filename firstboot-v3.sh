@@ -282,11 +282,17 @@ say(){ local m="[sigmond $(date '+%T')] $*"; echo "$m" >>"$LOG" 2>/dev/null
 # kills getty@tty1 every boot via Conflicts even when its Condition fails
 systemctl disable sigmond-wizard.service 2>/dev/null
 [ -f /etc/sigmond-appliance/.finalized ] && exit 0
+# Mark done AND retire our own trigger.  Left enabled, the .path re-fires on
+# the still-present .configured every boot, the service is Condition-skipped,
+# and the path unit fails with trigger-limit-hit (belt to the Condition on the
+# .path unit itself, which only helps once systemd re-reads it at next boot).
+finalized(){ touch /etc/sigmond-appliance/.finalized
+             systemctl disable sigmond-finalize.path 2>/dev/null; }
 
 if [ ! -f /etc/sigmond-appliance/layout.env ]; then
   say "finalize: no CPU layout saved — leaving VM untuned (unpinned, no passthrough)."
   say "finalize: tune later from a sigmond checkout: scripts/proxmox/bootstrap.sh"
-  touch /etc/sigmond-appliance/.finalized
+  finalized
   exit 0
 fi
 . /etc/sigmond-appliance/layout.env
@@ -313,10 +319,10 @@ if VMID="$VMID" USB_VID_DID="$USB_VID_DID" CPU_VENDOR="$CPU_VENDOR" \
 else
   say "finalize: WARNING — host-apply failed (see $LOG); VM left untuned"
   qm start "$VMID" 2>/dev/null
-  touch /etc/sigmond-appliance/.finalized
+  finalized
   exit 0
 fi
-touch /etc/sigmond-appliance/.finalized
+finalized
 
 say "─────────────────────────────────────────────────────────"
 say " >>> INSTALL COMPLETE — REMOVE THE USB STICK NOW <<<"
@@ -365,6 +371,11 @@ SVCEOF
 cat > /etc/systemd/system/sigmond-finalize.path <<'PATHEOF'
 [Unit]
 Description=Trigger Sigmond finalizer when the site wizard completes
+# Once finalized this path must not come up again: .configured is still there,
+# so it would re-fire against a service whose own Condition now fails, hit
+# systemd's trigger limit within a second, and sit `failed` for the life of
+# the host (AI6VN-PM v3.37, 2026-09-05).
+ConditionPathExists=!/etc/sigmond-appliance/.finalized
 [Path]
 PathExists=/etc/sigmond-appliance/.configured
 [Install]
