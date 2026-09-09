@@ -471,6 +471,15 @@ except Exception: pass' 2>/dev/null)
   [ -n "$VMIP" ] && break
   sleep 10
 done
+# Agent-free fallback: a wedged qemu-guest-agent (seen after any guest-exec
+# that outlives its --timeout, AI6VN 2026-09-06/09) must not blank the
+# panel.  The host's bridge already knows the VM's address from ARP: look up
+# the VM's NIC MAC in the neighbour table.
+if [ -z "$VMIP" ]; then
+  _mac=$(qm config "$VMID" 2>/dev/null | grep -oE "(virtio|e1000|vmxnet3|rtl8139)=[0-9A-Fa-f:]{17}" | head -1 | cut -d= -f2 | tr A-Z a-z)
+  [ -n "$_mac" ] && VMIP=$(ip -4 neigh show 2>/dev/null | awk -v m="$_mac" 'tolower($5)==m && $1 !~ /^169\.254\./ {print $1; exit}')
+  [ -n "$VMIP" ] && VMIP="$VMIP (via ARP — guest agent not answering)"
+fi
 # Is host root still on the image default?  If so we can print it outright,
 # which is the whole point of this panel — an operator who cannot type here
 # and does not know the password has no way in at all.  If it was changed we
@@ -533,8 +542,13 @@ ${RXWARN}
 PEOF
 )
 for f in /etc/issue /etc/motd; do
+    # remove the old panel AND the trailing blank lines: appending '\n\n'
+    # while deleting only the block leaked one blank line per refresh —
+    # ~1000 lines in /etc/issue after 3 days (AI6VN 2026-09-09).  Two sed
+    # passes: the N in the blank-collapse loop must not swallow a panel line.
     sed -i '/^════ Sigmond appliance /,/^════ end Sigmond panel ════/d' "$f" 2>/dev/null
-    printf '%s\n\n' "$PANEL" >> "$f"
+    sed -i -e :a -e '/^\n*$/{$d;N;ba' -e '}' "$f" 2>/dev/null
+    printf '\n%s\n' "$PANEL" >> "$f"
 done
 # The files above only matter when getty (re)paints them — which it does
 # ONCE, early in boot, BEFORE this script first runs, and never again: the
