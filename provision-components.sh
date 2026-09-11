@@ -55,12 +55,22 @@ enabled = true
 # check below now exists).
 [component.hamsci-physics]
 enabled = true
+
+# station-web is a dasi2 CORE client as of sigmond 2026-09-06 (the hf-timestd
+# split, Phase 5): it replaces the web UI hf-timestd used to carry as
+# timestd-web-api.service, so a station without it serves no pages at all.
+# Declared here so the image's topology matches the profile -- the FOURTH time
+# this list has drifted, and the first one the guard below actually caught
+# before a station paid for it.
+[component.station-web]
+enabled = true
 EOF
-echo "### topology enabled: dasi2 set (radiod ka9q-web igmp-querier gpsdo-monitor hf-timestd wspr-recorder psk-recorder mag-recorder gmag-webui meteor-scatter hamsci-physics)"
+echo "### topology enabled: dasi2 set (radiod ka9q-web igmp-querier gpsdo-monitor hf-timestd wspr-recorder psk-recorder mag-recorder gmag-webui meteor-scatter hamsci-physics station-web)"
 
 # ⛔ The topology above restates the dasi2 profile BY HAND, and it has drifted
-# from the catalog three times: meteor-scatter (2026-08-08), gmag-webui
-# (2026-08-22), hamsci-physics (2026-09-03).  Each time the mechanism was the
+# from the catalog four times: meteor-scatter (2026-08-08), gmag-webui
+# (2026-08-22), hamsci-physics (2026-09-03), station-web (2026-09-06, caught by
+# this guard on the v3.38 build).  Each time the mechanism was the
 # same and it was silent -- `smd install` installs what TOPOLOGY enables, not
 # what the PROFILE lists, so a client added to the profile never reached the
 # template, `smd install` exited 0, and the gap surfaced later: on the capture
