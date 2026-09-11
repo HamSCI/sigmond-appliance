@@ -79,8 +79,27 @@ say "generic kernel active, USB (xhci) modules present"
 
 say "stage 2+3: components + capture-prep (long — ka9q compile)"
 $SSH "setsid ./provision-components.sh </dev/null >/dev/null 2>&1 &"
-for i in $(seq 1 240); do $SSH "grep -q 'GOLDEN PREP DONE' provision.log" 2>/dev/null && break; sleep 30; done
-$SSH "grep -q 'GOLDEN PREP DONE' provision.log" || { say "FATAL: stage2/3 timeout"; $SSH "tail -30 provision.log"; exit 1; }
+# Poll for the done marker -- but watch for '### FATAL' too.  provision-components.sh
+# redirects its own output into provision.log inside the VM, so nothing it prints
+# ever reaches this log; the driver used to learn about a failure only when this
+# loop ran out, 240 * 30 s = TWO HOURS later.  On the v3.38 build (2026-09-11) the
+# topology/profile guard rejected the template one second into the stage, over
+# station-web, and the rig then sat waiting until the timeout with build.log frozen
+# on "stage 2+3" and a healthy-looking qemu still running -- indistinguishable from
+# a long ka9q compile.  A decided failure should cost seconds, so break on it.
+STAGE23=timeout
+for i in $(seq 1 240); do
+    $SSH "grep -q 'GOLDEN PREP DONE' provision.log" 2>/dev/null && { STAGE23=done; break; }
+    $SSH "grep -q '^### FATAL' provision.log"        2>/dev/null && { STAGE23=fatal; break; }
+    sleep 30
+done
+if [ "$STAGE23" != done ]; then
+    [ "$STAGE23" = fatal ] \
+        && say "FATAL: stage2/3 refused the template — provision-components.sh reported:" \
+        || say "FATAL: stage2/3 timeout after 2 h with no done marker and no FATAL"
+    $SSH "grep -n '^### FATAL' -A 6 provision.log; echo '--- tail ---'; tail -30 provision.log"
+    exit 1
+fi
 say "stage 2+3 done"
 $SSH "grep '###' provision.log | tail -8"
 $SSH "cat capture-gate.json 2>/dev/null | head -5"
