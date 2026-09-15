@@ -517,6 +517,58 @@ case "$_h" in
           && PWLINE="hamsci-sigmond   <-- image default, CHANGE IT" ;;
 esac
 
+# Remote access (RAC).  The panel used to show LAN addresses only, so an
+# operator standing at the console could not tell whether the station had
+# reached its gateway, which number it got, or WHICH gateway it registered
+# with — and getting that wrong is exactly how installs ended up on the
+# wrong VPN (rob 2026-09-15).  Everything needed is already on disk: the
+# wizard records number/tier/registrar under /etc/sigmond-appliance and the
+# live tunnel in /etc/sigmond/frpc-host.toml (root-only, and this runs as
+# root).  Ports are READ from that file, never recomputed from the
+# base+RAC scheme, so the panel cannot drift from the real tunnel.
+RACBLOCK=""
+RACN=$(cat /etc/sigmond-appliance/rac-number 2>/dev/null)
+if [ -n "$RACN" ] && [ -r /etc/sigmond/frpc-host.toml ]; then
+    RSRV=$(awk -F'"' '/^serverAddr/{print $2; exit}' /etc/sigmond/frpc-host.toml)
+    RUSR=$(awk -F'"' '/^user *=/{print $2; exit}' /etc/sigmond/frpc-host.toml)
+    RTIER=$(cat /etc/sigmond-appliance/rac-tier 2>/dev/null)
+    RREG=$(cat /etc/sigmond-appliance/rac-registrar 2>/dev/null)
+    # name= / remotePort= pairs, in file order
+    eval "$(awk -F'"' '/^name *=/{n=$2}
+                       /^remotePort *=/{split($0,a,"="); gsub(/[ \t]/,"",a[2]);
+                                        if (n ~ /-vm-ssh$/)   print "P_VMSSH=" a[2];
+                                        else if (n ~ /-vm-web$/)  print "P_VMWEB=" a[2];
+                                        else if (n ~ /-host-ssh$/) print "P_HSSH=" a[2];
+                                        else if (n ~ /-host-ui$/)  print "P_HUI=" a[2]}' \
+              /etc/sigmond/frpc-host.toml)"
+    # Live state, not a claim: frpc publishes per-proxy status on its local
+    # admin API, and that is the only thing that proves the gateway accepted
+    # the channels.  Fall back to the unit state if the API is not up.
+    RSTAT="OFFLINE — check: journalctl -u sigmond-rac-host -n 50"
+    if systemctl is-active --quiet sigmond-rac-host 2>/dev/null; then
+        _run=$(curl -s --max-time 3 http://127.0.0.1:7500/api/status 2>/dev/null \
+                 | grep -o '"status":"running"' | wc -l | tr -d ' ')
+        if [ "${_run:-0}" -gt 0 ]; then RSTAT="online — $_run/4 channels up"
+        else RSTAT="service running, no channel accepted yet"; fi
+    fi
+    RACBLOCK=" Remote access  RAC $RACN on ${RSRV:-<no server>}${RTIER:+  (tier: $RTIER)}
+   status     $RSTAT
+   host ssh   ssh -p ${P_HSSH:-?} ${RUSR:-<user>}@${RSRV:-<server>}
+   host UI    https://${RSRV:-<server>}:${P_HUI:-?}
+   VM ssh     ssh -p ${P_VMSSH:-?} ${RUSR:-<user>}@${RSRV:-<server>}
+   VM web     http://${RSRV:-<server>}:${P_VMWEB:-?}${RREG:+
+   registrar  $RREG}
+"
+elif [ -n "$RACN" ]; then
+    RACBLOCK=" Remote access  RAC $RACN assigned, but /etc/sigmond/frpc-host.toml is missing
+   ==> the tunnel is NOT configured; rerun: sigmond-setup --reconfigure
+"
+else
+    RACBLOCK=" Remote access  not configured — this station is LAN-only
+   ==> to enable off-site access: sigmond-setup --reconfigure
+"
+fi
+
 PANEL=$(cat <<PEOF
 ════ Sigmond appliance $VERSION ${CONF:+— station ${CONF%% *}} ════
  THIS CONSOLE IS READ-ONLY — the keyboard does not work here.  Its USB
@@ -535,6 +587,7 @@ ${RXWARN}
    ka9q-web   http://${VMIP:-<starting>}:8081
    login      sigmond / $PWLINE
 
+${RACBLOCK}
  From the host over ssh:  sigmond-vm        (shell in the decoder VM)
                           qm terminal $VMID  (its console)
                           sigmond-setup --reconfigure   (rerun the wizard)
