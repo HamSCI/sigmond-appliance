@@ -648,9 +648,11 @@ gh release create "$VERSION" --repo "$GH_REPO" \
 RC=$?
 rm -f "$NOTES"
 
-# ── promote the image out of wd30:~/pending/ ────────────────────────────────
+# ── promote the image out of gdrive:sigmond-images/pending/ ─────────────────
 #
-# build-usb-v3.sh ships every build to wd30:~/pending/ the moment it exists, so
+# build-usb-v3.sh uploads every build to gdrive:sigmond-images/pending/ the
+# moment it exists (the wd30 in the 2026-09-02 record below was the transport
+# at the time; the pending/-vs-download safety it teaches is unchanged), so
 # an operator can download and burn in parallel with the nested test.  Nothing
 # used to gate that copy: it landed directly in the download directory, where
 # nothing told a built-but-untested image apart from a blessed one.  On
@@ -660,23 +662,30 @@ rm -f "$NOTES"
 # which build a given download held.
 #
 # Promotion happens HERE and only here, after every gate above has passed, so
-# "in wd30's download directory" means "blessed" and nothing weaker.
+# "in the Drive download folder" means "blessed" and nothing weaker.
 #
-# A wd30 that is unreachable does NOT fail the bless: the GitHub Release is the
+# A Drive that is unreachable does NOT fail the bless: the GitHub Release is the
 # authoritative artifact and it is already published by this point.  Say so
 # loudly and leave the operator a one-line command instead of unwinding a
 # Release over a download convenience.
 if [ $RC -eq 0 ]; then
     IMGBASE="$(basename "${SHAFILE%.sha256}.img")"
-    say "promoting $IMGBASE out of wd30:~/pending/"
-    if ssh -o BatchMode=yes wd30 \
-        "cd ~/pending 2>/dev/null && mv -f '$IMGBASE' '${IMGBASE%.img}.sha256' '$(basename "$MANIFEST")' ~/ " 2>/dev/null
-    then
-        say "promoted: wd30:~/$IMGBASE is now the blessed download"
+    # Promote on Google Drive: a server-side move out of pending/ into the
+    # blessed download folder (no re-upload), then set the anyone-with-link
+    # share on the blessed image so the link is ready to hand out.
+    say "promoting $IMGBASE out of gdrive:sigmond-images/pending/"
+    _ok=1
+    for _f in "$IMGBASE" "${IMGBASE%.img}.sha256" "$(basename "$MANIFEST")"; do
+        rclone moveto -q "gdrive:sigmond-images/pending/$_f" "gdrive:sigmond-images/$_f" 2>/dev/null || _ok=0
+    done
+    if [ "$_ok" = 1 ]; then
+        _link="$(rclone link "gdrive:sigmond-images/$IMGBASE" 2>/dev/null)"
+        say "promoted: gdrive:sigmond-images/$IMGBASE is now the blessed download"
+        [ -n "$_link" ] && say "download link: $_link"
     else
-        say "WARNING: could not promote on wd30 — the Release is published and"
-        say "         authoritative, but the download directory still lacks it."
-        say "         Run by hand:  ssh wd30 'mv ~/pending/${IMGBASE%.img}.* ~/'"
+        say "WARNING: could not promote on Google Drive — the Release is published and"
+        say "         authoritative, but the download folder still lacks it."
+        say "         Run by hand:  rclone move gdrive:sigmond-images/pending/ gdrive:sigmond-images/ --include '${IMGBASE%.img}.*'"
     fi
 fi
 exit $RC

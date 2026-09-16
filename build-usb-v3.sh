@@ -8,9 +8,10 @@
 #     2026-07-26; tag-derived since Stage 2 so every image traces to a commit).
 #   - the SIGMOND REPO rides in the payload (host tuning scripts:
 #     host-discover/host-apply/cpu-pin template used by the importer).
-#   - image is SHIPPED TO wd30 IMMEDIATELY after build, before testing, so
-#     rob/Michael can download+burn in parallel with the nested test -- but
-#     into wd30:~/pending/, NOT the download directory. See below.
+#   - image is UPLOADED TO Google Drive immediately after build, before
+#     testing, so rob/Michael can download+burn in parallel with the nested
+#     test -- but into gdrive:sigmond-images/pending/, NOT the blessed
+#     download folder (bless-release.sh promotes it). See below.
 #
 # Packaging rules (hard-won, June 2026):
 #   - ISO bytes stay PRISTINE; payload appended at the 1MiB-aligned
@@ -438,10 +439,22 @@ say "manifest written: $MANIFEST"
 # there.  Anyone fetching from pending/ knowingly takes an untested build, and
 # a rebuild that overwrites its predecessor does so where that costs nothing.
 if [ "$SHIP" = 1 ]; then
-    say "SHIPPING to wd30:~/pending/ (UNTESTED — bless promotes it after the test)"
-    ssh wd30 'mkdir -p ~/pending' 2>/dev/null
-    scp -q "$IMG" "${IMG%.img}.sha256" "$MANIFEST" wd30:~/pending/ \
-        && say "shipped: wd30:~/pending/$IMG + .sha256 + .manifest.txt (UNTESTED)" \
-        || say "WARNING: ship to wd30 FAILED — ship manually"
+    # Distribution is Google Drive (gdrive:sigmond-images/), not wd30 — the CDN
+    # is fetched at each downloader's own speed instead of over the builder's
+    # home uplink once per downloader.  The pending/ vs download distinction the
+    # comment above records is preserved: untested builds go to pending/,
+    # bless-release.sh promotes to the blessed folder after the test.  rclone
+    # reads ~/.config/rclone/rclone.conf (remote "gdrive"); the build runs as
+    # root on the rig, so that is /root/.config/rclone/rclone.conf.
+    say "UPLOADING to gdrive:sigmond-images/pending/ (UNTESTED — bless promotes it after the test)"
+    _up=1
+    for _f in "$IMG" "${IMG%.img}.sha256" "$MANIFEST"; do
+        rclone copy -q "$_f" gdrive:sigmond-images/pending/ 2>>"$LOG" || _up=0
+    done
+    if [ "$_up" = 1 ]; then
+        say "uploaded: gdrive:sigmond-images/pending/$(basename "$IMG") + .sha256 + .manifest.txt (UNTESTED)"
+    else
+        say "WARNING: upload to Google Drive FAILED — check rclone (~/.config/rclone/rclone.conf) and upload by hand"
+    fi
 fi
 say "USB IMAGE BUILD COMPLETE: $VERSION ($IMG)"
