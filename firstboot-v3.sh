@@ -165,6 +165,20 @@ fi
 # profile.d only reaches LOGIN shells — hook bash.bashrc so interactive
 # non-login shells (plain `bash`, some tmux configs) get the helpers too
 grep -q sigmond-operator /etc/bash.bashrc 2>/dev/null || echo '[ -f /etc/profile.d/sigmond-operator.sh ] && . /etc/profile.d/sigmond-operator.sh' >> /etc/bash.bashrc
+# tmux mouse support for the host's root shell.  The decoder VM already gets
+# this from sigmond's install.sh (it seeds ~/.tmux.conf for the operator
+# accounts), but nothing did it on the Proxmox side, so scroll and pane
+# selection were dead in every host tmux (rob 2026-09-15).  Idempotent, and
+# appended rather than written, so a hand-tuned config survives.  Never
+# allowed to fail the boot: a scroll-wheel setting is the least important
+# thing happening here.
+if ! grep -Eq '^[[:space:]]*set(-option)?[[:space:]]+(-g[[:space:]]+)?mouse[[:space:]]' /root/.tmux.conf 2>/dev/null; then
+  { echo '# added by sigmond firstboot — tmux mouse support'
+    echo 'set -g mouse on'
+  } >> /root/.tmux.conf 2>/dev/null \
+    && say "host: tmux mouse support enabled for root" \
+    || say "host: could not write /root/.tmux.conf (tmux mouse stays off)"
+fi
 # optional site-keys tarball: a returning station's registered upload/PSWS
 # keys, dropped by the operator onto the stick's FAT (EFI) volume after
 # burning (writable from Mac/Windows). Staged here; the wizard restores it
