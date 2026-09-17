@@ -145,6 +145,28 @@ v3.33 is machine-checkable rather than per-site folklore:
 v3.33 was the first release rolled this way — the first time any host
 could answer "am I what we blessed" with yes.
 
+## What "rolled" now means: the station brings ITSELF up
+
+Through v3.41 the install ended with a configured, reachable VM and **nothing
+running** — no radiod instance, no ka9q-web, no recorders. Installing and
+starting the station software was a separate operator step that nothing in
+the install told anyone to run, so a finished install looked complete while
+the station was dead. It was hit twice on AI6VN on 2026-09-17, the second
+time on a clean v3.41 install whose ka9q-web page simply would not load.
+
+From v3.42, `sigmond-firstrun-bringup.service` (in HamSCI/sigmond, installed
+by its `install.sh`) runs the bring-up once, on the first boot after the
+wizard personalizes the host — which is exactly the boot the finalizer
+arranges when it powers the machine off so the operator powers it back on
+with the RX-888 freshly reset. It is a no-op on an un-personalized host and
+on every boot thereafter, and it writes its marker even when bring-up fails
+so a station that cannot build does not retry forever.
+
+Consequence for this document: an image is not "rolled" when it installs, it
+is rolled when the station it installed is running. The nested test's Phase D
+now exercises that path, so a regression in first-run bring-up shows up
+before a release, not at a site.
+
 ## Three rules that have cost real time
 
 **The manifest is generated, never hand-written.** `build-golden-vm.sh`
