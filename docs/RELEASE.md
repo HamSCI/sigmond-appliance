@@ -167,6 +167,30 @@ is rolled when the station it installed is running. The nested test's Phase D
 now exercises that path, so a regression in first-run bring-up shows up
 before a release, not at a site.
 
+### v3.43: the SDR gate has to run BEFORE radiod is configured
+
+v3.42 shipped the first-run bring-up with its SDR gate in the wrong stage,
+and rob's install proved it within the hour. `smd config init radiod` probes
+the USB bus to DETECT the SDR — in stage 1 — and a miss there fails the hard
+"radiod configured" checkpoint and aborts the whole bring-up. The gate sat in
+stage 4, so it never ran at all:
+
+    config init radiod: no recognised SDRs detected on the USB bus
+    checkpoint: radiod configured FAILED — /etc/radio: 0 radiod conf(s)
+    aborting (hard checkpoint)
+
+The card was not even latched. An RX-888 enumerates first as its FX3
+bootloader and only becomes 04b4:00f1 once firmware is loaded — and bring-up
+installs that firmware and reloads udev earlier in the same run — so the card
+appeared healthy on the bus about a minute after config init gave up on it. A
+race, not a fault. Cutting VBUS at that moment would have thrown away a card
+that was arriving.
+
+v3.43 carries HamSCI/sigmond 0a835c7: the gate moves ahead of `configure
+radiod`, and waits for a slow FX3 before resorting to a power cycle. The
+lesson for this document: a nested test cannot prove hardware ordering,
+because the nest has no card either way. Only a real install can.
+
 ## Three rules that have cost real time
 
 **The manifest is generated, never hand-written.** `build-golden-vm.sh`
