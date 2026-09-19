@@ -253,6 +253,26 @@ TARGET_G=$(( ${AVAIL_G:-0} * 3 / 4 ))
 qm resize "$VMID" scsi0 "${TARGET_G}G" 2>/dev/null && say "import: decoder disk grown to ${TARGET_G}G (store had ${AVAIL_G}G free)"
 rm -f /tmp/decoder.qcow2
 
+# Keep the decoder VM exactly as it was distributed, before it has ever run.
+# Taken HERE -- after import and resize, before the first `qm start` -- so it
+# captures the image's own state with no first-boot machine-id, no wizard
+# identity, no bring-up, nothing site-specific.  An operator who has tangled a
+# station's configuration can get back to a KNOWN state without another USB
+# install and another trip to the site (rob 2026-09-18).
+#
+#     qm rollback 100 pristine
+#
+# Cost is a snapshot on the decoder disk: near zero at first (copy-on-write)
+# and growing only as the live VM diverges from it.  Never fail the install
+# over it -- a storage backend that cannot snapshot is a smaller problem than
+# an install that stops.
+if qm snapshot "$VMID" pristine \
+     --description "decoder VM as distributed in sigmond-appliance @@VERSION@@, before first boot — restore with: qm rollback $VMID pristine" >>"$LOG" 2>&1; then
+  say "import: 'pristine' snapshot taken — revert any time with: qm rollback $VMID pristine"
+else
+  say "import: WARNING — could not take the 'pristine' snapshot (storage may not support it); continuing"
+fi
+
 # host RAC (inert until /etc/sigmond/frpc-host.toml is filled by the wizard)
 [ -x "$APP/sigmond-rac/install-host.sh" ] && bash "$APP/sigmond-rac/install-host.sh" >>"$LOG" 2>&1 \
   && say "import: host RAC installed (inert until configured)"
@@ -260,6 +280,8 @@ rm -f /tmp/decoder.qcow2
 if qm start "$VMID"; then
   say "─────────────────────────────────────────────────────────"
   say " ✓ Decoder VM $VMID (sigmond-decoder-${VTAG}) is running."
+  say "   A 'pristine' snapshot of this VM was taken before it booted:"
+  say "     qm rollback $VMID pristine   — back to the as-shipped VM, any time."
   say "   LEAVE THE USB STICK IN — the site setup wizard starts"
   say "   on this console next (or run it via ssh: sigmond-setup)."
   say "   Host tuning + reboot happen AFTER the wizard."
