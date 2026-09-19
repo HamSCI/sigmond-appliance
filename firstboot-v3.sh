@@ -495,15 +495,49 @@ CONF="$(cat /etc/sigmond-appliance/.configured 2>/dev/null)"
 HOSTIP=$(hostname -I 2>/dev/null | awk '{print $1}')
 VMIP=""
 for i in 1 2 3 4 5 6; do
+  # Print the VM address THIS HOST can actually reach.  Taking whichever
+  # address the guest agent happened to list first assumes they are all
+  # equally reachable from here, and that is false wherever the site puts the
+  # PM and its own VM in different VLANs: the panel then advertises a campus
+  # address nobody standing at this console can use, and the operator has no
+  # way to tell it apart from a working one (DASI-019 Scranton, 2026-09-19).
+  # Addresses on a network this host is directly attached to sort first;
+  # where everything is equally reachable the choice is unchanged.
   VMIP=$(qm agent "$VMID" network-get-interfaces 2>/dev/null | python3 -c '
-import json,sys
+import json, re, socket, struct, subprocess, sys
+
+def local_nets():
+    try:
+        out = subprocess.run(["ip", "-4", "-o", "addr", "show"],
+                             capture_output=True, text=True, timeout=10).stdout
+    except Exception:
+        return []
+    nets = []
+    for m in re.finditer(r"inet (\d+\.\d+\.\d+\.\d+)/(\d+)", out):
+        addr, plen = m.group(1), int(m.group(2))
+        if addr.startswith("127."):
+            continue
+        a = struct.unpack("!I", socket.inet_aton(addr))[0]
+        mask = (0xFFFFFFFF << (32 - plen)) & 0xFFFFFFFF
+        nets.append((a & mask, mask))
+    return nets
+
+cands = []
 try:
     for i in json.load(sys.stdin):
-        if i.get("name","").startswith(("en","eth")):
-            for a in i.get("ip-addresses",[]):
-                if a["ip-address-type"]=="ipv4" and not a["ip-address"].startswith("127"):
-                    print(a["ip-address"]); raise SystemExit
-except Exception: pass' 2>/dev/null)
+        if i.get("name", "").startswith(("en", "eth")):
+            for a in i.get("ip-addresses", []):
+                if a["ip-address-type"] == "ipv4" and not a["ip-address"].startswith("127"):
+                    cands.append(a["ip-address"])
+except Exception:
+    pass
+if cands:
+    nets = local_nets()
+    def is_local(ip):
+        v = struct.unpack("!I", socket.inet_aton(ip))[0]
+        return any((v & m) == n for n, m in nets)
+    cands.sort(key=lambda ip: 0 if is_local(ip) else 1)
+    print(cands[0])' 2>/dev/null)
   [ -n "$VMIP" ] && break
   sleep 10
 done
