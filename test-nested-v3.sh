@@ -231,15 +231,27 @@ for _p in 8000 8081 8082 2222; do
     || { say "FATAL: port $_p not forwarded to the VM — an operator-facing service vanished from the LAN"; $SSHN "iptables -t nat -S PREROUTING"; exit 1; }
 done
 say "operator ports 8000/8081/8082/2222 forwarded from the host ✓"
-# Reachability last: the config can be perfect and the socket still refused.
+# Reachability last, and at LAYER 3 -- the config can be perfect and the link
+# still dead.  ⚠ Not TCP 22: at this point the wizard has not run, so the
+# decoder VM has no ssh policy and nothing is listening on 22.  The first
+# version of this check tested port 22 here and failed v3.45 on a station
+# whose networking was entirely correct -- the guest had 10.99.0.2/30 on
+# ens18, on vmbr1, the whole time.  Testing a service that does not exist yet
+# tells you nothing about the link.  Phase D asserts ssh, after the wizard.
 _vmok=0
-for i in $(seq 1 30); do
-  $SSHN "timeout 3 bash -c 'echo >/dev/tcp/10.99.0.2/22'" 2>/dev/null && { _vmok=1; break; }
+for i in $(seq 1 18); do
+  $SSHN "ping -c1 -W2 10.99.0.2 >/dev/null 2>&1" && { _vmok=1; break; }
   sleep 10
 done
-[ "$_vmok" = 1 ] && say "host can open TCP 22 to the VM at 10.99.0.2 ✓" \
+[ "$_vmok" = 1 ] && say "host reaches the VM at 10.99.0.2 ✓" \
   || { say "FATAL: VM unreachable at 10.99.0.2 from its own hypervisor (the Scranton failure mode)"
-       $SSHN "qm guest exec $VMID -- ip -4 -br addr; tail -20 /var/log/sigmond-firstboot.log"; exit 1; }
+       $SSHN "qm guest exec $VMID -- /bin/bash -c 'ip -4 -br addr; ip route; ss -ltn'; ip -4 -br addr show vmbr1; tail -20 /var/log/sigmond-firstboot.log"; exit 1; }
+# The address the guest actually holds must be the one we intend -- a lease
+# from somewhere would also answer a ping.
+$SSHN "qm guest exec $VMID --timeout 30 -- /bin/bash -c 'ip -4 -br addr show scope global'" 2>/dev/null \
+  | grep -q "10.99.0.2/30" \
+  && say "guest holds the fixed address 10.99.0.2/30 ✓" \
+  || say "WARN: could not confirm the guest's address is the fixed one"
 
 say "PHASE C PASS"
 [ "${1:-all}" = "C" ] && exit 0
@@ -521,6 +533,24 @@ echo "$RCOUT" | grep -q "RETIRED-OK" \
 echo "$RCOUT" | grep -q "LEGACY-STILL-ACTIVE" \
     && { say "FATAL: chrony-timestd-refclocks.conf is still an ACTIVE .conf — chrony would load FUSE/HPPS twice"; echo "$RCOUT" | head -8; exit 1; } \
     || say "legacy name no longer matches conf.d/*.conf ✓"
+
+# ── the VM is reachable as a SERVICE, now that the wizard has run ──────────
+# This is where the Scranton failure mode would actually show: the hypervisor
+# able to configure the VM but unable to open a socket to it.  Phase C checks
+# the LINK (ping); only here, after the wizard has set the ssh policy, does
+# port 22 mean anything.
+_sshok=0
+for i in $(seq 1 18); do
+  $SSHN "timeout 3 bash -c 'echo >/dev/tcp/10.99.0.2/22'" 2>/dev/null && { _sshok=1; break; }
+  sleep 10
+done
+[ "$_sshok" = 1 ] && say "host can open TCP 22 to the VM at 10.99.0.2 ✓" \
+  || { say "FATAL: VM ssh unreachable at 10.99.0.2 after the wizard"
+       $SSHN "qm guest exec $VMID -- /bin/bash -c 'ss -ltn; systemctl is-active ssh'"; exit 1; }
+# And the forwards the operator will actually use must answer through the host.
+$SSHN "timeout 5 bash -c 'echo >/dev/tcp/127.0.0.1/2222'" 2>/dev/null \
+  && say "host:2222 -> VM:22 forward works ✓" \
+  || say "WARN: host:2222 forward did not answer (VM ssh is up, DNAT may need a hairpin route)"
 
 say "PHASE D PASS — NESTED TEST COMPLETE"
 ;;

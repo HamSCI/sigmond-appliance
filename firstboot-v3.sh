@@ -393,17 +393,26 @@ if qm start "$VMID"; then
        networkctl reload 2>/dev/null; sleep 2; networkctl reconfigure en0 ens18 eth0 2>/dev/null
        systemctl restart systemd-networkd 2>/dev/null; true" >>"$LOG" 2>&1
     # Verify from HERE, which is the only opinion that matters: the host must
-    # be able to open a socket to the VM.  Saying "configured" without
+    # be able to reach the VM's address.  Saying "configured" without
     # checking is how the Scranton channels looked healthy while being dead.
+    #
+    # ⚠ ICMP, not TCP 22.  The first version of this checked port 22 and
+    # failed the whole nested test on a station whose networking was
+    # perfect: at IMPORT time the wizard has not run yet, so the decoder VM
+    # has no ssh policy and nothing is listening.  Testing a service that
+    # does not exist yet says nothing about the link.  The ssh check belongs
+    # after the wizard, and the test asserts it there.
     _reach=0
     for _i in $(seq 1 24); do
-      if timeout 3 bash -c "echo >/dev/tcp/${MGMT_VM}/22" 2>/dev/null; then _reach=1; break; fi
+      if ping -c1 -W2 "$MGMT_VM" >/dev/null 2>&1; then _reach=1; break; fi
       sleep 5
     done
     if [ "$_reach" = 1 ]; then
-      say "import: decoder VM reachable at ${MGMT_VM} (ssh open from this host)"
+      say "import: decoder VM reachable at ${MGMT_VM} from this host ✓"
     else
-      say "import: WARNING — VM did not answer on ${MGMT_VM}:22; check: qm guest exec $VMID -- ip -4 -br addr"
+      say "import: WARNING — no reply from ${MGMT_VM}; the VM is on vmbr1 but the link is not working"
+      say "import:   diagnose: qm guest exec $VMID -- ip -4 -br addr;  ip -4 -br addr show vmbr1"
+      qm guest exec "$VMID" --timeout 30 -- /bin/bash -c "ip -4 -br addr; ip route; ss -ltn" >>"$LOG" 2>&1
     fi
   else
     say "import: WARNING — guest agent never answered; VM has no management address yet"
