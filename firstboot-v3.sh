@@ -344,7 +344,7 @@ rm -f /tmp/decoder.qcow2
 # over it -- a storage backend that cannot snapshot is a smaller problem than
 # an install that stops.
 if qm snapshot "$VMID" pristine \
-     --description "decoder VM as distributed in sigmond-appliance @@VERSION@@, before first boot — restore with: qm rollback $VMID pristine" >>"$LOG" 2>&1; then
+     --description "decoder VM as distributed in sigmond-appliance @@VERSION@@, before first boot. Restore with: qm rollback $VMID pristine" >>"$LOG" 2>&1; then
   say "import: 'pristine' snapshot taken — revert any time with: qm rollback $VMID pristine"
 else
   say "import: WARNING — could not take the 'pristine' snapshot (storage may not support it); continuing"

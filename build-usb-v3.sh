@@ -140,8 +140,14 @@ _wiz_full=$(git -C "$SIGMOND_REPO" rev-parse HEAD 2>/dev/null || echo unknown)
 # operator prose all missing from the one file the operator actually runs. The
 # nested test caught it four rungs later. A warning is not a control: the rig
 # holds THREE sigmond checkouts (this one for the wizard, sigmond-ref for the
-# payload tarball, and a fresh clone inside the golden VM), the other two
-# update themselves, and only this one drifts silently. The manifest records
+# payload tarball, and a clone inside the golden VM).
+#
+# ⚠ This comment used to say the other two "update themselves". The golden
+# VM's does NOT -- it is frozen at template-build time, and the template is
+# rebuilt rarely. v3.46 shipped a decoder VM whose sigmond was 7 commits
+# stale, so a fresh install brought the station up with an smd that lacked
+# the apt-lock fix, and ka9q-web died on the first two stations that
+# installed it (AI6VN lab and W3USR-019). The gate below closes that. The manifest records
 # the VM's pins, so it said 161948e while the wizard was 54f4b1c and nothing
 # downstream could tell.
 if [ "$_wiz_full" != "$(git -C "$SIGMOND_REPO" rev-parse origin/main 2>/dev/null)" ]; then
@@ -174,6 +180,40 @@ for _f in firstboot-v3.sh QUICKSTART.txt; do
     cp "$REPO/$_f" "$_f"
 done
 say "appliance inputs sourced from $REPO @ $(git -C "$REPO" rev-parse --short HEAD)"
+
+# ⛔ The GOLDEN VM's sigmond must be current too.
+#
+# That clone is what runs bring-up on a fresh install -- it is the smd the
+# station actually uses to install and start everything. The payload on the
+# stick goes to the Proxmox HOST; it never touches the VM. So a stale
+# template silently ships stale bring-up logic, which is exactly how v3.46
+# reproduced a bug that had been fixed a day earlier.
+#
+# build-golden-vm.sh records every repo's HEAD in golden-v3-revs.txt. Read
+# sigmond's from there and refuse if it is behind origin/main.
+_REVS="$RIG_ROOT/v3/golden-v3-revs.txt"
+if [ -r "$_REVS" ]; then
+    _gold_sig=$(awk '$1=="sigmond"{print $2; exit}' "$_REVS")
+    if [ -n "$_gold_sig" ]; then
+        if git -C "$SIGMOND_REPO" merge-base --is-ancestor "$_gold_sig" origin/main 2>/dev/null \
+           && [ "$(git -C "$SIGMOND_REPO" rev-parse --short "$_gold_sig" 2>/dev/null)" \
+                != "$(git -C "$SIGMOND_REPO" rev-parse --short origin/main 2>/dev/null)" ]; then
+            _behind=$(git -C "$SIGMOND_REPO" rev-list --count "$_gold_sig"..origin/main 2>/dev/null || echo "?")
+            say "FATAL: the golden VM's sigmond is $_behind commit(s) behind origin/main."
+            say "  template records sigmond $_gold_sig ($(stat -c %y "$RIG_ROOT/v3/sigmond-decoder-template-v3.qcow2" 2>/dev/null | cut -d. -f1))"
+            say "  that clone RUNS BRING-UP on every fresh install; the stick's payload"
+            say "  goes to the Proxmox host and never reaches the decoder VM."
+            say "  fix: ./build-golden-vm.sh   (then rebuild this image)"
+            say "  override for a deliberate old-template build: GOLDEN_STALE_OK=1"
+            [ "${GOLDEN_STALE_OK:-0}" = 1 ] || exit 1
+            say "  GOLDEN_STALE_OK=1 set — continuing with a stale decoder VM"
+        else
+            say "golden VM sigmond $_gold_sig is current"
+        fi
+    fi
+else
+    say "WARNING: $_REVS absent — cannot verify the golden VM's sigmond"
+fi
 
 say "=== building sigmond-appliance $VERSION (tag $VTAG, release=$RELEASE) ==="
 
