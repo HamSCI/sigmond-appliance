@@ -196,6 +196,51 @@ $SSHN "test -x /usr/local/sbin/sigmond-finalize.sh" && say "finalizer staged" ||
 $SSHN "systemctl is-enabled sigmond-wizard.service >/dev/null" && say "wizard service enabled (tty1)" || say "WARN: wizard unit not enabled"
 $SSHN "systemctl is-active sigmond-finalize.path >/dev/null" && say "finalize path unit watching" || say "WARN: finalize path unit not active"
 $SSHN "test -f /root/sigmond-appliance/sigmond-rac/install-host.sh" && say "sigmond-rac payload staged" || say "WARN: rac payload missing"
+
+# ── the pristine snapshot ───────────────────────────────────────────────────
+# Shipped in v3.44 with NO coverage here, and it silently did not exist on the
+# first real install -- the operator's only signal was an absence.  An
+# untested feature in an image is indistinguishable from a missing one, so
+# assert it where it is created.
+$SSHN "qm listsnapshot $VMID 2>/dev/null | grep -q pristine" \
+  && say "pristine snapshot taken before first boot ✓" \
+  || { say "FATAL: no 'pristine' snapshot on VM $VMID — qm rollback is unavailable to the operator"
+       $SSHN "qm listsnapshot $VMID; grep -i pristine /var/log/sigmond-firstboot.log | tail -5"; exit 1; }
+
+# ── the decoder VM is BEHIND the host, not on the site LAN ─────────────────
+# The whole point is that the VM's address stops depending on a network we do
+# not control.  Assert the shape, not just that something came up: one NIC,
+# on the host-only bridge, at the fixed address, reachable FROM THE HOST --
+# which is the only opinion that matters and the one Scranton proved can
+# differ from "the VM has an IP".
+echo "$CFG" | grep -q "^net0:.*bridge=vmbr1" \
+  && say "decoder VM NIC on the host-only bridge ✓" \
+  || { say "FATAL: net0 is not on vmbr1 — the VM is still on the site LAN"; echo "$CFG" | grep ^net; exit 1; }
+echo "$CFG" | grep -q "^net1:" \
+  && { say "FATAL: VM has a second NIC — it must have exactly one, on vmbr1"; exit 1; } \
+  || say "decoder VM has exactly one NIC ✓"
+$SSHN "ip -4 addr show vmbr1 2>/dev/null | grep -q 10.99.0.1" \
+  && say "host-only bridge vmbr1 up at 10.99.0.1 ✓" \
+  || { say "FATAL: vmbr1 is not up on the host"; $SSHN "ip -4 -br addr; grep -A6 'iface vmbr1' /etc/network/interfaces"; exit 1; }
+$SSHN "sysctl -n net.ipv4.ip_forward | grep -q 1" \
+  && say "host routes for the VM ✓" || { say "FATAL: ip_forward off — the VM has no route out"; exit 1; }
+$SSHN "iptables -t nat -S POSTROUTING | grep -q '10.99.0.0/30.*MASQUERADE'" \
+  && say "host NATs for the VM ✓" || { say "FATAL: no MASQUERADE for 10.99.0.0/30"; $SSHN "iptables -t nat -S"; exit 1; }
+for _p in 8000 8081 8082 2222; do
+  $SSHN "iptables -t nat -S PREROUTING | grep -q 'dport $_p .*DNAT'" \
+    || { say "FATAL: port $_p not forwarded to the VM — an operator-facing service vanished from the LAN"; $SSHN "iptables -t nat -S PREROUTING"; exit 1; }
+done
+say "operator ports 8000/8081/8082/2222 forwarded from the host ✓"
+# Reachability last: the config can be perfect and the socket still refused.
+_vmok=0
+for i in $(seq 1 30); do
+  $SSHN "timeout 3 bash -c 'echo >/dev/tcp/10.99.0.2/22'" 2>/dev/null && { _vmok=1; break; }
+  sleep 10
+done
+[ "$_vmok" = 1 ] && say "host can open TCP 22 to the VM at 10.99.0.2 ✓" \
+  || { say "FATAL: VM unreachable at 10.99.0.2 from its own hypervisor (the Scranton failure mode)"
+       $SSHN "qm guest exec $VMID -- ip -4 -br addr; tail -20 /var/log/sigmond-firstboot.log"; exit 1; }
+
 say "PHASE C PASS"
 [ "${1:-all}" = "C" ] && exit 0
 ;&
