@@ -322,7 +322,13 @@ if [ $FAILED -ne 0 ]; then
     say "BLOCKED: one or more gates failed -- refusing to bless $VERSION"
     exit 1
 fi
-say "ALL GATES PASS -- $VERSION is ready to bless"
+_nwarn=0
+for _r in "${GATE_RESULTS[@]}"; do [ "$_r" = "WARN" ] && _nwarn=$((_nwarn+1)); done
+if [ "$_nwarn" -gt 0 ]; then
+    say "GATES PASS with $_nwarn WARNING(S) -- $VERSION can be blessed, but read the WARN row(s) above: something could not be verified, which is not the same as verified"
+else
+    say "ALL GATES PASS -- $VERSION is ready to bless"
+fi
 
 if [ $APPLY -eq 0 ]; then
     say "DRY RUN -- would create Release $VERSION on $GH_REPO attaching:"
