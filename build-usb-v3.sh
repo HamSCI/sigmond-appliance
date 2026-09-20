@@ -104,7 +104,15 @@ if [ -z "$VERSION" ]; then
     fi
 fi
 case "$VERSION" in v[0-9]*) ;; *) say "FATAL: version must look like v3.0"; exit 1;; esac
+# VTAG goes into an FQDN (sigmond-appliance-$VTAG.local), so it must be a
+# legal hostname label: letters, digits, hyphen.  Dots become hyphens, and so
+# must everything else -- `--dev` stamps v0.0-dev+<sha>, whose `+` made
+# prepare-iso reject the answer file outright ("either a fully-qualified
+# domain name or extendend configuration ... must be specified"), so NO --dev
+# build could complete.  That is the mode meant for exercising the pipeline
+# without minting a release version, and it was unusable.
 VTAG="${VERSION//./-}"
+VTAG="${VTAG//[^A-Za-z0-9-]/-}"
 
 SRC_ISO="$HOME/appliance/iso/proxmox-ve_9.1-1.iso"
 TPL=sigmond-decoder-template-v3.qcow2
