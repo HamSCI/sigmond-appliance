@@ -307,6 +307,12 @@ BUILT_UTC="$(date -u -Iseconds)"
     echo "appliance_commit: $(git -C "$REPO" rev-parse HEAD)"
     echo "appliance_tag: $VERSION"
     echo "wizard_commit: $_wiz_full"
+    # The EXACT bytes of the firstboot this image carries.  Gate 5b in
+    # bless-release.sh recomputes it from `git show <tag>:firstboot-v3.sh`
+    # and refuses to bless a mismatch -- which is what v3.44 needed and did
+    # not have: it shipped a firstboot three days older than its own tag and
+    # every gate passed, because none of them looked at the artefact.
+    echo "firstboot_sha256: $(sha256sum firstboot-rendered.sh | cut -d" " -f1)"
     echo "built_utc: $BUILT_UTC"
     # Explained here, not just in this build script's comments, because a
     # field engineer reads THIS file, not build-usb-v3.sh. Sits above the
@@ -432,6 +438,12 @@ MANIFEST="${IMG%.img}.manifest.txt"
     echo "appliance_commit: $(git -C "$REPO" rev-parse HEAD)"
     echo "appliance_tag: $VERSION"
     echo "wizard_commit: $_wiz_full"
+    # The EXACT bytes of the firstboot this image carries.  Gate 5b in
+    # bless-release.sh recomputes it from `git show <tag>:firstboot-v3.sh`
+    # and refuses to bless a mismatch -- which is what v3.44 needed and did
+    # not have: it shipped a firstboot three days older than its own tag and
+    # every gate passed, because none of them looked at the artefact.
+    echo "firstboot_sha256: $(sha256sum firstboot-rendered.sh | cut -d" " -f1)"
     echo "built_utc: $BUILT_UTC"
     echo "image_sha256: $(cut -d' ' -f1 < "${IMG%.img}.sha256")"
     echo

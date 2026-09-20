@@ -59,6 +59,10 @@ GATE_DETAIL=()
 FAILED=0
 gate_pass(){ GATE_NAMES+=("$1"); GATE_RESULTS+=("PASS"); GATE_DETAIL+=("$2"); }
 gate_fail(){ GATE_NAMES+=("$1"); GATE_RESULTS+=("FAIL"); GATE_DETAIL+=("$2"); FAILED=1; }
+# WARN does not block.  It exists so "this cannot be checked" never renders
+# as "this was checked and was fine" -- the distinction gate 5b needs for
+# artefacts built before the manifest carried a firstboot hash.
+gate_warn(){ GATE_NAMES+=("$1"); GATE_RESULTS+=("WARN"); GATE_DETAIL+=("$2"); }
 
 # ---- Gate 0: the version is a real release version -------------------------
 # build-usb-v3.sh --dev stamps v0.0-dev+<sha>, which PASSES the build's own
@@ -259,32 +263,37 @@ fi
 # a proof -- but it is a spot check of the ARTEFACT, which is the thing the
 # Release hands people.
 if [ -n "${IMG:-}" ] && [ -f "$IMG" ]; then
-    # Content check: the firstboot in the image must match the tag's, byte for
-    # byte, apart from the @@VERSION@@ substitution the build performs.
-    TAGFB="$(mktemp)"; trap 'rm -f "$TAGFB"' EXIT
-    if git -C "$REPO" show "$VERSION:firstboot-v3.sh" > "$TAGFB" 2>/dev/null; then
-        # Sample distinctive lines rather than the whole file: the image
-        # stores it inside an ISO, so exact offsets are not addressable.
-        SAMPLE=$(grep -nE '^[a-z_]+\(\)|^cat > /usr/local' "$TAGFB" | tail -12 \
-                 | cut -d: -f2- | sed 's/[[:space:]]*$//')
-        ABSENT=0; TOTAL=0
-        while IFS= read -r line; do
-            [ -n "$line" ] || continue
-            TOTAL=$((TOTAL+1))
-            grep -aqF -- "$line" "$IMG" || ABSENT=$((ABSENT+1))
-        done <<< "$SAMPLE"
-        if [ "$TOTAL" -eq 0 ]; then
-            gate_pass "5b (image carries the tag's firstboot)" "no sampleable lines -- skipped"
-        elif [ "$ABSENT" -eq 0 ]; then
-            gate_pass "5b (image carries the tag's firstboot)" \
-                "$TOTAL/$TOTAL sampled lines from $VERSION:firstboot-v3.sh found in the image"
+    # EXACT check, not a sample.  The first version of this gate sampled
+    # function definitions and heredoc starts -- lines that do not change
+    # between releases -- so it passed on the very image that motivated it.
+    # A gate that cannot fail is worse than no gate: it reads as assurance.
+    #
+    # The build now records the sha256 of the rendered firstboot in the
+    # manifest.  Recompute it from the tag and compare.
+    MANI="${IMG%.img}.manifest.txt"
+    WANT_FB="$(awk -F': *' '/^firstboot_sha256:/{print $2; exit}' "$MANI" 2>/dev/null)"
+    if [ -z "$WANT_FB" ]; then
+        # Built before this field existed.  Say so plainly rather than
+        # inventing confidence: an old artefact cannot be verified this way.
+        gate_warn "5b (image carries the tag's firstboot)" \
+            "$(basename "$MANI") predates firstboot_sha256 -- provenance NOT verifiable for this build"
+    else
+        TAGFB="$(mktemp)"; RENDERED="$(mktemp)"
+        trap 'rm -f "$TAGFB" "$RENDERED"' EXIT
+        if git -C "$REPO" show "$VERSION:firstboot-v3.sh" > "$TAGFB" 2>/dev/null; then
+            sed -e "s|@@VERSION@@|${VERSION}|g" "$TAGFB" > "$RENDERED"
+            GOT_FB="$(sha256sum "$RENDERED" | cut -d' ' -f1)"
+            if [ "$GOT_FB" = "$WANT_FB" ]; then
+                gate_pass "5b (image carries the tag's firstboot)" \
+                    "firstboot-v3.sh matches $VERSION (${GOT_FB:0:16}…)"
+            else
+                gate_fail "5b (image carries the tag's firstboot)" \
+                    "the image was built from a DIFFERENT firstboot than $VERSION: image ${WANT_FB:0:16}… vs tag ${GOT_FB:0:16}…"
+            fi
         else
             gate_fail "5b (image carries the tag's firstboot)" \
-                "$ABSENT of $TOTAL sampled lines from $VERSION:firstboot-v3.sh are NOT in $IMGBASE -- the image was built from a different firstboot than the tag"
+                "could not read $VERSION:firstboot-v3.sh from $REPO"
         fi
-    else
-        gate_fail "5b (image carries the tag's firstboot)" \
-            "could not read $VERSION:firstboot-v3.sh from $REPO"
     fi
 else
     gate_fail "5b (image carries the tag's firstboot)" "cannot check -- no image resolved (see gate 3)"
