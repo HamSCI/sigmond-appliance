@@ -235,8 +235,85 @@ else
   say "import: WARNING — CPU layout discovery failed; VM gets $VM_VCPU_COUNT cores UNPINNED (see $LOG)"
 fi
 
+# ── the decoder VM lives BEHIND this host, never on the site LAN ───────────
+#
+# It used to get its own DHCP lease on vmbr0.  That made its address a
+# property of a network we do not control, and everything downstream had to
+# cope: the port relay had to guess which of its addresses was reachable, the
+# console panel advertised one that might not be, and the address changed
+# under us at every lease.  Where a site puts the host and its own VM in
+# different VLANs it is not merely awkward but fatal -- Scranton's DASI-019
+# answered ICMP in 8.9 ms via a hairpin through the NAT gateway while
+# refusing TCP 22 from the hypervisor beside it, and every vm-* RAC channel
+# was dead (2026-09-19).
+#
+# So the VM gets ONE link, a host-only /30 with a fixed address, and this
+# host routes and NATs for it.  Same on every station, on a flat LAN or a
+# VLAN-split campus: 10.99.0.2, always, reachable from here, always.
+# rob, 2026-09-20: "this should behave the same way as the [VLAN]
+# environment in the penthouse."
+MGMT_PM=10.99.0.1
+MGMT_VM=10.99.0.2
+MGMT_NET=10.99.0.0/30
+# The VM resolves through THIS host, so it must use a resolver THIS host can
+# reach.  Do not assume a public one: Scranton's PM sits on a VLAN where
+# UDP/53 to 1.1.1.1 and 8.8.8.8 is filtered outright and only its own
+# gateway answers.  Take whatever actually works here; fall back to the
+# default gateway, which is a resolver on most small networks, and only then
+# to a public one.
+PM_DNS=$(awk '/^nameserver/{print $2; exit}' /etc/resolv.conf 2>/dev/null)
+case "$PM_DNS" in
+  127.*|"") PM_DNS=$(ip route show default 2>/dev/null | awk '{print $3; exit}') ;;
+esac
+[ -n "$PM_DNS" ] || PM_DNS=1.1.1.1
+
+if ! grep -q "iface vmbr1" /etc/network/interfaces 2>/dev/null; then
+  cat >> /etc/network/interfaces <<NETEOF
+
+# Host-only management bridge for the decoder VM (sigmond-appliance).
+# No physical port and no DHCP: the VM's address must not depend on the site
+# network.  This host is its only route out -- see the post-up rules.
+auto vmbr1
+iface vmbr1 inet static
+    address ${MGMT_PM}/30
+    bridge-ports none
+    bridge-stp off
+    bridge-fd 0
+    post-up sysctl -q -w net.ipv4.ip_forward=1
+    post-up iptables -t nat -C POSTROUTING -s ${MGMT_NET} -o vmbr0 -j MASQUERADE 2>/dev/null || iptables -t nat -A POSTROUTING -s ${MGMT_NET} -o vmbr0 -j MASQUERADE
+    post-up iptables -t nat -C PREROUTING -p tcp --dport 8000 -j DNAT --to-destination ${MGMT_VM}:8000 2>/dev/null || iptables -t nat -A PREROUTING -p tcp --dport 8000 -j DNAT --to-destination ${MGMT_VM}:8000
+    post-up iptables -t nat -C PREROUTING -p tcp --dport 8081 -j DNAT --to-destination ${MGMT_VM}:8081 2>/dev/null || iptables -t nat -A PREROUTING -p tcp --dport 8081 -j DNAT --to-destination ${MGMT_VM}:8081
+    post-up iptables -t nat -C PREROUTING -p tcp --dport 8082 -j DNAT --to-destination ${MGMT_VM}:8082 2>/dev/null || iptables -t nat -A PREROUTING -p tcp --dport 8082 -j DNAT --to-destination ${MGMT_VM}:8082
+    post-up iptables -t nat -C PREROUTING -p tcp --dport 2222 -j DNAT --to-destination ${MGMT_VM}:22 2>/dev/null || iptables -t nat -A PREROUTING -p tcp --dport 2222 -j DNAT --to-destination ${MGMT_VM}:22
+NETEOF
+  say "import: host-only bridge vmbr1 (${MGMT_PM}/30) added to /etc/network/interfaces"
+fi
+# Bring it up now -- the VM is about to be created on it.
+ifup vmbr1 >>"$LOG" 2>&1 || ifreload -a >>"$LOG" 2>&1 || true
+sysctl -q -w net.ipv4.ip_forward=1
+printf 'net.ipv4.ip_forward = 1\n' > /etc/sysctl.d/99-sigmond-vm-router.conf
+iptables -t nat -C POSTROUTING -s "$MGMT_NET" -o vmbr0 -j MASQUERADE 2>/dev/null \
+  || iptables -t nat -A POSTROUTING -s "$MGMT_NET" -o vmbr0 -j MASQUERADE
+# The VM's operator-facing services must not vanish from the LAN just
+# because it moved behind us.  Reach them at THIS host's address -- the same
+# one already used for ssh and the Proxmox UI, so one address per station
+# instead of two.  Measured on a running station rather than assumed: the
+# decoder VM binds externally on 22, 8000 (station-web), 8081 (ka9q-web) and
+# 8082 (gmag-webui).  ssh is forwarded on 2222 because this host's own sshd
+# owns 22.
+for _pf in 8000:8000 8081:8081 8082:8082 2222:22; do
+  _hp=${_pf%%:*}; _gp=${_pf##*:}
+  iptables -t nat -C PREROUTING -p tcp --dport "$_hp" -j DNAT --to-destination "${MGMT_VM}:${_gp}" 2>/dev/null \
+    || iptables -t nat -A PREROUTING -p tcp --dport "$_hp" -j DNAT --to-destination "${MGMT_VM}:${_gp}"
+done
+if ip -4 addr show vmbr1 2>/dev/null | grep -q "$MGMT_PM"; then
+  say "import: vmbr1 up — VM will be at ${MGMT_VM}, NATed out vmbr0, :8081 forwarded here"
+else
+  say "import: WARNING — vmbr1 did not come up; the VM may be unreachable from this host"
+fi
+
 qm create "$VMID" --name "sigmond-decoder-${VTAG}" --machine q35 --memory "$VMMEM" $CORES_ARGS \
-  --cpu host --net0 virtio,bridge=vmbr0 --ostype l26 --scsihw virtio-scsi-single \
+  --cpu host --net0 virtio,bridge=vmbr1 --ostype l26 --scsihw virtio-scsi-single \
   --agent 1 --serial0 socket --onboot 1
 qm importdisk "$VMID" /tmp/decoder.qcow2 "$STORE"
 DISK="$(qm config "$VMID"|awk -F': ' '/^unused0:/{print $2;exit}')"
@@ -278,6 +355,61 @@ fi
   && say "import: host RAC installed (inert until configured)"
 
 if qm start "$VMID"; then
+  # ── give the guest its fixed address ────────────────────────────────────
+  #
+  # There is no DHCP server on vmbr1 by design, so the VM boots with no IPv4
+  # and we cannot reach it over the network to fix that.  The qemu guest
+  # agent does not need one: it speaks over virtio-serial.  That is the whole
+  # reason this is safe to do -- a mistake in the config below locks nobody
+  # out, because the channel that delivers it is not the network it
+  # configures.
+  #
+  # Sorts before the template's 99-dhcp-*.network, so it wins the match.  The
+  # VM has exactly one NIC now, so `en*` is unambiguous.
+  _mgmt_conf=$(printf '%s\n' \
+    '# The decoder VM has ONE link: a host-only /30 to the Proxmox host,' \
+    '# which routes and NATs for it.  Written by the appliance importer.' \
+    '# Do not add a site-LAN NIC here -- the address must not depend on a' \
+    '# network we do not control (see firstboot-v3.sh).' \
+    '[Match]' \
+    'Name=en*' \
+    '' \
+    '[Network]' \
+    "Address=${MGMT_VM}/30" \
+    "Gateway=${MGMT_PM}" \
+    "DNS=${PM_DNS}" | base64 -w0)
+
+  say "import: waiting for the decoder VM's guest agent to give it its address…"
+  _agent_ok=0
+  for _i in $(seq 1 60); do
+    qm agent "$VMID" ping >/dev/null 2>&1 && { _agent_ok=1; break; }
+    [ $((_i % 12)) -eq 0 ] && say "import:   … still waiting for the guest agent ($((_i / 12)) min)"
+    sleep 5
+  done
+  if [ "$_agent_ok" = 1 ]; then
+    qm guest exec "$VMID" --timeout 60 -- /bin/bash -c \
+      "printf %s '$_mgmt_conf' | base64 -d > /etc/systemd/network/10-sigmond-mgmt.network
+       chmod 644 /etc/systemd/network/10-sigmond-mgmt.network
+       networkctl reload 2>/dev/null; sleep 2; networkctl reconfigure en0 ens18 eth0 2>/dev/null
+       systemctl restart systemd-networkd 2>/dev/null; true" >>"$LOG" 2>&1
+    # Verify from HERE, which is the only opinion that matters: the host must
+    # be able to open a socket to the VM.  Saying "configured" without
+    # checking is how the Scranton channels looked healthy while being dead.
+    _reach=0
+    for _i in $(seq 1 24); do
+      if timeout 3 bash -c "echo >/dev/tcp/${MGMT_VM}/22" 2>/dev/null; then _reach=1; break; fi
+      sleep 5
+    done
+    if [ "$_reach" = 1 ]; then
+      say "import: decoder VM reachable at ${MGMT_VM} (ssh open from this host)"
+    else
+      say "import: WARNING — VM did not answer on ${MGMT_VM}:22; check: qm guest exec $VMID -- ip -4 -br addr"
+    fi
+  else
+    say "import: WARNING — guest agent never answered; VM has no management address yet"
+    say "import:   fix by hand: qm guest exec $VMID -- ip addr add ${MGMT_VM}/30 dev ens18"
+  fi
+
   say "─────────────────────────────────────────────────────────"
   say " ✓ Decoder VM $VMID (sigmond-decoder-${VTAG}) is running."
   say "   A 'pristine' snapshot of this VM was taken before it booted:"
@@ -580,6 +712,22 @@ fi
 # libc crypt via perl, NOT openssl passwd: Debian roots are yescrypt ($y$),
 # which openssl cannot compute — v3.25 said "the password you set at
 # install" even on a box still on the image default (mjh 2026-08-09).
+# Is the VM behind this host on the management /30, or on the site LAN?
+# The panel must not send an operator to an address that only works from
+# here: ka9q-web on a NATed VM is reachable at THIS host's address (the
+# importer DNATs :8081), and saying otherwise is how someone concludes the
+# station is broken when it is fine.
+VMBEHIND=""
+KA9QURL="http://${VMIP:-<starting>}:8081"
+case "${VMIP:-}" in
+  10.99.0.*)
+    VMBEHIND="   (private link to this host — not on your LAN)"
+    KA9QURL="http://${HOSTIP:-<no-ip-yet>}:8081        <- via this host
+   station-web  http://${HOSTIP:-<no-ip-yet>}:8000
+   VM ssh     ssh -p 2222 sigmond@${HOSTIP:-<no-ip-yet>}   (or: sigmond-vm)"
+    ;;
+esac
+
 PWLINE="the password you set at install"
 _h=$(awk -F: '$1=="root"{print $2}' /etc/shadow 2>/dev/null)
 case "$_h" in
@@ -652,9 +800,9 @@ ${RXWARN}
    web UI     https://${HOSTIP:-<no-ip-yet>}:8006
    login      root / $PWLINE
 
- Decoder VM   ${VMIP:-<starting — this panel refreshes every 5 min>}
+ Decoder VM   ${VMIP:-<starting — this panel refreshes every 5 min>}${VMBEHIND}
    ssh        ssh sigmond@${VMIP:-<starting>}      (also: hamsci@)
-   ka9q-web   http://${VMIP:-<starting>}:8081
+   ka9q-web   ${KA9QURL}
    login      sigmond / $PWLINE
 
 ${RACBLOCK}
