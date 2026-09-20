@@ -146,7 +146,26 @@ fi
 cp "$WIZ_SRC" sigmond-wizard.sh
 say "wizard sourced from sigmond $_wiz_head ($(wc -l < sigmond-wizard.sh) lines)"
 [ -f sigmond-wizard.sh ] || { say "FATAL: sigmond-wizard.sh missing"; exit 1; }
-[ -f firstboot-v3.sh ] || { say "FATAL: firstboot-v3.sh missing"; exit 1; }
+
+# ⛔ THIS REPO'S OWN build inputs come from the git checkout, never from the
+# rig staging dir.
+#
+# They used to be read from $PWD ($RIG_ROOT/v3), which nothing syncs from
+# git.  v3.44 shipped a firstboot-v3.sh three days older than the tag it was
+# released under, silently missing BOTH appliance commits in that tag
+# (c0b10f2 pristine snapshot, 9038623 panel fix) -- while every bless gate
+# passed, because the gates check the REPO's tag and clean tree and the
+# payload came from somewhere else entirely.  The build already refuses to
+# ship a sigmond wizard that is not at origin/main; it has to hold its own
+# files to the same standard.
+for _f in firstboot-v3.sh QUICKSTART.txt; do
+    [ -f "$REPO/$_f" ] || { say "FATAL: $_f missing from $REPO"; exit 1; }
+    if [ -e "$_f" ] && ! cmp -s "$REPO/$_f" "$_f"; then
+        say "rig copy of $_f differs from the checkout -- taking the checkout's"
+    fi
+    cp "$REPO/$_f" "$_f"
+done
+say "appliance inputs sourced from $REPO @ $(git -C "$REPO" rev-parse --short HEAD)"
 
 say "=== building sigmond-appliance $VERSION (tag $VTAG, release=$RELEASE) ==="
 

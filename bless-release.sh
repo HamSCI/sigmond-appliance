@@ -244,6 +244,52 @@ else
     gate_fail "5 (test evidence: PHASE D PASS)" "cannot check -- no image resolved (see gate 3)"
 fi
 
+# ---- Gate 5b: the IMAGE actually contains this tag's appliance code --------
+#
+# ⛔ Every other gate reads the REPO -- the tag, the clean tree, the manifest.
+# None of them had ever looked inside the artefact.  v3.44 passed all seven
+# while shipping a firstboot-v3.sh three days older than its own tag, because
+# build-usb-v3.sh read that file from the rig staging dir instead of the
+# checkout.  Both appliance commits in the tag (c0b10f2 pristine snapshot,
+# 9038623 panel fix) were simply absent from the image, and "ALL GATES PASS"
+# said nothing about it.
+#
+# So: take a string the tag's own firstboot-v3.sh contains, and require it to
+# be present in the bytes we are about to publish.  This is a spot check, not
+# a proof -- but it is a spot check of the ARTEFACT, which is the thing the
+# Release hands people.
+if [ -n "${IMG:-}" ] && [ -f "$IMG" ]; then
+    # Content check: the firstboot in the image must match the tag's, byte for
+    # byte, apart from the @@VERSION@@ substitution the build performs.
+    TAGFB="$(mktemp)"; trap 'rm -f "$TAGFB"' EXIT
+    if git -C "$REPO" show "$VERSION:firstboot-v3.sh" > "$TAGFB" 2>/dev/null; then
+        # Sample distinctive lines rather than the whole file: the image
+        # stores it inside an ISO, so exact offsets are not addressable.
+        SAMPLE=$(grep -nE '^[a-z_]+\(\)|^cat > /usr/local' "$TAGFB" | tail -12 \
+                 | cut -d: -f2- | sed 's/[[:space:]]*$//')
+        ABSENT=0; TOTAL=0
+        while IFS= read -r line; do
+            [ -n "$line" ] || continue
+            TOTAL=$((TOTAL+1))
+            grep -aqF -- "$line" "$IMG" || ABSENT=$((ABSENT+1))
+        done <<< "$SAMPLE"
+        if [ "$TOTAL" -eq 0 ]; then
+            gate_pass "5b (image carries the tag's firstboot)" "no sampleable lines -- skipped"
+        elif [ "$ABSENT" -eq 0 ]; then
+            gate_pass "5b (image carries the tag's firstboot)" \
+                "$TOTAL/$TOTAL sampled lines from $VERSION:firstboot-v3.sh found in the image"
+        else
+            gate_fail "5b (image carries the tag's firstboot)" \
+                "$ABSENT of $TOTAL sampled lines from $VERSION:firstboot-v3.sh are NOT in $IMGBASE -- the image was built from a different firstboot than the tag"
+        fi
+    else
+        gate_fail "5b (image carries the tag's firstboot)" \
+            "could not read $VERSION:firstboot-v3.sh from $REPO"
+    fi
+else
+    gate_fail "5b (image carries the tag's firstboot)" "cannot check -- no image resolved (see gate 3)"
+fi
+
 # ---- Gate 6: no Release already exists for this tag ------------------------
 GH_OUT="$(gh release view "$VERSION" --repo "$GH_REPO" 2>&1)"
 GH_RC=$?
