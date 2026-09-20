@@ -167,6 +167,78 @@ is rolled when the station it installed is running. The nested test's Phase D
 now exercises that path, so a regression in first-run bring-up shows up
 before a release, not at a site.
 
+### v3.44: WITHDRAWN — the build did not ship what the tag said
+
+Do not bless or install v3.44. It was never blessed and the tag was never
+pushed; the only copy is one lab stick.
+
+`build-usb-v3.sh` `cd`s into the rig staging dir and read `firstboot-v3.sh`
+from `$PWD`. Nothing syncs that directory from git, so v3.44 shipped a
+firstboot **three days older than its own tag**, silently missing both
+appliance commits the tag contained:
+
+    grep -a -c "qm snapshot"    sigmond-appliance-v3.44-...img  -> 0
+    grep -a -c "def local_nets" sigmond-appliance-v3.44-...img  -> 0
+
+All seven bless gates passed, and were right to: every one reads the REPO —
+tag reachable, tree clean, manifest present, test log — and none had ever
+looked inside the artefact. A green ladder said nothing about what was on the
+stick.
+
+Blast radius is exactly one release. No commit touched `firstboot-v3.sh`
+between `e930be9` (09-15) and the two on 09-19, so v3.40–v3.43 were built
+from a stale copy that happened to be byte-identical to their tags. Nothing
+in the field is affected.
+
+Three fixes, all in v3.45:
+
+- the build copies its own repo's files from the checkout and logs the sha it
+  took them from
+- the manifest records `firstboot_sha256`, and bless gate 5b recomputes it
+  from `git show <tag>:firstboot-v3.sh` and refuses a mismatch. Proven in
+  both directions before being trusted — the first version of that gate
+  sampled lines that never change between releases and passed on the
+  known-bad image, which is worse than no gate because it reads as assurance
+- a new non-blocking `WARN` result, so an artefact that predates the hash
+  reports "not verifiable" instead of PASS
+
+### v3.45: the decoder VM lives behind the host
+
+The VM used to take its own DHCP lease on `vmbr0`, making its address a
+property of a network we do not control. Everything downstream had to cope:
+the port relay guessed which address was reachable, the console panel
+advertised one that might not be, and the lease moved underneath both.
+
+Where a site puts the host and its own VM in different VLANs that is not
+awkward but fatal. Scranton's DASI-019 answered ICMP in 8.9 ms — hairpinned
+out through the NAT gateway and back — while refusing TCP 22 from the
+hypervisor beside it, and every `vm-*` RAC channel was dead.
+
+The VM now gets ONE link: a host-only `/30` at a fixed `10.99.0.2`, with the
+host routing and NATing for it. Identical on a flat LAN and on a VLAN-split
+campus.
+
+Two things worth knowing when reading the code:
+
+**The guest is configured over the guest agent, not the network.** There is
+no DHCP on `vmbr1` by design, so the VM boots with no IPv4 and cannot be
+reached to fix that — but virtio-serial does not care. That is what makes it
+safe: a mistake in the config it delivers cannot lock anyone out, because the
+channel is not the network it configures. The host then *verifies* it can
+open TCP 22, because "configured" without checking is how the Scranton
+channels read healthy while being dead.
+
+**The VM's services stay on the LAN, at the host's address.** 8000
+station-web, 8081 ka9q-web, 8082 gmag-webui, and 2222→22 for ssh (the host's
+own sshd owns 22). Those four were measured on a running station, not
+assumed; forwarding only ka9q-web would have quietly removed two web UIs.
+
+Phase C of the nested test now asserts all of it — the snapshot, the single
+NIC on `vmbr1`, the bridge, forwarding, NAT, all four ports, and reachability
+last and separately. v3.44 is the argument for that: an untested feature in
+an image is indistinguishable from a missing one, and the operator's only
+signal was an absence.
+
 ### v3.43: the SDR gate has to run BEFORE radiod is configured
 
 v3.42 shipped the first-run bring-up with its SDR gate in the wrong stage,
