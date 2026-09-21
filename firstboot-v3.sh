@@ -925,6 +925,54 @@ if [ -z "$VMIP" ]; then
   [ -n "$_mac" ] && VMIP=$(ip -4 neigh show 2>/dev/null | awk -v m="$_mac" 'tolower($5)==m && $1 !~ /^169\.254\./ {print $1; exit}')
   [ -n "$VMIP" ] && VMIP="$VMIP (via ARP — guest agent not answering)"
 fi
+# ── is the station still BUILDING? ─────────────────────────────────────────
+# ⛔ "still installing" and "broken" looked identical from outside, and that
+# cost real time three times on 2026-09-20/21: the panel printed a ka9q-web
+# URL that could not answer yet, the dashboard showed the channel down, and
+# the only place the truth existed was firstrun-bringup.log inside the VM --
+# reachable solely by someone with shell on this host AND a responsive guest
+# agent.  rob concluded twice that a healthy station was broken; so did I.
+#
+# So say it here, where the operator is already looking.  A short agent
+# timeout on purpose: during bring-up the VM is saturated building venvs and
+# the agent often will not answer, and "VM busy" is itself the answer.
+BRINGUP=""
+_bu=$(timeout 12 qm guest exec "$VMID" --timeout 8 -- /bin/bash -c \
+        'systemctl is-active sigmond-firstrun-bringup 2>/dev/null; \
+         sed "s/\x1b\[[0-9;]*m//g" /var/log/sigmond/firstrun-bringup.log 2>/dev/null \
+           | grep -E "^───|» " | tail -1 | cut -c1-58' 2>/dev/null \
+      | python3 -c 'import json,sys
+try: print((json.load(sys.stdin).get("out-data") or "").strip())
+except Exception: pass' 2>/dev/null)
+case "$_bu" in
+    activating*)
+        _stage=$(printf '%s' "$_bu" | tail -1)
+        BRINGUP=" >> STATION IS STILL BUILDING -- this is normal, not a fault.
+ >>   First-run bring-up is RUNNING (clones, builds ~25 components; tens of
+ >>   minutes on a cold box).  ka9q-web and station-web start near the END,
+ >>   so their links below will not answer until it finishes.
+ >>   last step: ${_stage:-(starting)}
+ >>   watch it:  qm guest exec $VMID -- tail -5 /var/log/sigmond/firstrun-bringup.log
+"
+        ;;
+    failed*|inactive*)
+        # inactive is the normal finished state too, so only shout when the
+        # marker says it ran and the services it should have started are not up.
+        if ! qm guest exec "$VMID" --timeout 8 -- /bin/bash -c \
+               'systemctl is-active ka9q-web >/dev/null' >/dev/null 2>&1; then
+            BRINGUP=" !! BRING-UP FINISHED BUT ka9q-web IS NOT RUNNING
+ !!   check:  qm guest exec $VMID -- tail -30 /var/log/sigmond/firstrun-bringup.log
+ !!   re-run: qm guest exec $VMID -- smd bringup dasi2
+"
+        fi
+        ;;
+    "")
+        BRINGUP=" .. decoder VM guest agent did not answer (it is often saturated
+ ..   while the station builds) -- bring-up state unknown from here.
+"
+        ;;
+esac
+
 # Is host root still on the image default?  If so we can print it outright,
 # which is the whole point of this panel — an operator who cannot type here
 # and does not know the password has no way in at all.  If it was changed we
@@ -1009,7 +1057,12 @@ if [ -n "$RACN" ] && [ -r /etc/sigmond/frpc-host.toml ]; then
     if systemctl is-active --quiet sigmond-rac-host 2>/dev/null; then
         _run=$(curl -s --max-time 3 http://127.0.0.1:7500/api/status 2>/dev/null \
                  | grep -o '"status":"running"' | wc -l | tr -d ' ')
-        if [ "${_run:-0}" -gt 0 ]; then RSTAT="online — $_run/4 channels up"
+        # Count the channels this station ACTUALLY declares, never a literal.
+        # It was hardcoded to 4 and the station now ships 6, so a fully
+        # healthy host advertised "6/4 channels up" (rob, 2026-09-21).
+        _decl=$(grep -c '^name *=' /etc/sigmond/frpc-host.toml 2>/dev/null)
+        [ "${_decl:-0}" -gt 0 ] || _decl=$_run
+        if [ "${_run:-0}" -gt 0 ]; then RSTAT="online — $_run/$_decl channels up"
         else RSTAT="service running, no channel accepted yet"; fi
     fi
     RACBLOCK=" Remote access  RAC $RACN on ${RSRV:-<no server>}${RTIER:+  (tier: $RTIER)}
@@ -1050,7 +1103,7 @@ PANEL=$(cat <<PEOF
  this machine registers.  Reach the station from another computer using
  the addresses below.
 
-${NETWARN}${RXWARN}
+${NETWARN}${BRINGUP}${RXWARN}
  Proxmox host ${HOSTIP:-<no-ip-yet>}
    ssh        ssh root@${HOSTIP:-<no-ip-yet>}
    web UI     https://${HOSTIP:-<no-ip-yet>}:8006
