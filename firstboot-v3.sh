@@ -74,6 +74,46 @@ reload_net(){
 
 cur_ip(){ ip -4 -o addr show vmbr0 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -1; }
 
+# An install that cannot get an address is FINISHED -- not degraded.  There is
+# no ssh, no Proxmox UI, no RAC, and on this appliance possibly no keyboard.
+# So say so on the CONSOLE, in full, with the exact command that fixes it.  A
+# log line nobody can read is not a warning (rob, 2026-09-21: "that's an error
+# condition that should be flagged at install time").
+net_dead(){
+    local title="$1" why="$2" nics="$3" line
+    mkdir -p /etc/sigmond-appliance 2>/dev/null
+    { echo "$title"; echo "$why"; echo "nics:$nics"; date -Iseconds; } \
+        > /etc/sigmond-appliance/.network-unreachable 2>/dev/null
+    for line in \
+"" \
+"########################################################################" \
+"##  INSTALL CANNOT CONTINUE NORMALLY: $title" \
+"##" \
+"##  $why" \
+"##     $nics" \
+"##" \
+"##  Without an address this machine has NO ssh, NO web UI and NO remote" \
+"##  access, and its keyboard may be handed to the decoder VM later. It" \
+"##  must be given a working address NOW." \
+"##" \
+"##  1) Preferred: plug the cable into a port with a link light and" \
+"##     reboot. This check runs at every boot and will bind to whichever" \
+"##     port answers." \
+"##" \
+"##  2) Or set a static address by hand and PROVE it works:" \
+"##        sigmond-setnet 10.0.0.50/24 10.0.0.1" \
+"##     It refuses to keep an address whose gateway does not answer, so" \
+"##     it cannot strand you the way the installer default did." \
+"##" \
+"##  Current state is recorded in" \
+"##     /etc/sigmond-appliance/.network-unreachable" \
+"########################################################################" \
+"" ; do
+        echo "$line" >/dev/console 2>/dev/null
+        echo "$line" >>"$LOG" 2>/dev/null
+    done
+}
+
 # ── is there anything to do? ────────────────────────────────────────────────
 # Only act when vmbr0 has NO address or is sitting on the installer's
 # fallback.  A station with a real lease is never touched -- this must not
@@ -108,7 +148,12 @@ for n in $CANDS; do
     fi
 done
 say "NICs with link:${LIVE:- none}${DEAD:+ ; no link:$DEAD}"
-[ -n "$LIVE" ] || { say "NO NIC HAS LINK — check the cable; will retry next boot"; exit 1; }
+if [ -z "$LIVE" ]; then
+    net_dead "NO NETWORK CABLE DETECTED" \
+             "None of this machine's network ports has a link signal:" \
+             "$CANDS"
+    exit 1
+fi
 
 # ── try DHCP on each live NIC, standalone, before committing ────────────────
 # Carrier alone is not enough: a switch port can be up with nothing behind it.
@@ -126,7 +171,12 @@ for n in $LIVE; do
     fi
     say "  $n has link but no DHCP answer"
 done
-[ -n "$WINNER" ] || { say "link but no DHCP on any NIC — leaving config alone, retry next boot"; exit 1; }
+if [ -z "$WINNER" ]; then
+    net_dead "NO DHCP SERVER ANSWERED" \
+             "These ports have a cable, but nothing offered an address:" \
+             "$LIVE"
+    exit 1
+fi
 
 # ── rebind vmbr0 to the winner, as DHCP ─────────────────────────────────────
 cp -a "$IFACES" "$IFACES.netfix-bak-$(date -u +%Y%m%dT%H%M%SZ)" 2>/dev/null
@@ -154,6 +204,7 @@ case "${IP:-}" in
     ""|192.168.100.*)
         say "WARNING: vmbr0 still has no usable address after rebinding to $WINNER" ;;
     *)
+        rm -f /etc/sigmond-appliance/.network-unreachable 2>/dev/null
         say "vmbr0 is now on $WINNER with $IP"
         # PVE resolves its own node name through /etc/hosts; keep it on the
         # live lease or pvecm/pveproxy misbehave.
@@ -165,6 +216,75 @@ esac
 exit 0
 NETFIXEOF
 chmod +x /usr/local/sbin/sigmond-netfix
+
+cat > /usr/local/sbin/sigmond-setnet <<'SETNETEOF'
+#!/bin/bash
+# sigmond-setnet <addr>/<cidr> <gateway> [nic] — give this host a STATIC
+# address, and prove it works before keeping it.
+#
+# The installer's own fallback is the cautionary tale: it wrote an address
+# nobody could route to and never checked, leaving a machine that looked
+# configured and was unreachable.  This does the opposite -- it configures,
+# TESTS, and rolls back on failure, so a typo costs nothing.
+set -u
+usage(){ echo "usage: sigmond-setnet <addr>/<cidr> <gateway> [nic]"; \
+         echo "   eg: sigmond-setnet 10.0.0.50/24 10.0.0.1"; exit 2; }
+[ $# -ge 2 ] || usage
+ADDR="$1"; GW="$2"; NIC="${3:-}"
+case "$ADDR" in */*) : ;; *) echo "address must include the prefix, eg 10.0.0.50/24"; exit 2 ;; esac
+IFACES=/etc/network/interfaces
+
+if [ -z "$NIC" ]; then
+    for d in /sys/class/net/*; do
+        n=$(basename "$d")
+        case "$n" in lo|vmbr*|tap*|fwbr*|fwln*|fwpr*|veth*|bond*|dummy*|wg*|tun*) continue ;; esac
+        [ -e "$d/device" ] || continue
+        ip link set "$n" up 2>/dev/null
+        [ "$(cat "$d/carrier" 2>/dev/null)" = "1" ] && { NIC="$n"; break; }
+    done
+    [ -n "$NIC" ] || { echo "no NIC has a link signal — plug in a cable first"; exit 1; }
+    echo "using $NIC (it has a link signal)"
+fi
+
+BAK="$IFACES.setnet-bak-$(date -u +%Y%m%dT%H%M%SZ)"
+cp -a "$IFACES" "$BAK"
+python3 - "$IFACES" "$NIC" "$ADDR" "$GW" <<'PY2'
+import re, sys
+path, nic, addr, gw = sys.argv[1:5]
+s = open(path).read()
+block = (f"iface vmbr0 inet static\n\taddress {addr}\n\tgateway {gw}\n"
+         f"\tbridge-ports {nic}\n\tbridge-stp off\n\tbridge-fd 0\n")
+m = re.search(r'^iface vmbr0 inet \w+\n(?:[ \t]+.*\n|\n)*', s, re.M)
+s = (s[:m.start()] + block + s[m.end():]) if m else (s + "\nauto vmbr0\n" + block)
+if not re.search(r'^auto vmbr0$', s, re.M):
+    s = s.replace("iface vmbr0 inet static", "auto vmbr0\niface vmbr0 inet static", 1)
+open(path, "w").write(s)
+PY2
+if command -v ifreload >/dev/null 2>&1; then ifreload -a 2>/dev/null
+else ifdown vmbr0 2>/dev/null; ifup vmbr0 2>/dev/null; fi
+sleep 3
+
+# PROVE it: the gateway must answer.  An address without a reachable gateway
+# is exactly the state this tool exists to prevent.
+if ping -c 3 -W 2 "$GW" >/dev/null 2>&1; then
+    echo "OK: $ADDR is up on $NIC and the gateway $GW answers"
+    H=$(hostname)
+    grep -qE "^[0-9.]+[[:space:]].*\b$H\b" /etc/hosts 2>/dev/null && \
+        sed -i -E "s|^[0-9.]+([[:space:]].*\b$H\b)|${ADDR%%/*}\1|" /etc/hosts
+    rm -f /etc/sigmond-appliance/.network-unreachable
+    echo "reach this host at: ssh root@${ADDR%%/*}   https://${ADDR%%/*}:8006"
+    exit 0
+fi
+
+echo "FAILED: gateway $GW did not answer from $ADDR on $NIC"
+echo "rolling back — the previous config is restored, nothing is stranded"
+cp -a "$BAK" "$IFACES"
+if command -v ifreload >/dev/null 2>&1; then ifreload -a 2>/dev/null
+else ifdown vmbr0 2>/dev/null; ifup vmbr0 2>/dev/null; fi
+echo "check the address, prefix, gateway and cable, then try again"
+exit 1
+SETNETEOF
+chmod +x /usr/local/sbin/sigmond-setnet
 
 cat > /etc/systemd/system/sigmond-netfix.service <<'NFSVCEOF'
 [Unit]
@@ -910,6 +1030,19 @@ else
 "
 fi
 
+# A host with no usable address must not render a panel that looks normal.
+# The addresses below would all be the installer's unreachable fallback, and
+# an operator reading them has no way to tell (rob, 2026-09-21).
+NETWARN=""
+if [ -f /etc/sigmond-appliance/.network-unreachable ]; then
+    NETWARN=" !! THIS HOST HAS NO WORKING NETWORK ADDRESS
+ !!   $(head -1 /etc/sigmond-appliance/.network-unreachable 2>/dev/null)
+ !!   The addresses below are NOT reachable. Fix with either:
+ !!     - plug the cable into a port with a link light, then reboot
+ !!     - sigmond-setnet <addr>/<cidr> <gateway>    (verifies before keeping)
+"
+fi
+
 PANEL=$(cat <<PEOF
 ════ Sigmond appliance $VERSION ${CONF:+— station ${CONF%% *}} ════
  THIS CONSOLE IS READ-ONLY — the keyboard does not work here.  Its USB
@@ -917,7 +1050,7 @@ PANEL=$(cat <<PEOF
  this machine registers.  Reach the station from another computer using
  the addresses below.
 
-${RXWARN}
+${NETWARN}${RXWARN}
  Proxmox host ${HOSTIP:-<no-ip-yet>}
    ssh        ssh root@${HOSTIP:-<no-ip-yet>}
    web UI     https://${HOSTIP:-<no-ip-yet>}:8006
