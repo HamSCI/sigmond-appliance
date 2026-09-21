@@ -31,50 +31,164 @@ say "first-boot v3 ($VERSION): installing importer + wizard + finalizer hooks"
 mkdir -p /etc/sigmond-appliance
 echo "$VERSION" > /etc/sigmond-appliance/version
 
-# ── host networking: DHCP on vmbr0 ────────────────────────────────────────
-# The PVE installer answers "from-dhcp", but when no lease arrives in its
-# window (late NIC link, installer-env firmware) it silently falls back to
-# 192.168.100.2/24 — and PVE ALWAYS writes a STATIC config from whatever
-# the installer ended up with, fossilizing the bogus address (observed on
-# rob's LAN 2026-07-28: appliance came up 192.168.100.0/24 on a
-# 192.168.1.0/24 network). The appliance must take whatever the site LAN
-# offers: convert vmbr0 to DHCP, keep /etc/hosts pinned to the live lease
-# (PVE tools resolve the node name via /etc/hosts), and fall back to the
-# installer's static config only if DHCP times out on the real hardware.
-if grep -q '^iface vmbr0 inet static' /etc/network/interfaces; then
-  say "converting vmbr0 to DHCP (installer wrote static $(hostname -I 2>/dev/null | awk '{print $1}'))"
-  cp /etc/network/interfaces /etc/network/interfaces.sigmond-static-bak
-  sed -i -e '/^iface vmbr0 inet static/,/^\s*$/{/^\s*address\s/d;/^\s*gateway\s/d;}' \
-         -e 's/^iface vmbr0 inet static/iface vmbr0 inet dhcp/' /etc/network/interfaces
-  mkdir -p /etc/dhcp/dhclient-exit-hooks.d
-  cat > /etc/dhcp/dhclient-exit-hooks.d/sigmond-pve-hosts <<'HOOKEOF'
-# Sigmond appliance: keep the node's /etc/hosts line on the current DHCP
-# lease — PVE resolves its own hostname via /etc/hosts (static-IP design).
-case "$reason" in
-  BOUND|RENEW|REBIND|REBOOT)
-    H=$(hostname)
-    if [ -n "$new_ip_address" ] && grep -qE "^[0-9.]+[[:space:]].*\b$H\b" /etc/hosts; then
-      sed -i -E "s/^[0-9.]+([[:space:]].*\b$H\b)/$new_ip_address\1/" /etc/hosts
-    fi
-  ;;
+# ── host networking: vmbr0 must be on a NIC that can REACH the LAN ────────
+# Installed as a script + boot unit rather than done inline, because the
+# failure it fixes is not a one-time event: a cable moved to the other socket
+# must heal the machine on the next boot, with nobody at the console.
+cat > /usr/local/sbin/sigmond-netfix <<'NETFIXEOF'
+#!/bin/bash
+# sigmond-netfix — make sure vmbr0 is on a NIC that can actually reach the LAN.
+#
+# ⛔ WHY THIS EXISTS
+# The PVE installer asks for DHCP, and when no lease arrives in its window it
+# silently falls back to a STATIC 192.168.100.2/24 and fossilizes it.  If the
+# port it bound vmbr0 to has no carrier at all -- a second NIC, a dead port, a
+# cable in the other socket -- no amount of waiting helps, and the install ends
+# as a machine on an address nobody can route to.
+#
+# That is a DEAD INSTALL.  The operator cannot ssh in, the Proxmox UI is on the
+# same unreachable address, RAC never registers because there is no route out,
+# and on an appliance whose USB controller goes to the decoder VM there may be
+# no working keyboard either.  It happened to AI6VN on 2026-09-21 with a v3.48
+# stick: vmbr0 bound to a NIC with no link light while the live cable sat in
+# the other socket.  rob: "this would be a real pain in the field ... it's
+# basically a dead install so we've got to address that."
+#
+# So: never accept the fallback.  Look at every physical NIC, find one with
+# CARRIER that a DHCP server actually answers on, and rebind vmbr0 to it.
+#
+# Runs at every boot, not once, so moving the cable to a different socket
+# heals the machine by itself.
+set -u
+LOG=/var/log/sigmond-firstboot.log
+say(){ local m="[netfix $(date '+%T')] $*"; echo "$m" >>"$LOG" 2>/dev/null
+       echo "$m" >/dev/console 2>/dev/null; echo "$m"; }
+
+IFACES=/etc/network/interfaces
+FALLBACK_NET='192\.168\.100\.'
+
+reload_net(){
+    if command -v ifreload >/dev/null 2>&1; then ifreload -a 2>/dev/null
+    else ifdown vmbr0 2>/dev/null; ifup vmbr0 2>/dev/null; fi
+}
+
+cur_ip(){ ip -4 -o addr show vmbr0 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -1; }
+
+# ── is there anything to do? ────────────────────────────────────────────────
+# Only act when vmbr0 has NO address or is sitting on the installer's
+# fallback.  A station with a real lease is never touched -- this must not
+# renumber a working site.
+IP="$(cur_ip)"
+case "$IP" in
+    "")          say "vmbr0 has no IPv4 — looking for a NIC that does" ;;
+    192.168.100.*) say "vmbr0 is on the PVE installer fallback $IP — that address is not routable here" ;;
+    *)           exit 0 ;;   # healthy; say nothing, every boot
 esac
-HOOKEOF
-  chmod 644 /etc/dhcp/dhclient-exit-hooks.d/sigmond-pve-hosts
-  if command -v ifreload >/dev/null 2>&1; then ifreload -a 2>/dev/null; else ifdown vmbr0 2>/dev/null; ifup vmbr0 2>/dev/null; fi
-  HOSTIP=""
-  for i in $(seq 1 12); do
-    HOSTIP=$(hostname -I 2>/dev/null | awk '{print $1}')
-    [ -n "$HOSTIP" ] && break
-    sleep 5
-  done
-  if [ -n "$HOSTIP" ]; then
-    say "vmbr0 DHCP lease: $HOSTIP"
-  else
-    say "WARNING: no DHCP lease after 60s — restoring the installer's static config"
-    cp /etc/network/interfaces.sigmond-static-bak /etc/network/interfaces
-    if command -v ifreload >/dev/null 2>&1; then ifreload -a 2>/dev/null; else ifdown vmbr0 2>/dev/null; ifup vmbr0 2>/dev/null; fi
-  fi
-fi
+
+# ── candidate NICs: physical, not the bridge, not virtual ───────────────────
+# Ordered carrier-first so a live cable wins over a dead one regardless of
+# what the installer picked.
+CANDS=""
+for d in /sys/class/net/*; do
+    n=$(basename "$d")
+    case "$n" in lo|vmbr*|tap*|fwbr*|fwln*|fwpr*|veth*|bond*|dummy*|wg*|tun*) continue ;; esac
+    [ -e "$d/device" ] || continue          # physical only
+    ip link set "$n" up 2>/dev/null         # a down NIC reports no carrier
+    CANDS="$CANDS $n"
+done
+[ -n "$CANDS" ] || { say "no physical NICs found — cannot fix networking"; exit 1; }
+sleep 4                                     # let link negotiate after the ups
+
+LIVE=""; DEAD=""
+for n in $CANDS; do
+    if [ "$(cat "/sys/class/net/$n/carrier" 2>/dev/null)" = "1" ]; then
+        LIVE="$LIVE $n"
+    else
+        DEAD="$DEAD $n"
+    fi
+done
+say "NICs with link:${LIVE:- none}${DEAD:+ ; no link:$DEAD}"
+[ -n "$LIVE" ] || { say "NO NIC HAS LINK — check the cable; will retry next boot"; exit 1; }
+
+# ── try DHCP on each live NIC, standalone, before committing ────────────────
+# Carrier alone is not enough: a switch port can be up with nothing behind it.
+# Probe with dhclient on the bare interface so a failure costs nothing.
+WINNER=""
+for n in $LIVE; do
+    say "trying DHCP on $n ..."
+    timeout 25 dhclient -1 -v "$n" >>"$LOG" 2>&1
+    got=$(ip -4 -o addr show "$n" 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -1)
+    dhclient -r "$n" >/dev/null 2>&1
+    ip addr flush dev "$n" 2>/dev/null
+    if [ -n "$got" ]; then
+        say "  $n got $got — using it for vmbr0"
+        WINNER="$n"; break
+    fi
+    say "  $n has link but no DHCP answer"
+done
+[ -n "$WINNER" ] || { say "link but no DHCP on any NIC — leaving config alone, retry next boot"; exit 1; }
+
+# ── rebind vmbr0 to the winner, as DHCP ─────────────────────────────────────
+cp -a "$IFACES" "$IFACES.netfix-bak-$(date -u +%Y%m%dT%H%M%SZ)" 2>/dev/null
+python3 - "$IFACES" "$WINNER" <<'PY'
+import re, sys
+path, nic = sys.argv[1], sys.argv[2]
+s = open(path).read()
+m = re.search(r'^iface vmbr0 inet \w+\n(?:[ \t]+.*\n|\n)*', s, re.M)
+block = ("iface vmbr0 inet dhcp\n"
+         f"\tbridge-ports {nic}\n"
+         "\tbridge-stp off\n"
+         "\tbridge-fd 0\n")
+if m:
+    s = s[:m.start()] + block + s[m.end():]
+else:
+    s += "\nauto vmbr0\n" + block
+if not re.search(r'^auto vmbr0$', s, re.M):
+    s = s.replace("iface vmbr0 inet dhcp", "auto vmbr0\niface vmbr0 inet dhcp", 1)
+open(path, "w").write(s)
+PY
+reload_net
+for i in $(seq 1 12); do IP="$(cur_ip)"; [ -n "$IP" ] && break; sleep 5; done
+
+case "${IP:-}" in
+    ""|192.168.100.*)
+        say "WARNING: vmbr0 still has no usable address after rebinding to $WINNER" ;;
+    *)
+        say "vmbr0 is now on $WINNER with $IP"
+        # PVE resolves its own node name through /etc/hosts; keep it on the
+        # live lease or pvecm/pveproxy misbehave.
+        H=$(hostname)
+        if grep -qE "^[0-9.]+[[:space:]].*\b$H\b" /etc/hosts 2>/dev/null; then
+            sed -i -E "s/^[0-9.]+([[:space:]].*\b$H\b)/$IP\1/" /etc/hosts
+        fi ;;
+esac
+exit 0
+NETFIXEOF
+chmod +x /usr/local/sbin/sigmond-netfix
+
+cat > /etc/systemd/system/sigmond-netfix.service <<'NFSVCEOF'
+[Unit]
+Description=Sigmond: keep vmbr0 on a NIC that can reach the LAN
+# Before pve-guests and the importer: everything downstream assumes the host
+# has a routable address, and RAC cannot register without one.
+Before=pve-guests.service sigmond-import.service
+Wants=network.target
+After=network.target
+[Service]
+Type=oneshot
+RemainAfterExit=no
+ExecStart=/usr/local/sbin/sigmond-netfix
+# Never fail the boot over it: a host that will not finish booting is worse
+# than one on the wrong address, and this runs again next boot.
+SuccessExitStatus=0 1
+TimeoutStartSec=5min
+[Install]
+WantedBy=multi-user.target
+NFSVCEOF
+systemctl enable sigmond-netfix.service 2>/dev/null
+
+# Run it now, before anything else needs the network.
+/usr/local/sbin/sigmond-netfix
 
 # ── importer ──────────────────────────────────────────────────────────────
 cat > /usr/local/sbin/sigmond-import.sh <<'IMPEOF'
