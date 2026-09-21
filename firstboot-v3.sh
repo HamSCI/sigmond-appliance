@@ -122,7 +122,33 @@ IP="$(cur_ip)"
 case "$IP" in
     "")          say "vmbr0 has no IPv4 — looking for a NIC that does" ;;
     192.168.100.*) say "vmbr0 is on the PVE installer fallback $IP — that address is not routable here" ;;
-    *)           exit 0 ;;   # healthy; say nothing, every boot
+    *)
+        # A REAL address, so the NIC hunt below is not needed.  But PVE writes
+        # a STATIC stanza even when its own DHCP succeeded, which fossilizes
+        # whatever it got: the station keeps that address after the lease
+        # changes or the site renumbers (rob's LAN, 2026-07-28).  De-fossilize
+        # here -- this is the original firstboot behaviour, and dropping it
+        # when netfix took over was a regression the nested test caught
+        # ("FATAL: vmbr0 not on DHCP (static-fossilization bug)").
+        grep -q '^iface vmbr0 inet static' "$IFACES" 2>/dev/null || exit 0
+        say "vmbr0 has $IP but is configured STATIC — converting to DHCP so it cannot fossilize"
+        cp -a "$IFACES" "$IFACES.netfix-static-bak"
+        sed -i -e '/^iface vmbr0 inet static/,/^[[:space:]]*$/{/^[[:space:]]*address[[:space:]]/d;/^[[:space:]]*gateway[[:space:]]/d;}' \
+               -e 's/^iface vmbr0 inet static/iface vmbr0 inet dhcp/' "$IFACES"
+        reload_net
+        for i in $(seq 1 12); do NEW="$(cur_ip)"; [ -n "$NEW" ] && break; sleep 5; done
+        if [ -n "${NEW:-}" ]; then
+            say "vmbr0 now takes DHCP; lease $NEW"
+            H=$(hostname)
+            grep -qE "^[0-9.]+[[:space:]].*\b$H\b" /etc/hosts 2>/dev/null && \
+                sed -i -E "s/^[0-9.]+([[:space:]].*\b$H\b)/$NEW\1/" /etc/hosts
+        else
+            # Never trade a working address for none.
+            say "WARNING: no lease after 60s — restoring the static config ($IP)"
+            cp -a "$IFACES.netfix-static-bak" "$IFACES"
+            reload_net
+        fi
+        exit 0 ;;
 esac
 
 # ── candidate NICs: physical, not the bridge, not virtual ───────────────────
