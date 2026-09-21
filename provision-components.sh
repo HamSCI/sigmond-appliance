@@ -173,6 +173,23 @@ if [ -f "$HOME/rob.pub" ]; then
     sudo chown -R hamsci:hamsci /home/hamsci/.ssh
     sudo chmod 700 /home/hamsci/.ssh; sudo chmod 600 /home/hamsci/.ssh/authorized_keys
     echo "### hamsci ssh key installed"
+else
+    # ⛔ This used to be a bare `if` with no else, and the silence cost real
+    # time.  The golden VM rebuilt on 2026-09-21 shipped with NO authorized
+    # key for hamsci because rob.pub was not on the rig, and nobody noticed
+    # until the guest agent went down on AI6VN and there was suddenly no way
+    # into the decoder VM at all -- not by key, not by agent, only by
+    # `qm terminal 100` at the console.
+    #
+    # Key-based access to the VM is not a nicety: it is the fallback for
+    # exactly the case where the agent is unavailable.  Shipping without it
+    # must be a LOUD, deliberate choice, never an accident of a missing file.
+    echo "### !! NO hamsci ssh KEY INSTALLED — \$HOME/rob.pub not found on the"
+    echo "### !!   build host.  The decoder VM will have NO key-based access;"
+    echo "### !!   when the guest agent is down the only way in is"
+    echo "### !!   'qm terminal 100' at the console."
+    echo "### !!   Put the operator public key at \$HOME/rob.pub and rebuild."
+    echo "no-hamsci-ssh-key" | sudo tee /etc/sigmond-appliance-novmkey >/dev/null 2>&1 || true
 fi
 
 echo "### stage 3: capture-prep (scrub identity/secrets/data for golden image)"

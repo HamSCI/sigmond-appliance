@@ -46,6 +46,20 @@ for i in $(seq 1 60); do $SSH true 2>/dev/null && break; sleep 5; done
 $SSH true || { say "FATAL: VM ssh never came up"; exit 1; }
 say "VM up: $($SSH hostname 2>/dev/null)"
 
+# ⛔ The decoder VM's ssh key is not optional.  provision-components.sh
+# installs it only `if [ -f "$HOME/rob.pub" ]`, and on 2026-09-21 that file
+# was absent on the rig, so the golden VM shipped with NO key-based access to
+# the decoder VM.  It surfaced only when the guest agent went down on AI6VN
+# and there was no remaining way in.  Refuse to build blind: the operator can
+# still opt out explicitly.
+if [ ! -f "$HOME/rob.pub" ]; then
+    say "FATAL: $HOME/rob.pub is missing — the decoder VM would be built with"
+    say "  NO authorized ssh key, leaving 'qm terminal 100' as the only way in"
+    say "  when the guest agent is unavailable."
+    say "  Put the operator public key there, or set VMKEYLESS_OK=1 to accept it."
+    [ "${VMKEYLESS_OK:-0}" = 1 ] || die "refusing to build a keyless decoder VM"
+    say "  VMKEYLESS_OK=1 — continuing WITHOUT a VM ssh key"
+fi
 $SCP provision.sh provision-components.sh rob.pub build@127.0.0.1:
 $SCP wisdomf-ryzen5825u build@127.0.0.1:wisdomf
 # radiod's own channel-filter plans — a DIFFERENT file from wisdomf, which
