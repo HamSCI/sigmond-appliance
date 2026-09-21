@@ -1096,6 +1096,48 @@ if [ -f /etc/sigmond-appliance/.network-unreachable ]; then
 "
 fi
 
+# ── network health, from THIS host's own view ──────────────────────────────
+# The panel refreshes every 5 minutes but said nothing about the physical
+# link, so moving a cable to the wrong socket produced no visible change at
+# all -- the operator sees a normal-looking panel while the machine is on its
+# way to being unreachable (rob, 2026-09-21: "I just moved the cable over to
+# the NIC that isn't working and there was no indication of that on the
+# panel").  Everything here is local and cheap: no guest agent, no network
+# round trip except one gateway ping.
+NICLINES=""
+_vmbr_port=$(awk '/^iface vmbr0/{f=1} f&&/bridge-ports/{print $2; exit}' /etc/network/interfaces 2>/dev/null)
+for _d in /sys/class/net/*; do
+    _n=$(basename "$_d")
+    case "$_n" in lo|vmbr*|tap*|fwbr*|fwln*|fwpr*|veth*|bond*|dummy*|wg*|tun*) continue ;; esac
+    [ -e "$_d/device" ] || continue
+    if [ "$(cat "$_d/carrier" 2>/dev/null)" = "1" ]; then _c="LINK UP  "; else _c="NO LINK  "; fi
+    _mark=""
+    [ "$_n" = "$_vmbr_port" ] && _mark="  <- vmbr0 uses this one"
+    NICLINES="$NICLINES   $(printf '%-9s %s' "$_n" "$_c")$_mark
+"
+done
+# A gateway that does not answer is the difference between "configured" and
+# "reachable", and only the second one matters to an operator.
+_gw=$(ip route show default 2>/dev/null | awk '{print $3; exit}')
+if [ -n "$_gw" ]; then
+    if ping -c1 -W2 "$_gw" >/dev/null 2>&1; then _gwl="gateway $_gw responds"
+    else _gwl="gateway $_gw DOES NOT RESPOND  <- this host cannot reach the LAN"; fi
+else
+    _gwl="NO DEFAULT ROUTE  <- this host cannot reach anything"
+fi
+# Warn when the cable is in a port vmbr0 is not using -- the exact trap.
+_stray=""
+for _d in /sys/class/net/*; do
+    _n=$(basename "$_d"); [ -e "$_d/device" ] || continue
+    case "$_n" in lo|vmbr*|tap*|fwbr*|fwln*|fwpr*|veth*|bond*|dummy*|wg*|tun*) continue ;; esac
+    if [ "$(cat "$_d/carrier" 2>/dev/null)" = "1" ] && [ "$_n" != "$_vmbr_port" ]; then
+        _stray=" !! $_n has a cable but vmbr0 uses ${_vmbr_port:-?}. If the network
+ !!   is not working, move the cable, or reboot: the host re-binds vmbr0 to
+ !!   whichever port answers DHCP.
+"
+    fi
+done
+
 PANEL=$(cat <<PEOF
 ════ Sigmond appliance $VERSION ${CONF:+— station ${CONF%% *}} ════
  THIS CONSOLE IS READ-ONLY — the keyboard does not work here.  Its USB
@@ -1104,6 +1146,9 @@ PANEL=$(cat <<PEOF
  the addresses below.
 
 ${NETWARN}${BRINGUP}${RXWARN}
+ Network
+${NICLINES}   ${_gwl}
+${_stray}
  Proxmox host ${HOSTIP:-<no-ip-yet>}
    ssh        ssh root@${HOSTIP:-<no-ip-yet>}
    web UI     https://${HOSTIP:-<no-ip-yet>}:8006
