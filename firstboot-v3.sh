@@ -159,6 +159,14 @@ for d in /sys/class/net/*; do
     n=$(basename "$d")
     case "$n" in lo|vmbr*|tap*|fwbr*|fwln*|fwpr*|veth*|bond*|dummy*|wg*|tun*) continue ;; esac
     [ -e "$d/device" ] || continue          # physical only
+    # ⛔ NEVER probe a NIC already enslaved to a bridge.  Running dhclient on
+    # a bridge member and then flushing it tears down the very bridge we are
+    # trying to repair -- vmbr0's own port would otherwise be fair game here,
+    # which is a repair that breaks the thing it repairs.
+    if [ -e "$d/master" ]; then
+        say "  skipping $n — already enslaved to $(basename "$(readlink -f "$d/master")" 2>/dev/null)"
+        continue
+    fi
     ip link set "$n" up 2>/dev/null         # a down NIC reports no carrier
     CANDS="$CANDS $n"
 done
@@ -893,7 +901,14 @@ cat > /usr/local/sbin/sigmond-issue <<'ISSEOF'
 VMID="${SIGMOND_VMID:-100}"
 VERSION="$(cat /etc/sigmond-appliance/version 2>/dev/null || echo '?')"
 CONF="$(cat /etc/sigmond-appliance/.configured 2>/dev/null)"
-HOSTIP=$(hostname -I 2>/dev/null | awk '{print $1}')
+HOSTIP=$(ip -4 -o addr show vmbr0 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -1)
+# ⚠ NOT `hostname -I | awk '{print $1}'`: that lists EVERY address, and since
+# the decoder VM moved behind a host-only bridge this host also holds
+# 10.99.0.1.  Ordering is not guaranteed, so the panel/summary could announce
+# the management /30 -- an address reachable only from the VM -- as the
+# station's address (rob, 2026-09-21: "it was using 10.99.0 ... I think you
+# need to exclude 10.99").  Ask vmbr0 directly, and fall back excluding it.
+[ -n "$HOSTIP" ] || HOSTIP=$(hostname -I 2>/dev/null | tr ' ' '\n' | grep -vE '^(10\.99\.0\.|127\.)' | head -1)
 VMIP=""
 for i in 1 2 3 4 5 6; do
   # Print the VM address THIS HOST can actually reach.  Taking whichever
@@ -1256,7 +1271,14 @@ grep -q "Sigmond appliance" /etc/motd 2>/dev/null || cat >> /etc/motd <<MOTDEOF
   Decoder VM: 100 (sigmond-decoder-${VERSION//./-})   Wizard: sigmond-setup
 MOTDEOF
 
-HOSTIP=$(hostname -I 2>/dev/null | awk '{print $1}')
+HOSTIP=$(ip -4 -o addr show vmbr0 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -1)
+# ⚠ NOT `hostname -I | awk '{print $1}'`: that lists EVERY address, and since
+# the decoder VM moved behind a host-only bridge this host also holds
+# 10.99.0.1.  Ordering is not guaranteed, so the panel/summary could announce
+# the management /30 -- an address reachable only from the VM -- as the
+# station's address (rob, 2026-09-21: "it was using 10.99.0 ... I think you
+# need to exclude 10.99").  Ask vmbr0 directly, and fall back excluding it.
+[ -n "$HOSTIP" ] || HOSTIP=$(hostname -I 2>/dev/null | tr ' ' '\n' | grep -vE '^(10\.99\.0\.|127\.)' | head -1)
 say "─────────────────────────────────────────────────────────"
 say " Sigmond appliance $VERSION: Proxmox is installed and running."
 say "   console/SSH login: root / hamsci-sigmond  (CHANGE IT: 'passwd')"
