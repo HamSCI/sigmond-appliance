@@ -552,6 +552,46 @@ $SSHN "timeout 5 bash -c 'echo >/dev/tcp/127.0.0.1/2222'" 2>/dev/null \
   && say "host:2222 -> VM:22 forward works ✓" \
   || say "WARN: host:2222 forward did not answer (VM ssh is up, DNAT may need a hairpin route)"
 
+# ── ONE bring-up ran, not two ─────────────────────────────────────────────
+# The wizard used to launch its own `smd bringup` in a transient unit while
+# sigmond-firstrun-bringup.service could be running the same thing, with no
+# mutual exclusion.  Both contend for the lifecycle lock and the loser does
+# not wait -- it FAILS the step.  On AI6VN (v3.50, 2026-09-21) that cost ten
+# consecutive `smd install` steps and the station came up without ka9q-web,
+# while every surface still reported a successful install.
+#
+# Assert the OUTCOME, not the implementation: no step may have died on the
+# lock.  A future refactor that reintroduces a second bring-up by some other
+# route fails here too, which a check for the old unit name would not.
+say "checking that bring-up did not fight itself for the lifecycle lock"
+BUOUT=$($SSHN "qm guest exec $VMID --timeout 60 -- bash -lc '
+    L=/var/log/sigmond/firstrun-bringup.log
+    [ -r \$L ] || { echo NOLOG; exit 0; }
+    echo LOCKHITS:\$(grep -ci \"lifecycle lock held\" \$L 2>/dev/null)
+    echo STEPFAIL:\$(grep -c \"step exited [1-9]\" \$L 2>/dev/null)
+    systemctl is-active sigmond-wizard-bringup.service 2>/dev/null \
+        | sed \"s/^/TRANSIENT:/\"
+'" 2>&1)
+case "$BUOUT" in
+  *NOLOG*) say "WARN: no firstrun-bringup.log in the VM — bring-up may not have run at all" ;;
+  *)
+    _lh=$(echo "$BUOUT" | grep -oE 'LOCKHITS:[0-9]+' | head -1 | cut -d: -f2)
+    _sf=$(echo "$BUOUT" | grep -oE 'STEPFAIL:[0-9]+' | head -1 | cut -d: -f2)
+    [ "${_lh:-0}" = "0" ] \
+        && say "no step lost the lifecycle lock ✓" \
+        || { say "FATAL: ${_lh} bring-up step(s) failed on 'lifecycle lock held' —"
+             say "  two bring-ups ran concurrently; this is the AI6VN race."
+             $SSHN "qm guest exec $VMID --timeout 30 -- bash -lc 'grep -i \"lifecycle lock held\" /var/log/sigmond/firstrun-bringup.log | head -5'" 2>&1
+             exit 1; }
+    [ "${_sf:-0}" = "0" ] \
+        && say "every bring-up step exited 0 ✓" \
+        || say "WARN: ${_sf} bring-up step(s) exited non-zero for other reasons — check the log"
+    echo "$BUOUT" | grep -q 'TRANSIENT:active' \
+        && say "WARN: the retired sigmond-wizard-bringup transient unit is running" \
+        || say "no second bring-up unit was created ✓"
+    ;;
+esac
+
 say "PHASE D PASS — NESTED TEST COMPLETE"
 ;;
 esac
