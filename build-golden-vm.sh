@@ -34,9 +34,27 @@ sudo pkill -f "name goldenv3" 2>/dev/null; sleep 2
 cp "$VMBUILD_DIR/debian-13-genericcloud-amd64.qcow2" golden-v3.qcow2
 qemu-img resize golden-v3.qcow2 20G
 
+# Build-VM memory.  8G is what the build wants; a rig with less must get less
+# or qemu refuses to start and the whole ladder dies at step one.  The rig on
+# sigmond-devbox has 7G total, and had carried a hand-edit to 4096 since at
+# least 2026-09-16 -- an uncommitted local diff that silently forked the rig
+# from the repo and would have been clobbered by the next `git pull`.  Size it
+# from what the machine actually has instead, leaving 2G for the host, and let
+# an operator override outright.
+if [ -z "${APPLIANCE_BUILD_MEM:-}" ]; then
+    _memtotal_mb=$(awk '/^MemTotal:/{print int($2/1024)}' /proc/meminfo 2>/dev/null)
+    APPLIANCE_BUILD_MEM=8192
+    if [ -n "$_memtotal_mb" ] && [ "$_memtotal_mb" -lt 10240 ]; then
+        APPLIANCE_BUILD_MEM=$(( (_memtotal_mb - 2048) / 1024 * 1024 ))
+        [ "$APPLIANCE_BUILD_MEM" -lt 3072 ] \
+            && die "only ${_memtotal_mb}M RAM on this rig; need ~5G to build"
+    fi
+fi
+say "build VM memory: ${APPLIANCE_BUILD_MEM}M (override with APPLIANCE_BUILD_MEM)"
+
 say "booting build VM (headless, ssh :5557)"
 [ -f "$VMBUILD_DIR/seed.iso" ] || die "seed iso missing: $VMBUILD_DIR/seed.iso (check APPLIANCE_VMBUILD_DIR)"
-sudo qemu-system-x86_64 -name goldenv3 -enable-kvm -m 8192 -smp 4 -cpu host \
+sudo qemu-system-x86_64 -name goldenv3 -enable-kvm -m "$APPLIANCE_BUILD_MEM" -smp 4 -cpu host \
   -drive file=golden-v3.qcow2,if=virtio -drive file="$VMBUILD_DIR/seed.iso",media=cdrom \
   -netdev user,id=n0,hostfwd=tcp:127.0.0.1:5557-:22 -device virtio-net,netdev=n0 \
   -display none -daemonize
