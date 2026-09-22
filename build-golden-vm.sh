@@ -52,15 +52,36 @@ say "VM up: $($SSH hostname 2>/dev/null)"
 # the decoder VM.  It surfaced only when the guest agent went down on AI6VN
 # and there was no remaining way in.  Refuse to build blind: the operator can
 # still opt out explicitly.
-if [ ! -f "$HOME/rob.pub" ]; then
-    say "FATAL: $HOME/rob.pub is missing — the decoder VM would be built with"
-    say "  NO authorized ssh key, leaving 'qm terminal 100' as the only way in"
-    say "  when the guest agent is unavailable."
-    say "  Put the operator public key there, or set VMKEYLESS_OK=1 to accept it."
+#
+# TWO paths were in play and they disagreed: the gate tested $HOME/rob.pub
+# while the scp below read ./rob.pub relative to the rig checkout, so staging
+# the key in the place the FATAL message named still failed at the copy.
+# Resolve it ONCE here, checkout first (that copy travels with the rig and is
+# what a fresh clone should carry), and use the resolved path everywhere.
+OPKEY=""
+for c in "$PWD/rob.pub" "$HOME/rob.pub"; do
+    [ -f "$c" ] && { OPKEY="$c"; break; }
+done
+if [ -n "$OPKEY" ] && ! ssh-keygen -lf "$OPKEY" >/dev/null 2>&1; then
+    # A truncated or mangled file installs silently and locks you out exactly
+    # as thoroughly as no file at all.  Treat it as absent.
+    say "WARNING: $OPKEY is not a readable ssh public key — ignoring it"
+    OPKEY=""
+fi
+if [ -z "$OPKEY" ]; then
+    say "FATAL: no operator public key found — the decoder VM would be built"
+    say "  with NO authorized ssh key, leaving 'qm terminal 100' as the only"
+    say "  way in when the guest agent is unavailable."
+    say "  Looked for: $PWD/rob.pub  then  $HOME/rob.pub"
+    say "  Put the operator public key at either, or set VMKEYLESS_OK=1."
     [ "${VMKEYLESS_OK:-0}" = 1 ] || die "refusing to build a keyless decoder VM"
     say "  VMKEYLESS_OK=1 — continuing WITHOUT a VM ssh key"
+else
+    say "operator key: $OPKEY — $(ssh-keygen -lf "$OPKEY" | awk '{print $1" "$2" "$4}')"
+    say "  (an authorized_keys file may hold several; all of them are installed)"
 fi
-$SCP provision.sh provision-components.sh rob.pub build@127.0.0.1:
+$SCP provision.sh provision-components.sh build@127.0.0.1:
+[ -n "$OPKEY" ] && $SCP "$OPKEY" build@127.0.0.1:rob.pub
 $SCP wisdomf-ryzen5825u build@127.0.0.1:wisdomf
 # radiod's own channel-filter plans — a DIFFERENT file from wisdomf, which
 # is planned non-threaded and which radiod's threaded plans never match.
