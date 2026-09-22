@@ -166,6 +166,50 @@ say "capture gate READY"
 say "recording repo revisions for the build manifest"
 $SSH "for d in /opt/git/sigmond/*/; do printf '%s %s\n' \"\$(basename \$d)\" \"\$(git -C \$d rev-parse --short HEAD 2>/dev/null)\"; done" | tee golden-v3-revs.txt
 
+# ── is every component actually at the LATEST commit? ───────────────────────
+# The whole point of cloning at build time is that the template carries the
+# top of main.  Nothing ever CHECKED that.  A clone can land behind for dull
+# reasons -- a push that lost the race with the build, a component whose
+# default branch is not what we assume, a checkout smd reused instead of
+# refetching -- and the result is an image that looks current, ships, and is
+# quietly a few commits old across 25 repos with no signal anywhere.
+#
+# rob, 2026-09-22: "i'm not worried about recreating an image, just be sure
+# that an image is created with the latest commits."  So: no pinning, no
+# reproducibility machinery -- just ask each remote what its head is, while
+# we are still inside the build VM and the network is up, and refuse to bless
+# a template that is behind.
+say "checking every component against its remote's latest commit"
+$SSH 'for d in /opt/git/sigmond/*/; do
+        n=$(basename "$d")
+        loc=$(git -C "$d" rev-parse HEAD 2>/dev/null) || { printf "%s - - NOGIT\n" "$n"; continue; }
+        br=$(git -C "$d" symbolic-ref --short HEAD 2>/dev/null)
+        if [ -z "$br" ]; then printf "%s %.7s - DETACHED\n" "$n" "$loc"; continue; fi
+        rem=$(git -C "$d" ls-remote origin "refs/heads/$br" 2>/dev/null | awk "{print \$1; exit}")
+        if [ -z "$rem" ]; then printf "%s %.7s - UNREACHABLE\n" "$n" "$loc"; continue; fi
+        if [ "$loc" = "$rem" ]; then printf "%s %.7s %.7s CURRENT\n" "$n" "$loc" "$rem"
+        else printf "%s %.7s %.7s BEHIND\n" "$n" "$loc" "$rem"; fi
+      done' > golden-v3-freshness.txt 2>/dev/null
+if [ -s golden-v3-freshness.txt ]; then
+    awk '{printf "  %-18s %-9s %-9s %s\n", $1, $2, $3, $4}' golden-v3-freshness.txt
+    _behind=$(awk '$4=="BEHIND"{print $1}' golden-v3-freshness.txt)
+    _blind=$(awk '$4=="UNREACHABLE"||$4=="DETACHED"||$4=="NOGIT"{print $1}' golden-v3-freshness.txt)
+    [ -n "$_blind" ] && say "NOTE: not verifiable: $(echo $_blind | tr '\n' ' ')"
+    if [ -n "$_behind" ]; then
+        say "FATAL: these components are NOT at their remote's latest commit:"
+        for c in $_behind; do say "         $c"; done
+        say "  The template would ship stale code.  Usually this means a push"
+        say "  landed after the clone -- rerun ./build-golden-vm.sh."
+        say "  Deliberate old-code build: GOLDEN_ALLOW_BEHIND=1"
+        [ "${GOLDEN_ALLOW_BEHIND:-0}" = 1 ] || exit 1
+        say "  GOLDEN_ALLOW_BEHIND=1 — continuing with stale components"
+    else
+        say "all verifiable components are at their remote's latest commit"
+    fi
+else
+    say "WARNING: freshness check produced nothing — components NOT verified"
+fi
+
 # The manifest that build-usb-v3.sh ships with the image and that a Release
 # attaches — this is the only point in the pipeline where components are
 # installed AND still reachable over ssh (smd version reports "no component
