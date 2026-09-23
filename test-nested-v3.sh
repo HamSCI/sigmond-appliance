@@ -216,26 +216,6 @@ $SSHN "test -f /root/sigmond-appliance/sigmond/scripts/proxmox/host-apply.sh" &&
 $SSHN "test -x /usr/local/sbin/sigmond-setup" && say "wizard staged" || { say "FATAL: wizard missing"; exit 1; }
 $SSHN "test -x /usr/local/sbin/sigmond-finalize.sh" && say "finalizer staged" || { say "FATAL: finalizer missing"; exit 1; }
 $SSHN "systemctl is-enabled sigmond-wizard.service >/dev/null" && say "wizard service enabled (tty1)" || say "WARN: wizard unit not enabled"
-# The golden template must carry NO [heartbeat] config.  This check used to
-# live AFTER the wizard, where it asserted "not enabled" — which stopped
-# being true in v3.52 once the wizard began enabling the heartbeat by
-# default.  Leak-detection belongs here, before anything configures the
-# station; the post-wizard block now asserts the configured state instead.
-# ⛔ Match an UNCOMMENTED section header only.  capture-prep writes the
-# site-profile SCAFFOLD into the template, and that scaffold documents the
-# block as a commented example ("# [heartbeat]  # fleet situational-awareness
-# ...", site_profile.py:75).  A bare `grep "\[heartbeat\]"` matches the
-# comment and reports a leak that is not there — it did, on 2026-09-23.
-# An example in a comment is documentation; a section at line start is config.
-HBLEAK=$($SSHN "qm guest exec $VMID --timeout 30 -- bash -lc 'grep -qE \"^[[:space:]]*\\[heartbeat\\]\" /etc/sigmond/site-profile.toml 2>/dev/null && echo LEAKED || echo CLEAN'" 2>&1)
-case "$HBLEAK" in
-    *CLEAN*)  say "golden template carries no heartbeat config ✓" ;;
-    *LEAKED*) say "FATAL: a live [heartbeat] section leaked into the golden template"; echo "$HBLEAK" | head -6; exit 1 ;;
-    # Neither token means the probe failed to answer.  Say THAT, rather than
-    # reporting a leak — "could not tell" and "found a leak" are different
-    # facts, and conflating them cost a diagnosis today.
-    *) say "FATAL: heartbeat leak probe returned neither CLEAN nor LEAKED"; echo "$HBLEAK" | head -6; exit 1 ;;
-esac
 $SSHN "systemctl is-active sigmond-finalize.path >/dev/null" && say "finalize path unit watching" || say "WARN: finalize path unit not active"
 $SSHN "test -f /root/sigmond-appliance/sigmond-rac/install-host.sh" && say "sigmond-rac payload staged" || say "WARN: rac payload missing"
 
@@ -319,6 +299,39 @@ GK=$($SSHN "qm guest exec $VMID --timeout 60 -- bash -lc 'uname -r; ls /lib/modu
 echo "$GK" | tail -4
 echo "$GK" | grep -q 'cloud' && { say "FATAL: decoder VM still on CLOUD kernel (no USB stack)"; exit 1; }
 echo "$GK" | grep -q 'hamsci' || { say "FATAL: hamsci user missing in decoder VM"; exit 1; }
+# ⛔ RUN THIS ONLY AFTER THE AGENT WAIT ABOVE.  It first sat in Phase C,
+# four seconds after VM import, where `qm guest exec` answers "QEMU guest
+# agent is not running" -- and the probe reported that as a LEAK on
+# 2026-09-23, then as "could not tell" once it learned to distinguish the
+# two.  The agent is confirmed up by the two-ping gate above, and the
+# wizard has still not run, so this window is both answerable and
+# genuinely pre-configuration.
+#
+# Match an UNCOMMENTED section header only: capture-prep writes the
+# site-profile SCAFFOLD into the template and that scaffold documents the
+# block as a commented example (site_profile.py:75).  An example in a
+# comment is documentation; a section at line start is configuration.
+# The golden template must carry NO [heartbeat] config.  This check used to
+# live AFTER the wizard, where it asserted "not enabled" — which stopped
+# being true in v3.52 once the wizard began enabling the heartbeat by
+# default.  Leak-detection belongs here, before anything configures the
+# station; the post-wizard block now asserts the configured state instead.
+# ⛔ Match an UNCOMMENTED section header only.  capture-prep writes the
+# site-profile SCAFFOLD into the template, and that scaffold documents the
+# block as a commented example ("# [heartbeat]  # fleet situational-awareness
+# ...", site_profile.py:75).  A bare `grep "\[heartbeat\]"` matches the
+# comment and reports a leak that is not there — it did, on 2026-09-23.
+# An example in a comment is documentation; a section at line start is config.
+HBLEAK=$($SSHN "qm guest exec $VMID --timeout 30 -- bash -lc 'grep -qE \"^[[:space:]]*\\[heartbeat\\]\" /etc/sigmond/site-profile.toml 2>/dev/null && echo LEAKED || echo CLEAN'" 2>&1)
+case "$HBLEAK" in
+    *CLEAN*)  say "golden template carries no heartbeat config ✓" ;;
+    *LEAKED*) say "FATAL: a live [heartbeat] section leaked into the golden template"; echo "$HBLEAK" | head -6; exit 1 ;;
+    # Neither token means the probe failed to answer.  Say THAT, rather than
+    # reporting a leak — "could not tell" and "found a leak" are different
+    # facts, and conflating them cost a diagnosis today.
+    *) say "FATAL: heartbeat leak probe returned neither CLEAN nor LEAKED"; echo "$HBLEAK" | head -6; exit 1 ;;
+esac
+
 say "staging a test site-keys tarball (exercises the stick key-restore path)"
 $SSHN "mkdir -p /root/sigmond-appliance /tmp/sk/etc/hs-uploader/keys /tmp/sk/home/timestd/.ssh && echo TESTPRIV > /tmp/sk/etc/hs-uploader/keys/id_ed25519_host && echo TESTPUB > /tmp/sk/etc/hs-uploader/keys/id_ed25519_host.pub && echo TESTRSA > /tmp/sk/home/timestd/.ssh/id_rsa_psws && tar czf /root/sigmond-appliance/site-keys.tar.gz -C /tmp/sk etc home && rm -rf /tmp/sk"
 say "guest kernel + hamsci OK; running wizard with piped answers (identity N0CALL/T1 @ EM00aa)"
