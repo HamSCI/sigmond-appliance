@@ -1,81 +1,177 @@
 SIGMOND APPLIANCE @@VERSION@@ — QUICK START
 ===========================================
-1. Write the image to a USB stick (>=16 GB).  The image is published
-   UNCOMPRESSED — there is nothing to decompress, just write it.
+You have a USB stick and a small computer with a radio receiver attached.
+About an hour from now the machine will be recording HF time signals on its
+own.  Read section 0 before you touch anything — it is the only part that
+needs preparation.
 
-   BEST: use the flasher from the sigmond-appliance repo.  It finds the
-   stick by its removable+USB attributes instead of a letter you type,
-   REFUSES the disk carrying the running system, and reads the stick back
-   to compare hashes:
-     ./flash-usb.sh sigmond-appliance-@@VERSION@@-*.img
+⚠ INSTALLING ERASES THE MACHINE'S INTERNAL DISK, with no further warning
+  once you boot from the stick.  Use a machine you mean to dedicate to this.
 
-   By hand, if you have only the image:
-     sudo dd if=sigmond-appliance-@@VERSION@@-*.img of=/dev/sdX bs=4M \
-             oflag=direct conv=fsync status=progress
-     sync
 
-   ⚠ /dev/sdX is YOUR job to get right, and getting it wrong overwrites
-   that machine's own disk with no further prompt.  Confirm the target is
-   the stick — size, and that it is removable — before you press enter:
-     lsblk -dno NAME,SIZE,TRAN,RM,MODEL
+0. COLLECT THESE FIRST
+----------------------
+The wizard (step 5) asks for all of it.  Written down, that step takes two
+minutes instead of twenty.  Only the first two are required.
 
-   Then VERIFY by reading the stick back and comparing hashes — read
-   EXACTLY the image's byte count, which flash-usb.sh does for you:
-     IMG=sigmond-appliance-@@VERSION@@-*.img
-     sudo head -c "$(stat -c %s $IMG)" /dev/sdX | sha256sum
-     sha256sum $IMG
-   The two hashes must match.  (A `dd ... count=N` written in whole 4 MiB
-   blocks silently reads SHORT whenever the image is not an exact multiple
-   of the block size, and then mismatches on a perfectly good write.)
+  Callsign / reporter ID  REQUIRED   e.g. AC0G/B4
+        A suffix after the slash distinguishes several stations you run.
+  Grid square             REQUIRED   e.g. EM38ww
+        Filled in for you if a GPS clock is connected.
+  Station designator                 e.g. AC0G-B4
+        Offered automatically from your callsign; press Enter to accept.
+  Antenna description                e.g. 40 m dipole at 10 m
+  PSWS station ID                    e.g. S000123   (S + six digits)
+        From your account at https://pswsnetwork.eng.ua.edu/
+  GRAPE instrument ID                e.g. 172
+        The receiver, as numbered on the PSWS portal.
+  Magnetometer instrument no.        e.g. 84
+        Only if you have one.  It reports under the SAME station ID as the
+        receiver — there is no separate magnetometer station ID.
+  DASI unit number                   e.g. 3  (for DASI-003)
+        HamSCI DASI deployments only.
 
-   ⚠ Do NOT verify with `file -s /dev/sdX`.  It reads the boot sector only,
-   so it happily says "DOS/MBR boot sector" for a stick that took the first
-   megabyte and then fell off the bus, and for a stick still carrying last
-   month's image.
-2. Have the RX888 (and GPSDO etc.) ALREADY CONNECTED to the target
-   machine, then boot it from the USB.
-   Proxmox VE installs AUTOMATICALLY — this ERASES the machine's NVMe disk.
-3. When the machine POWERS ITSELF OFF (~3 min), that is your cue:
-     REMOVE THE USB STICK, then power the machine back on.
-   (The power-off is deliberate: it prevents the installer from
-    running again on firmwares that always boot USB first.)
-4. The machine boots Proxmox from its own disk. When the console says
-   "plug in the Sigmond install USB", insert the SAME stick again.
-   The decoder VM (VMID 100) imports automatically (~3 min), sized to
-   this machine (all CPUs minus one pair, RAM minus 2 GB).
-5. The site setup wizard appears on the console (LEAVE THE STICK IN):
-   enter your reporter ID (e.g. AC0G/B4), grid square, optional
-   antenna and remote access (RAC).
-   Rerun any time with:  sigmond-setup --reconfigure
-6. After the wizard, the host tunes itself automatically: CPU
-   isolation + pinning (grub), USB controller passthrough to the VM.
-   The console then says REMOVE THE USB STICK. Do it. The machine
-   reboots itself into production (decoder VM autostarts, pinned,
-   with the RX888 passed through).
-   NOTE: after this reboot the host console keyboard may be dead —
-   the USB controllers now belong to the VM. That is normal; use ssh.
-7. Proxmox web GUI: https://<machine-ip>:8006
-   Host login: root / hamsci-sigmond   (change it!)
-   Decoder VM login: hamsci / hamsci-sigmond   (ONE password everywhere; change it!)
+  No PSWS account yet?  Press Enter past those and carry on — the station
+  records and works.  Add them later with:  sigmond-setup --reconfigure
+  The upload KEY is a separate step done afterwards over SSH; the VM's
+  login banner walks you through it.
 
-This stick is appliance version @@VERSION@@. Before the wizard runs, the
+Physically, before you begin:
+  - The receiver and GPS clock PLUGGED IN AND POWERED — before first boot,
+    not after.  The installer looks for them.
+  - A USB stick of 16 GB or more.  It gets overwritten.
+  - A screen and keyboard on the machine, at least until the last step.
+  - A network cable.  The machine gets its address automatically.
+
+
+1. WRITE THE STICK
+------------------
+The image is published UNCOMPRESSED — nothing to decompress, just write it.
+
+  BEST: the flasher from the sigmond-appliance repo.  It finds the stick by
+  its removable+USB attributes instead of a letter you type, REFUSES the
+  disk carrying the running system, and reads the stick back to compare
+  hashes:
+    ./flash-usb.sh sigmond-appliance-@@VERSION@@-*.img
+
+  By hand, if you have only the image:
+    sudo dd if=sigmond-appliance-@@VERSION@@-*.img of=/dev/sdX bs=4M \
+            oflag=direct conv=fsync status=progress
+    sync
+
+  ⚠ /dev/sdX is YOUR job to get right, and getting it wrong overwrites that
+  machine's own disk with no further prompt.  Confirm the target is the
+  stick — size, and that it is removable — before you press enter:
+    lsblk -dno NAME,SIZE,TRAN,RM,MODEL
+
+  Then VERIFY by reading the stick back and comparing hashes — read EXACTLY
+  the image's byte count, which flash-usb.sh does for you:
+    IMG=sigmond-appliance-@@VERSION@@-*.img
+    sudo head -c "$(stat -c %s $IMG)" /dev/sdX | sha256sum
+    sha256sum $IMG
+  The two hashes must match.  (A `dd ... count=N` written in whole 4 MiB
+  blocks silently reads SHORT whenever the image is not an exact multiple
+  of the block size, and then mismatches on a perfectly good write.)
+
+  ⚠ Do NOT verify with `file -s /dev/sdX`.  It reads the boot sector only,
+  so it happily says "DOS/MBR boot sector" for a stick that took the first
+  megabyte and then fell off the bus, and for a stick still carrying last
+  month's image.
+
+
+2. BOOT FROM THE STICK
+----------------------
+With the receiver already connected, boot the machine from the USB.
+Proxmox VE installs AUTOMATICALLY.  This is where the internal disk is
+erased.
+
+
+3. WAIT FOR IT TO SWITCH ITSELF OFF (~3 min)
+--------------------------------------------
+That is not a failure — it is the signal.
+    REMOVE THE USB STICK, then power the machine back on.
+The power-off is deliberate: some firmwares always boot USB first and would
+otherwise install again in a loop.
+
+
+4. PUT THE STICK BACK WHEN ASKED
+--------------------------------
+The machine now starts from its own disk.  When the console says "plug in
+the Sigmond install USB", insert the SAME stick again and leave it in.
+The decoder VM (VMID 100) imports automatically (~3 min), sized to this
+machine (all CPUs minus one pair, RAM minus 2 GB).
+
+
+5. ANSWER THE WIZARD  (LEAVE THE STICK IN)
+------------------------------------------
+The setup questions appear on the console, in this order.  This is where
+your sheet from section 0 gets used.
+
+   1) Reporter ID — your callsign
+   2) Grid square
+   3) Antenna description (or Enter to skip)
+   4) Is this a DASI station, and its unit number
+   5) Remote access (RAC) — offered as a list; pick one or skip
+   6) PSWS station ID, then the GRAPE and magnetometer numbers
+   7) Status heartbeats — press Enter to accept
+   8) Station designator — press Enter to accept the suggestion
+
+The heartbeat question needs nothing from your sheet.  Saying yes lets a
+dashboard show that your station is alive and healthy: a small report every
+five minutes, outbound only, nothing listening on your machine.  The
+collector it names can be changed later without reinstalling.
+
+Got something wrong?  Rerun any time:  sigmond-setup --reconfigure
+
+
+6. REMOVE THE STICK, AND LET IT REBOOT
+--------------------------------------
+The host now tunes itself: CPU isolation + pinning (grub), USB controller
+passthrough to the VM.  The console then says REMOVE THE USB STICK.  Do it.
+The machine reboots itself into production (decoder VM autostarts, pinned,
+with the RX888 passed through).
+
+
+7. THINGS THAT LOOK WRONG AND ARE NOT
+-------------------------------------
+  The machine switches itself off during install
+        The expected cue.  Remove the stick and power it on (step 3).
+  It asks for the stick a SECOND time
+        Expected — the first boot installs the system, the second loads
+        the recorder.
+  The keyboard stops working after the final reboot
+        Normal.  The USB controllers now belong to the VM.  Use ssh or the
+        web page from another computer.
+
+
+8. AFTERWARDS
+-------------
+  Proxmox web GUI   https://<machine-ip>:8006
+  Host login        root / hamsci-sigmond          (CHANGE IT)
+  Decoder VM login  hamsci / hamsci-sigmond        (CHANGE IT TOO)
+
+Log in over ssh and the banner tells you what remains — chiefly registering
+the PSWS upload key, if you gave PSWS IDs.
+
+This stick is appliance version @@VERSION@@.  Before the wizard runs, the
 Proxmox host is named sigmond-appliance-@@VTAG@@ and the VM
-sigmond-decoder-@@VTAG@@ (so you can tell which image a machine came
-from); the wizard then renames them to your station designator — VM =
-designator (e.g. AC0G-B4), Proxmox host = designator-PM (AC0G-B4-PM).
-The image version stays visible in /etc/sigmond-appliance/version and
-the login panel.
+sigmond-decoder-@@VTAG@@ (so you can tell which image a machine came from);
+the wizard then renames them to your station designator — VM = designator
+(e.g. AC0G-B4), Proxmox host = designator-PM (AC0G-B4-PM).  The image
+version stays visible in /etc/sigmond-appliance/version and the login panel.
 
 AFTER INSTALL — the operator guide (day-2 checks, troubleshooting, what not
 to touch): https://github.com/HamSCI/sigmond/blob/main/docs/operator/README.md
 
-RETURNING STATION? (key restore)
-  If this replaces an existing Sigmond station, its registered PSWS/upload
-  keys can ride the stick so no portal re-registration is needed:
+
+9. RETURNING STATION?  (key restore)
+------------------------------------
+If this replaces an existing Sigmond station, its registered PSWS/upload
+keys can ride the stick so no portal re-registration is needed:
   1. On the OLD station (or from a backup):
        tar czf site-keys.tar.gz -C / etc/hs-uploader/keys home/timestd/.ssh
   2. AFTER burning this stick, it shows one small FAT volume (the EFI
      partition) on any Mac/Windows/Linux machine — copy site-keys.tar.gz
      onto it and eject.
-  3. Install normally. The wizard restores the keys and runs the PSWS
+  3. Install normally.  The wizard restores the keys and runs the PSWS
      verify automatically.
