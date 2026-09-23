@@ -216,6 +216,15 @@ $SSHN "test -f /root/sigmond-appliance/sigmond/scripts/proxmox/host-apply.sh" &&
 $SSHN "test -x /usr/local/sbin/sigmond-setup" && say "wizard staged" || { say "FATAL: wizard missing"; exit 1; }
 $SSHN "test -x /usr/local/sbin/sigmond-finalize.sh" && say "finalizer staged" || { say "FATAL: finalizer missing"; exit 1; }
 $SSHN "systemctl is-enabled sigmond-wizard.service >/dev/null" && say "wizard service enabled (tty1)" || say "WARN: wizard unit not enabled"
+# The golden template must carry NO [heartbeat] config.  This check used to
+# live AFTER the wizard, where it asserted "not enabled" — which stopped
+# being true in v3.52 once the wizard began enabling the heartbeat by
+# default.  Leak-detection belongs here, before anything configures the
+# station; the post-wizard block now asserts the configured state instead.
+$SSHN "qm guest exec $VMID --timeout 30 -- bash -lc 'grep -q \"\\[heartbeat\\]\" /etc/sigmond/site-profile.toml 2>/dev/null && echo LEAKED || echo CLEAN'" 2>&1 \
+    | grep -q CLEAN \
+    && say "golden template carries no heartbeat config ✓" \
+    || { say "FATAL: a [heartbeat] block leaked into the golden template"; exit 1; }
 $SSHN "systemctl is-active sigmond-finalize.path >/dev/null" && say "finalize path unit watching" || say "WARN: finalize path unit not active"
 $SSHN "test -f /root/sigmond-appliance/sigmond-rac/install-host.sh" && say "sigmond-rac payload staged" || say "WARN: rac payload missing"
 
@@ -457,9 +466,16 @@ echo "$GRP" | grep -q "timestd" && echo "$GRP" | grep -q "sigmond" \
     && say "operator service-group membership ✓" \
     || { say "FATAL: hamsci missing service groups"; exit 1; }
 MAGC=$($SSHN "qm guest exec $VMID --timeout 30 -- bash -lc 'grep -E \"psws_station_id|^callsign|^grid_square\" /etc/mag-recorder/mag-recorder-config.toml'" 2>&1)
-echo "$MAGC" | grep -q "S000998" && echo "$MAGC" | grep -q "N0CALL" && echo "$MAGC" | grep -q "EM00aa" \
-    && say "mag-recorder identity filled (own PSWS station) ✓" \
-    || { say "FATAL: mag-recorder identity not filled"; echo "$MAGC" | head -3; exit 1; }
+# ⛔ This asserted S000998 — the SEPARATE magnetometer station the wizard
+# used to ask for — and its message read "own PSWS station".  Both encoded
+# the behaviour v3.52 deliberately ended: one site, one PSWS station id,
+# instruments distinguished by instrument id.  The magnetometer now reports
+# under the SITE station, and that is the invariant worth asserting.
+echo "$MAGC" | grep -q "S000999" && echo "$MAGC" | grep -q "N0CALL" && echo "$MAGC" | grep -q "EM00aa" \
+    && say "mag-recorder identity filled under the SITE PSWS station ✓" \
+    || { say "FATAL: mag-recorder identity not filled (expected site station S000999)"; echo "$MAGC" | head -3; exit 1; }
+echo "$MAGC" | grep -q "S000998" \
+    && { say "FATAL: mag-recorder carries a SEPARATE PSWS station — [psws.stations] has come back"; echo "$MAGC" | head -3; exit 1; } || true
 say "location authority armed (sentinel retired) + wisdom seeded + site-timing staged in VM ✓"
 $SSHN "hostname" | grep -q "N0CALL-T1-PM" \
     && say "Proxmox host renamed to N0CALL-T1-PM ✓" \
@@ -481,17 +497,24 @@ echo "$LC" | grep -q NOT-STAGED && { say "FATAL: sigmond-location-check not stag
 echo "$LC" | grep -q 'FN21ej' && echo "$LC" | grep -q '41.4' \
     && say "location authority re-gridded the station from the (fake) GPSDO ✓" \
     || { say "FATAL: location authority did not apply GPSDO position"; echo "$LC" | head -4; exit 1; }
-say "── fleet awareness: heartbeat CLI contract on an unconfigured image"
-# Ruled contract (fleet-awareness plan, Phase 6): a fresh image has no
-# [heartbeat] block, so emit --dry-run must exit 2 WITH the not-enabled
-# message — that proves the CLI is wired and the awareness code rides the
-# image.  Exit 0 here would mean a config leaked into the golden template;
-# any other exit means the CLI is broken.  The exit-0 path is proven live
-# on a configured station, not here.
+say "── fleet awareness: heartbeat CLI contract on a CONFIGURED station"
+# The original contract (fleet-awareness plan, Phase 6) asserted exit 2 +
+# "not enabled", because no wizard had ever written a [heartbeat] block and
+# the only thing worth proving here was that no config had leaked into the
+# template.  v3.52's wizard enables the heartbeat, so after it runs exit 2
+# would mean the wizard's answer never reached the profile.
+#
+# The leak check moved to Phase C, before anything configures the station.
+# What belongs HERE is the other half, which the old comment said was
+# "proven live on a configured station, not here": the exit-0 path.  It now
+# exercises the whole route — wizard answer, site profile, config render,
+# CLI — instead of only proving the CLI exists.
 HB=$($SSHN "qm guest exec $VMID --timeout 30 -- bash -lc 'smd admin heartbeat emit --dry-run; echo rc=\$?'" 2>&1)
-echo "$HB" | grep -q "rc=2" && echo "$HB" | grep -q "heartbeat: not enabled" \
-    && say "heartbeat emit --dry-run: exit 2 + not-enabled message ✓" \
-    || { say "FATAL: heartbeat CLI contract broken on unconfigured image"; echo "$HB" | head -4; exit 1; }
+echo "$HB" | grep -q "rc=0" \
+    && say "heartbeat emit --dry-run: exit 0 on the configured station ✓" \
+    || { say "FATAL: heartbeat not emitting after the wizard enabled it"; echo "$HB" | head -6; exit 1; }
+echo "$HB" | grep -q "not enabled" \
+    && { say "FATAL: heartbeat reports NOT ENABLED after the wizard enabled it"; echo "$HB" | head -6; exit 1; } || true
 $SSHN "qm guest exec $VMID --timeout 30 -- bash -lc 'systemctl list-unit-files sigmond-heartbeat.timer sigmond-gap-hourly.timer'" 2>&1 | grep -q "sigmond-heartbeat.timer" \
     && say "heartbeat + gap-hourly units present in image ✓" \
     || { say "FATAL: awareness units missing from image"; exit 1; }
