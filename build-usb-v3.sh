@@ -433,6 +433,10 @@ WSEED=""
 [ -f sigmond-operator.sh ] && cp sigmond-operator.sh /tmp/sigpay.$$/
 # location authority (GPSDO definitive over operator entry)
 [ -f sigmond-location-check ] && cp sigmond-location-check /tmp/sigpay.$$/
+# network family probe: which families, which routes, and whether NAT64/DNS64
+# exists.  Shipped because the first McMurdo station will be the fleet's first
+# IPv6-only site and we would otherwise be guessing its topology from here.
+[ -f sigmond-net-probe ] && cp sigmond-net-probe /tmp/sigpay.$$/
 echo "$VERSION sigmond@$SIGREV built $(date -Iseconds)" > /tmp/sigpay.$$/VERSION
 # component pin manifest (host copy, no image_sha256 -- see above); named
 # without the versioned/timestamped prefix so firstboot never has to know

@@ -72,7 +72,30 @@ reload_net(){
     else ifdown vmbr0 2>/dev/null; ifup vmbr0 2>/dev/null; fi
 }
 
-cur_ip(){ ip -4 -o addr show vmbr0 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -1; }
+# ⛔ Every address probe here used to be `ip -4` ONLY.  On an IPv6-only LAN
+# that returns nothing, net_dead() fires, and the operator is told the install
+# cannot continue -- on a machine that is perfectly reachable over v6.  A
+# station bound for McMurdo (IPv6-only, 2026-09) would have read as bricked.
+#
+# IPv4 still WINS when both exist: it is what the fleet's reach, frp registry
+# and internal 10.99.0.0/30 management link all speak today.  v6 is the
+# fallback that keeps a v6-only site alive, not a new preference.
+#
+# Link-local (fe80::) is deliberately excluded: without a scope id it is not
+# an address anyone can connect to, and reporting one as "the station's
+# address" is worse than reporting none.
+cur_ip(){
+    local _dev="${1:-vmbr0}" _a
+    _a=$(ip -4 -o addr show "$_dev" 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -1)
+    [ -n "$_a" ] && { printf '%s\n' "$_a"; return 0; }
+    ip -6 -o addr show "$_dev" scope global 2>/dev/null \
+        | grep -v -e temporary -e deprecated \
+        | awk '{print $4}' | cut -d/ -f1 | head -1
+}
+
+# A v6 literal needs brackets in a URL and in anything that appends :port.
+# `https://2001:db8::1:8006` is not a URL; `https://[2001:db8::1]:8006` is.
+ipurl(){ case "${1:-}" in *:*) printf '[%s]\n' "$1";; *) printf '%s\n' "${1:-}";; esac; }
 
 # An install that cannot get an address is FINISHED -- not degraded.  There is
 # no ssh, no Proxmox UI, no RAC, and on this appliance possibly no keyboard.
@@ -306,7 +329,7 @@ if ping -c 3 -W 2 "$GW" >/dev/null 2>&1; then
     grep -qE "^[0-9.]+[[:space:]].*\b$H\b" /etc/hosts 2>/dev/null && \
         sed -i -E "s|^[0-9.]+([[:space:]].*\b$H\b)|${ADDR%%/*}\1|" /etc/hosts
     rm -f /etc/sigmond-appliance/.network-unreachable
-    echo "reach this host at: ssh root@${ADDR%%/*}   https://${ADDR%%/*}:8006"
+    echo "reach this host at: ssh root@${ADDR%%/*}   https://$(ipurl "${ADDR%%/*}"):8006"
     exit 0
 fi
 
@@ -389,6 +412,18 @@ cp /mnt/sig-media/sigmond-site-timing "$APP"/ 2>/dev/null
 # operator shell helpers (rob's tm/ll/lrt): host now, VM via the wizard
 cp /mnt/sig-media/sigmond-operator.sh "$APP"/ 2>/dev/null
 cp /mnt/sig-media/sigmond-location-check "$APP"/ 2>/dev/null
+cp /mnt/sig-media/sigmond-net-probe "$APP"/ 2>/dev/null
+if [ -f "$APP"/sigmond-net-probe ]; then
+    chmod +x "$APP"/sigmond-net-probe 2>/dev/null
+    ln -sf "$APP"/sigmond-net-probe /usr/local/sbin/sigmond-net-probe 2>/dev/null
+    # Record ONE reading at install, when the station is on the network it
+    # will actually live on.  A v6-only site (McMurdo) then reports its own
+    # topology instead of us inferring it from Scranton months later.  Never
+    # fail firstboot over a diagnostic.
+    "$APP"/sigmond-net-probe --json > "$APP"/network-probe.json 2>/dev/null || true
+    "$APP"/sigmond-net-probe        > "$APP"/network-probe.txt  2>/dev/null || true
+    say "network: $(sed -n 's/.*"family":"\([^"]*\)".*/\1/p' "$APP"/network-probe.json 2>/dev/null)$(grep -q '"nat64":"yes"' "$APP"/network-probe.json 2>/dev/null && echo ' (NAT64 present)')"
+fi
 # component pin manifest (Stage 3): the record of what this image was built
 # from, so a host can later answer "am I what my image says I am" without
 # reaching GitHub. Never fail firstboot over this file -- every branch below
@@ -901,14 +936,16 @@ cat > /usr/local/sbin/sigmond-issue <<'ISSEOF'
 VMID="${SIGMOND_VMID:-100}"
 VERSION="$(cat /etc/sigmond-appliance/version 2>/dev/null || echo '?')"
 CONF="$(cat /etc/sigmond-appliance/.configured 2>/dev/null)"
-HOSTIP=$(ip -4 -o addr show vmbr0 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -1)
+HOSTIP=$(cur_ip vmbr0)
 # ⚠ NOT `hostname -I | awk '{print $1}'`: that lists EVERY address, and since
 # the decoder VM moved behind a host-only bridge this host also holds
 # 10.99.0.1.  Ordering is not guaranteed, so the panel/summary could announce
 # the management /30 -- an address reachable only from the VM -- as the
 # station's address (rob, 2026-09-21: "it was using 10.99.0 ... I think you
 # need to exclude 10.99").  Ask vmbr0 directly, and fall back excluding it.
-[ -n "$HOSTIP" ] || HOSTIP=$(hostname -I 2>/dev/null | tr ' ' '\n' | grep -vE '^(10\.99\.0\.|127\.)' | head -1)
+# hostname -I lists every address; drop the internal PM<->VM link, loopback
+# and IPv6 link-local, which is unusable without a scope id.
+[ -n "$HOSTIP" ] || HOSTIP=$(hostname -I 2>/dev/null | tr ' ' '\n' | grep -vE '^(10\.99\.0\.|127\.|fe80:)' | head -1)
 VMIP=""
 for i in 1 2 3 4 5 6; do
   # Print the VM address THIS HOST can actually reach.  Taking whichever
@@ -1192,7 +1229,7 @@ ${NICLINES}   ${_gwl}
 ${_stray}
  Proxmox host ${HOSTIP:-<no-ip-yet>}
    ssh        ssh root@${HOSTIP:-<no-ip-yet>}
-   web UI     https://${HOSTIP:-<no-ip-yet>}:8006
+   web UI     https://$(ipurl "${HOSTIP:-<no-ip-yet>}"):8006
    login      root / $PWLINE
 
  Decoder VM   ${VMIP:-<starting — this panel refreshes every 5 min>}${VMBEHIND}
@@ -1271,18 +1308,20 @@ grep -q "Sigmond appliance" /etc/motd 2>/dev/null || cat >> /etc/motd <<MOTDEOF
   Decoder VM: 100 (sigmond-decoder-${VERSION//./-})   Wizard: sigmond-setup
 MOTDEOF
 
-HOSTIP=$(ip -4 -o addr show vmbr0 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -1)
+HOSTIP=$(cur_ip vmbr0)
 # ⚠ NOT `hostname -I | awk '{print $1}'`: that lists EVERY address, and since
 # the decoder VM moved behind a host-only bridge this host also holds
 # 10.99.0.1.  Ordering is not guaranteed, so the panel/summary could announce
 # the management /30 -- an address reachable only from the VM -- as the
 # station's address (rob, 2026-09-21: "it was using 10.99.0 ... I think you
 # need to exclude 10.99").  Ask vmbr0 directly, and fall back excluding it.
-[ -n "$HOSTIP" ] || HOSTIP=$(hostname -I 2>/dev/null | tr ' ' '\n' | grep -vE '^(10\.99\.0\.|127\.)' | head -1)
+# hostname -I lists every address; drop the internal PM<->VM link, loopback
+# and IPv6 link-local, which is unusable without a scope id.
+[ -n "$HOSTIP" ] || HOSTIP=$(hostname -I 2>/dev/null | tr ' ' '\n' | grep -vE '^(10\.99\.0\.|127\.|fe80:)' | head -1)
 say "─────────────────────────────────────────────────────────"
 say " Sigmond appliance $VERSION: Proxmox is installed and running."
 say "   console/SSH login: root / hamsci-sigmond  (CHANGE IT: 'passwd')"
-say "   ssh root@${HOSTIP:-<host-ip>}    web GUI: https://${HOSTIP:-<host-ip>}:8006"
+say "   ssh root@${HOSTIP:-<host-ip>}    web GUI: https://$(ipurl "${HOSTIP:-<host-ip>}"):8006"
 say " NEXT STEP: plug in the Sigmond install USB stick."
 say " The decoder VM then installs itself automatically."
 say "─────────────────────────────────────────────────────────"

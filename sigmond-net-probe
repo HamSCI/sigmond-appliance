@@ -1,0 +1,139 @@
+#!/bin/bash
+# sigmond-net-probe — what kind of network is this station actually on?
+#
+# Written 2026-09-23 against a specific open question: McMurdo's network is
+# IPv6-only, and the plan for reaching a station there depends on facts we do
+# not have.  Rather than guess the topology from Scranton, the station reports
+# what it found the moment it boots there.
+#
+# Answers four questions, in order of how much they change the plan:
+#   1. Which families does this machine actually hold?  (v4, v6, both)
+#   2. Can it route each family off-link?
+#   3. Is there NAT64/DNS64?  -- RFC 7050: resolve AAAA for ipv4only.arpa.
+#      That name has A records ONLY.  An AAAA answer therefore means a DNS64
+#      resolver synthesized it, and the synthesized address carries the NAT64
+#      prefix.  This single query is the difference between "v4-only services
+#      keep working untouched" and "every outbound path needs rework".
+#   4. Do the services this station depends on resolve and connect?
+#
+# Read-only.  Makes no change, needs no privilege, and is safe to run on a
+# live station.
+#
+# Usage: sigmond-net-probe [--json]
+set -u
+JSON=0; [ "${1:-}" = "--json" ] && JSON=1
+DEV="${SIGMOND_NET_DEV:-}"
+[ -n "$DEV" ] || DEV=$(ip route show default 2>/dev/null | awk '{print $5; exit}')
+[ -n "$DEV" ] || DEV=$(ip -o link show up 2>/dev/null | awk -F': ' '$2!="lo"{print $2; exit}')
+
+v4_addrs=$(ip -4 -o addr show ${DEV:+dev "$DEV"} scope global 2>/dev/null | awk '{print $4}' | paste -sd, -)
+v6_addrs=$(ip -6 -o addr show ${DEV:+dev "$DEV"} scope global 2>/dev/null | grep -v -e temporary -e deprecated | awk '{print $4}' | paste -sd, -)
+v6_ll=$(ip -6 -o addr show ${DEV:+dev "$DEV"} scope link 2>/dev/null | awk '{print $4}' | paste -sd, -)
+v4_gw=$(ip -4 route show default 2>/dev/null | awk '{print $3; exit}')
+v6_gw=$(ip -6 route show default 2>/dev/null | awk '{print $3; exit}')
+
+# Family verdict drives everything downstream.
+if   [ -n "$v4_addrs" ] && [ -n "$v6_addrs" ]; then FAMILY="dual-stack"
+elif [ -n "$v4_addrs" ];                       then FAMILY="ipv4-only"
+elif [ -n "$v6_addrs" ];                       then FAMILY="ipv6-only"
+else                                                FAMILY="none"
+fi
+
+# ── RFC 7050 NAT64/DNS64 discovery ─────────────────────────────────────────
+# ipv4only.arpa publishes A 192.0.0.170 / 192.0.0.171 and NO AAAA.  Any AAAA
+# in the answer was synthesized by a DNS64 resolver, and the last 32 bits of
+# that address are the embedded IPv4 literal, so the prefix is everything
+# before it.  We report the prefix because it is what an operator needs to
+# reason about reachability, not merely "yes".
+NAT64="no"; NAT64_PREFIX=""
+# ⚠ Measured against its own null before trusting it (2026-09-23, on an
+# IPv4-only LAN): `getent ahostsv6` answered ::ffff:192.0.0.171 and an earlier
+# version of this probe read that as NAT64 PRESENT.  It is not.  glibc returns
+# IPv4-MAPPED addresses (::ffff:a.b.c.d) for an AAAA lookup that found only A
+# records -- synthesized locally by the resolver library, never by a DNS64
+# server on the network.  A discriminator that fires on its null answers
+# nothing, so both mapped (::ffff:/96) and v4-compatible (::a.b.c.d) forms are
+# rejected here.  A real DNS64 answer carries a routable prefix: the
+# well-known 64:ff9b::/96, or one the site chose.
+_syn=""
+if command -v dig >/dev/null 2>&1; then
+    _syn=$(dig +short +time=3 +tries=1 AAAA ipv4only.arpa 2>/dev/null | grep -m1 ':')
+elif command -v getent >/dev/null 2>&1; then
+    _syn=$(getent ahostsv6 ipv4only.arpa 2>/dev/null | awk '{print $1; exit}')
+fi
+case "${_syn:-}" in
+    ""|::ffff:*|::[0-9]*.[0-9]*)  ;;   # absent, or locally mapped — NOT DNS64
+    64:ff9b:*) NAT64="yes"; NAT64_PREFIX="64:ff9b::/96 (well-known)" ;;
+    *)         NAT64="yes"; NAT64_PREFIX="$_syn (network-specific — the /96 is this address less its last 32 bits)" ;;
+esac
+
+# ── DNS resolvers, by family ───────────────────────────────────────────────
+DNS4=""; DNS6=""
+if command -v resolvectl >/dev/null 2>&1; then
+    _ns=$(resolvectl status 2>/dev/null | awk '/DNS Servers:/{$1="";$2="";print}')
+else
+    _ns=$(awk '/^nameserver/{print $2}' /etc/resolv.conf 2>/dev/null | paste -sd' ' -)
+fi
+for _s in $_ns; do case "$_s" in *:*) DNS6="$DNS6 $_s";; *.*) DNS4="$DNS4 $_s";; esac; done
+
+# ── reachability, per family, without assuming either works ────────────────
+# A ping that fails proves nothing on its own (ICMP is filtered in plenty of
+# places), so we test a TCP connect to a service the station actually needs.
+probe_tcp(){ # host port family_flag label
+    local h="$1" p="$2" f="$3"
+    if command -v nc >/dev/null 2>&1; then
+        nc $f -z -w 4 "$h" "$p" >/dev/null 2>&1 && echo ok || echo fail
+    else
+        timeout 5 bash -c "exec 3<>/dev/$( [ "$f" = "-6" ] && echo tcp || echo tcp )/$h/$p" 2>/dev/null \
+            && echo ok || echo fail
+    fi
+}
+HB_HOST="${SIGMOND_HB_HOST:-wd30.wsprdaemon.org}"
+# The collector answers on the operator's forwarded port, not 22.  Probing 22
+# reported FAIL against a collector that was working fine -- a probe that
+# tests the wrong port manufactures its own alarm.
+HB_PORT="${SIGMOND_HB_PORT:-38222}"
+R_HB4="n/a"; R_HB6="n/a"; R_GH4="n/a"; R_GH6="n/a"
+[ -n "$v4_addrs" ] && { R_HB4=$(probe_tcp "$HB_HOST" "$HB_PORT" -4); R_GH4=$(probe_tcp github.com 443 -4); }
+[ -n "$v6_addrs" ] && { R_HB6=$(probe_tcp "$HB_HOST" "$HB_PORT" -6); R_GH6=$(probe_tcp github.com 443 -6); }
+
+if [ "$JSON" = 1 ]; then
+    printf '{"dev":"%s","family":"%s","v4":"%s","v6":"%s","v6_link_local":"%s",' \
+        "$DEV" "$FAMILY" "$v4_addrs" "$v6_addrs" "$v6_ll"
+    printf '"gw4":"%s","gw6":"%s","nat64":"%s","nat64_prefix":"%s",' \
+        "$v4_gw" "$v6_gw" "$NAT64" "$NAT64_PREFIX"
+    printf '"dns4":"%s","dns6":"%s",' "${DNS4# }" "${DNS6# }"
+    printf '"heartbeat_v4":"%s","heartbeat_v6":"%s","github_v4":"%s","github_v6":"%s"}\n' \
+        "$R_HB4" "$R_HB6" "$R_GH4" "$R_GH6"
+    exit 0
+fi
+
+echo "sigmond network probe — $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+echo "  interface       ${DEV:-<none found>}"
+echo "  family          $FAMILY"
+echo "  IPv4            ${v4_addrs:-(none)}   gw ${v4_gw:-(none)}"
+echo "  IPv6 global     ${v6_addrs:-(none)}   gw ${v6_gw:-(none)}"
+echo "  IPv6 link-local ${v6_ll:-(none)}"
+echo "  DNS v4          ${DNS4:-(none)}"
+echo "  DNS v6          ${DNS6:-(none)}"
+echo "  NAT64/DNS64     $NAT64${NAT64_PREFIX:+  prefix $NAT64_PREFIX}"
+echo "  reach $HB_HOST:$HB_PORT   v4=$R_HB4  v6=$R_HB6"
+echo "  reach github.com:443        v4=$R_GH4  v6=$R_GH6"
+echo
+case "$FAMILY" in
+  dual-stack) echo "  → Dual-stack. Nothing here needs special handling." ;;
+  ipv4-only)  echo "  → IPv4 only. The fleet's normal case." ;;
+  ipv6-only)
+    echo "  → IPv6 ONLY. This is the case the fleet has never run in."
+    if [ "$NAT64" = "yes" ]; then
+      echo "    NAT64/DNS64 IS present, so IPv4-literal-free clients that resolve"
+      echo "    by NAME should reach v4-only services unchanged. Anything that"
+      echo "    dials a hardcoded IPv4 ADDRESS will still fail — those are the"
+      echo "    ones to find."
+    else
+      echo "    NO NAT64/DNS64 found. Every outbound path to a v4-only service"
+      echo "    needs its own answer (a v6-reachable endpoint, or a translator"
+      echo "    on this machine). Report this before deploying."
+    fi ;;
+  none)       echo "  → NO global address in either family. The station is unreachable." ;;
+esac
