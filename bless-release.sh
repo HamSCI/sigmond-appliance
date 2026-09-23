@@ -731,22 +731,41 @@ rm -f "$NOTES"
 # Release over a download convenience.
 if [ $RC -eq 0 ]; then
     IMGBASE="$(basename "${SHAFILE%.sha256}.img")"
-    # Promote on Google Drive: a server-side move out of pending/ into the
-    # blessed download folder (no re-upload), then set the anyone-with-link
-    # share on the blessed image so the link is ready to hand out.
-    say "promoting $IMGBASE out of gdrive:sigmond-images/pending/"
-    _ok=1
-    for _f in "$IMGBASE" "${IMGBASE%.img}.sha256" "$(basename "$MANIFEST")"; do
-        rclone moveto -q "gdrive:sigmond-images/pending/$_f" "gdrive:sigmond-images/$_f" 2>/dev/null || _ok=0
-    done
-    if [ "$_ok" = 1 ]; then
-        _link="$(rclone link "gdrive:sigmond-images/$IMGBASE" 2>/dev/null)"
-        say "promoted: gdrive:sigmond-images/$IMGBASE is now the blessed download"
-        [ -n "$_link" ] && say "download link: $_link"
+    # Destinations come from publish-targets.conf, never from a literal here.
+    # Before this file existed the destination was hardcoded to one person's
+    # Drive folder while anyone wanting a copy elsewhere moved it by hand, so
+    # "where did this build go?" depended on who ran what.  One declaration,
+    # every target, named in the log.
+    . "$(dirname "$0")/publish-lib.sh"
+    if ! pub_load "$(dirname "$0")/publish-targets.conf"; then
+        say "WARNING: no publish targets — the Release is published and"
+        say "         authoritative, but no download folder was updated."
     else
-        say "WARNING: could not promote on Google Drive — the Release is published and"
-        say "         authoritative, but the download folder still lacks it."
-        say "         Run by hand:  rclone move gdrive:sigmond-images/pending/ gdrive:sigmond-images/ --include '${IMGBASE%.img}.*'"
+        say "promoting $IMGBASE out of pending/ to $((${#PUB_DESTS[@]})) target(s):"
+        pub_describe | while read -r l; do say "$l"; done
+        _allok=1
+        for _i in "${!PUB_DESTS[@]}"; do
+            _lab="${PUB_LABELS[$_i]}"; _d="${PUB_DESTS[$_i]%/}"
+            _ok=1
+            for _f in "$IMGBASE" "${IMGBASE%.img}.sha256" "$(basename "$MANIFEST")"; do
+                rclone moveto -q "$_d/pending/$_f" "$_d/$_f" 2>/dev/null || _ok=0
+            done
+            if [ "$_ok" = 1 ]; then
+                _link="$(rclone link "$_d/$IMGBASE" 2>/dev/null)"
+                say "  [$_lab] promoted: $_d/$IMGBASE"
+                [ -n "$_link" ] && say "  [$_lab] link: $_link"
+            else
+                _allok=0
+                say "  [$_lab] WARNING: could not promote to $_d"
+                say "  [$_lab]   by hand: rclone move '$_d/pending/' '$_d/' --include '${IMGBASE%.img}.*'"
+            fi
+        done
+        # A Drive that is unreachable does NOT fail the bless: the GitHub
+        # Release is the authoritative artifact and is already published by
+        # this point.  Say so loudly rather than unwind a Release over a
+        # download convenience -- but name every target that missed, so a
+        # partial publish can never read as a complete one.
+        [ "$_allok" = 1 ] || say "NOTE: some targets above did not receive $IMGBASE — the GitHub Release is authoritative."
     fi
 fi
 exit $RC

@@ -64,42 +64,61 @@ for i in $(seq 1 60); do $SSH true 2>/dev/null && break; sleep 5; done
 $SSH true || { say "FATAL: VM ssh never came up"; exit 1; }
 say "VM up: $($SSH hostname 2>/dev/null)"
 
-# ⛔ The decoder VM's ssh key is not optional.  provision-components.sh
-# installs it only `if [ -f "$HOME/rob.pub" ]`, and on 2026-09-21 that file
+# ⛔ The decoder VM's ssh key is not optional.  provision-components.sh once
+# installed it only `if [ -f "$HOME/rob.pub" ]`, and on 2026-09-21 that file
 # was absent on the rig, so the golden VM shipped with NO key-based access to
 # the decoder VM.  It surfaced only when the guest agent went down on AI6VN
 # and there was no remaining way in.  Refuse to build blind: the operator can
 # still opt out explicitly.
 #
-# TWO paths were in play and they disagreed: the gate tested $HOME/rob.pub
-# while the scp below read ./rob.pub relative to the rig checkout, so staging
-# the key in the place the FATAL message named still failed at the copy.
-# Resolve it ONCE here, checkout first (that copy travels with the rig and is
-# what a fresh clone should carry), and use the resolved path everywhere.
-OPKEY=""
-for c in "$PWD/rob.pub" "$HOME/rob.pub"; do
-    [ -f "$c" ] && { OPKEY="$c"; break; }
-done
-if [ -n "$OPKEY" ] && ! ssh-keygen -lf "$OPKEY" >/dev/null 2>&1; then
-    # A truncated or mangled file installs silently and locks you out exactly
-    # as thoroughly as no file at all.  Treat it as absent.
-    say "WARNING: $OPKEY is not a readable ssh public key — ignoring it"
-    OPKEY=""
-fi
-if [ -z "$OPKEY" ]; then
-    say "FATAL: no operator public key found — the decoder VM would be built"
-    say "  with NO authorized ssh key, leaving 'qm terminal 100' as the only"
-    say "  way in when the guest agent is unavailable."
-    say "  Looked for: $PWD/rob.pub  then  $HOME/rob.pub"
-    say "  Put the operator public key at either, or set VMKEYLESS_OK=1."
-    [ "${VMKEYLESS_OK:-0}" = 1 ] || die "refusing to build a keyless decoder VM"
-    say "  VMKEYLESS_OK=1 — continuing WITHOUT a VM ssh key"
+# Keys now live one-per-operator in operators/*.pub (see operators/README.md)
+# rather than in a single file named after one person.  We merge them here and
+# COUNT KEYS, not files: an empty directory, a directory of pure comments and
+# a missing directory all fail the same way, because they all produce the same
+# lockout.  The legacy single-file paths stay readable so a rig that has not
+# synced yet still builds -- loudly.
+MERGED="$BUILD_DIR/operator-keys"
+: > "$MERGED"
+KEYSRC=""
+if compgen -G "$PWD/operators/*.pub" >/dev/null 2>&1; then
+    for f in "$PWD"/operators/*.pub; do
+        printf '# --- %s\n' "$(basename "$f")" >> "$MERGED"
+        cat "$f" >> "$MERGED"
+        printf '\n' >> "$MERGED"
+    done
+    KEYSRC="$PWD/operators/"
 else
-    say "operator key: $OPKEY — $(ssh-keygen -lf "$OPKEY" | awk '{print $1" "$2" "$4}')"
-    say "  (an authorized_keys file may hold several; all of them are installed)"
+    # Legacy: a single rob.pub beside the script or in $HOME.
+    for c in "$PWD/rob.pub" "$HOME/rob.pub"; do
+        [ -f "$c" ] && { cat "$c" >> "$MERGED"; KEYSRC="$c"; break; }
+    done
+    [ -n "$KEYSRC" ] && say "WARNING: using legacy key file $KEYSRC — this rig has
+  not synced operators/.  Sync the checkout so added or REVOKED operators
+  take effect; a stale key file is how v3.48-v3.50 shipped rob's key alone."
+fi
+
+# ssh-keygen -lf prints one line per key it can parse and ignores comments and
+# junk, so its line count is the number of keys that will actually authorize.
+NKEYS=$(ssh-keygen -lf "$MERGED" 2>/dev/null | wc -l)
+if [ "${NKEYS:-0}" -eq 0 ]; then
+    say "FATAL: no usable operator public key — the station would be built with"
+    say "  NO authorized ssh key on either plane, leaving 'qm terminal 100' at"
+    say "  the console as the only way in when the guest agent is unavailable."
+    say "  Looked for: $PWD/operators/*.pub  then  $PWD/rob.pub  then  $HOME/rob.pub"
+    [ -n "$KEYSRC" ] && say "  ($KEYSRC exists but yielded no parseable key — truncated or mangled?)"
+    say "  Add operators/<name>.pub, or set VMKEYLESS_OK=1 to build anyway."
+    [ "${VMKEYLESS_OK:-0}" = 1 ] || die "refusing to build a keyless station"
+    say "  VMKEYLESS_OK=1 — continuing WITHOUT any operator ssh key"
+    OPKEY=""
+else
+    OPKEY="$MERGED"
+    say "operator keys: $NKEYS from $KEYSRC"
+    ssh-keygen -lf "$MERGED" 2>/dev/null | while read -r bits fp comment _; do
+        say "  $bits $fp $comment"
+    done
 fi
 $SCP provision.sh provision-components.sh build@127.0.0.1:
-[ -n "$OPKEY" ] && $SCP "$OPKEY" build@127.0.0.1:rob.pub
+[ -n "$OPKEY" ] && $SCP "$OPKEY" build@127.0.0.1:operator-keys
 $SCP wisdomf-ryzen5825u build@127.0.0.1:wisdomf
 # radiod's own channel-filter plans — a DIFFERENT file from wisdomf, which
 # is planned non-threaded and which radiod's threaded plans never match.

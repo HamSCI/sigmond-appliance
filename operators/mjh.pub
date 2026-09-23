@@ -1,0 +1,4 @@
+# mjh (Michael Hauan) — personal machines.  Root on every station built from
+# this image.
+
+ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIK2CBQFokA4+Br6VXLVxs8GI6J1n4elqvCtlPpAyWcFs mjh@sigmond-devbox

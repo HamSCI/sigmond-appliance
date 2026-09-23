@@ -222,9 +222,36 @@ say "answer file (fqdn carries the version)"
 sed -e "s|^fqdn = .*|fqdn = \"sigmond-appliance-${VTAG}.local\"|" \
     "$BUILD_DIR/answer.toml" > answer-v3.toml
 grep -q "sigmond-appliance-${VTAG}" answer-v3.toml || { say "FATAL: fqdn substitution failed"; exit 1; }
-if [ "$RELEASE" = 1 ]; then
-    sed -i '/^root-ssh-keys/d' answer-v3.toml
-    say "release mode: test ssh key stripped"
+# The PM host used to ship with root-password ONLY -- the same published
+# password on every station in the fleet, unattributable and unrevocable.  A
+# build-host test key lived here for non-release builds and was stripped for
+# release, which left release images with no key at all.  Replace it instead:
+# release images now carry the same operators/*.pub set the decoder VM gets,
+# so the shared password stops being the only door into Proxmox.
+sed -i '/^root-ssh-keys/d' answer-v3.toml
+PMKEYS=""
+if compgen -G "$PWD/operators/*.pub" >/dev/null 2>&1; then
+    PMKEYS=$(cat "$PWD"/operators/*.pub 2>/dev/null | grep -E '^(ssh|ecdsa)-' \
+             | sed 's/"/\\"/g; s/^/    "/; s/$/",/')
+elif [ -f "$PWD/rob.pub" ]; then
+    PMKEYS=$(grep -E '^(ssh|ecdsa)-' "$PWD/rob.pub" | sed 's/"/\\"/g; s/^/    "/; s/$/",/')
+fi
+if [ -n "$PMKEYS" ]; then
+    # Insert INSIDE [global] (after root-password); appending at EOF would
+    # land the key in [disk-setup] and the installer would reject the file.
+    awk -v keys="$PMKEYS" '
+        /^root-password/ { print; print "root-ssh-keys = ["; print keys; print "]"; next }
+        { print }
+    ' answer-v3.toml > answer-v3.toml.new && mv answer-v3.toml.new answer-v3.toml
+    say "PM host operator keys: $(printf '%s\n' "$PMKEYS" | grep -c '^' ) installed in answer.toml"
+    if command -v proxmox-auto-install-assistant >/dev/null 2>&1; then
+        proxmox-auto-install-assistant validate-answer answer-v3.toml >/dev/null 2>&1 \
+            || die "answer.toml failed validation after adding root-ssh-keys"
+        say "  answer.toml validates"
+    fi
+elif [ "$RELEASE" = 1 ]; then
+    say "WARNING: no operator key for the PM host — root password is the ONLY"
+    say "  way into Proxmox on stations built from this image."
 fi
 grep -q 'reboot-mode = "power-off"' answer-v3.toml || { say "FATAL: answer.toml lost power-off mode"; exit 1; }
 
@@ -518,22 +545,37 @@ say "manifest written: $MANIFEST"
 # there.  Anyone fetching from pending/ knowingly takes an untested build, and
 # a rebuild that overwrites its predecessor does so where that costs nothing.
 if [ "$SHIP" = 1 ]; then
-    # Distribution is Google Drive (gdrive:sigmond-images/), not wd30 — the CDN
-    # is fetched at each downloader's own speed instead of over the builder's
-    # home uplink once per downloader.  The pending/ vs download distinction the
-    # comment above records is preserved: untested builds go to pending/,
-    # bless-release.sh promotes to the blessed folder after the test.  rclone
-    # reads ~/.config/rclone/rclone.conf (remote "gdrive"); the build runs as
-    # root on the rig, so that is /root/.config/rclone/rclone.conf.
-    say "UPLOADING to gdrive:sigmond-images/pending/ (UNTESTED — bless promotes it after the test)"
-    _up=1
-    for _f in "$IMG" "${IMG%.img}.sha256" "$MANIFEST"; do
-        rclone copy -q "$_f" gdrive:sigmond-images/pending/ 2>>"$LOG" || _up=0
-    done
-    if [ "$_up" = 1 ]; then
-        say "uploaded: gdrive:sigmond-images/pending/$(basename "$IMG") + .sha256 + .manifest.txt (UNTESTED)"
+    # Distribution is Google Drive, not wd30 — the CDN is fetched at each
+    # downloader's own speed instead of over the builder's home uplink once
+    # per downloader.  The pending/ vs download distinction the comment above
+    # records is preserved: untested builds go to pending/, bless-release.sh
+    # promotes to the blessed folder after the test.  rclone reads
+    # ~/.config/rclone/rclone.conf (remote "gdrive"); the build runs as root
+    # on the rig, so that is /root/.config/rclone/rclone.conf.
+    #
+    # Destinations come from publish-targets.conf, shared with bless-release.sh,
+    # so the build and the bless can never disagree about where a product went.
+    . "$(dirname "$0")/publish-lib.sh"
+    if ! pub_load "$(dirname "$0")/publish-targets.conf"; then
+        say "WARNING: no publish targets declared — image stays on the rig only"
     else
-        say "WARNING: upload to Google Drive FAILED — check rclone (~/.config/rclone/rclone.conf) and upload by hand"
+        say "UPLOADING to $((${#PUB_DESTS[@]})) target(s), pending/ (UNTESTED — bless promotes after the test):"
+        pub_describe | while read -r l; do say "$l"; done
+        _allup=1
+        for _i in "${!PUB_DESTS[@]}"; do
+            _lab="${PUB_LABELS[$_i]}"; _d="${PUB_DESTS[$_i]%/}"
+            _up=1
+            for _f in "$IMG" "${IMG%.img}.sha256" "$MANIFEST"; do
+                rclone copy -q "$_f" "$_d/pending/" 2>>"$LOG" || _up=0
+            done
+            if [ "$_up" = 1 ]; then
+                say "  [$_lab] uploaded to $_d/pending/ (UNTESTED)"
+            else
+                _allup=0
+                say "  [$_lab] WARNING: upload to $_d FAILED — check rclone and upload by hand"
+            fi
+        done
+        [ "$_allup" = 1 ] || say "NOTE: at least one target above did not receive the build."
     fi
 fi
 say "USB IMAGE BUILD COMPLETE: $VERSION ($IMG)"
