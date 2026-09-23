@@ -563,11 +563,18 @@ if [ "$SHIP" = 1 ]; then
     if ! pub_load "$(dirname "$0")/publish-targets.conf"; then
         say "WARNING: no publish targets declared — image stays on the rig only"
     else
-        say "UPLOADING to $((${#PUB_DESTS[@]})) target(s), pending/ (UNTESTED — bless promotes after the test):"
+        say "UPLOADING (UNTESTED — bless promotes after the test):"
         pub_describe | while read -r l; do say "$l"; done
         _allup=1
         for _i in "${!PUB_DESTS[@]}"; do
             _lab="${PUB_LABELS[$_i]}"; _d="${PUB_DESTS[$_i]%/}"
+            # A "blessed" target takes nothing until the bless, so that every
+            # file in it is by definition tested.  Skipping here is the whole
+            # mechanism -- bless-release.sh copies to it instead.
+            if [ "${PUB_STAGES[$_i]}" = "blessed" ]; then
+                say "  [$_lab] skipped — blessed-only target, receives at bless time"
+                continue
+            fi
             _up=1
             for _f in "$IMG" "${IMG%.img}.sha256" "$MANIFEST"; do
                 rclone copy -q "$_f" "$_d/pending/" 2>>"$LOG" || _up=0

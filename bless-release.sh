@@ -744,12 +744,24 @@ if [ $RC -eq 0 ]; then
         say "promoting $IMGBASE out of pending/ to $((${#PUB_DESTS[@]})) target(s):"
         pub_describe | while read -r l; do say "$l"; done
         _allok=1
+        _SRCDIR="$(dirname "$SHAFILE")"
         for _i in "${!PUB_DESTS[@]}"; do
             _lab="${PUB_LABELS[$_i]}"; _d="${PUB_DESTS[$_i]%/}"
             _ok=1
+            if [ "${PUB_STAGES[$_i]}" = "blessed" ]; then
+                # Nothing of this build is in that folder yet -- upload it now,
+                # from the rig's own copy, so the folder only ever holds
+                # blessed images.
+                say "  [$_lab] blessed-only target — uploading $IMGBASE now"
+                for _f in "$IMGBASE" "${IMGBASE%.img}.sha256" "$(basename "$MANIFEST")"; do
+                    [ -f "$_SRCDIR/$_f" ] || { say "  [$_lab] MISSING locally: $_f"; _ok=0; continue; }
+                    rclone copyto -q "$_SRCDIR/$_f" "$_d/$_f" 2>/dev/null || _ok=0
+                done
+            else
             for _f in "$IMGBASE" "${IMGBASE%.img}.sha256" "$(basename "$MANIFEST")"; do
                 rclone moveto -q "$_d/pending/$_f" "$_d/$_f" 2>/dev/null || _ok=0
             done
+            fi
             if [ "$_ok" = 1 ]; then
                 _link="$(rclone link "$_d/$IMGBASE" 2>/dev/null)"
                 say "  [$_lab] promoted: $_d/$IMGBASE"
