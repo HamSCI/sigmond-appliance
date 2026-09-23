@@ -221,10 +221,21 @@ $SSHN "systemctl is-enabled sigmond-wizard.service >/dev/null" && say "wizard se
 # being true in v3.52 once the wizard began enabling the heartbeat by
 # default.  Leak-detection belongs here, before anything configures the
 # station; the post-wizard block now asserts the configured state instead.
-$SSHN "qm guest exec $VMID --timeout 30 -- bash -lc 'grep -q \"\\[heartbeat\\]\" /etc/sigmond/site-profile.toml 2>/dev/null && echo LEAKED || echo CLEAN'" 2>&1 \
-    | grep -q CLEAN \
-    && say "golden template carries no heartbeat config ✓" \
-    || { say "FATAL: a [heartbeat] block leaked into the golden template"; exit 1; }
+# ⛔ Match an UNCOMMENTED section header only.  capture-prep writes the
+# site-profile SCAFFOLD into the template, and that scaffold documents the
+# block as a commented example ("# [heartbeat]  # fleet situational-awareness
+# ...", site_profile.py:75).  A bare `grep "\[heartbeat\]"` matches the
+# comment and reports a leak that is not there — it did, on 2026-09-23.
+# An example in a comment is documentation; a section at line start is config.
+HBLEAK=$($SSHN "qm guest exec $VMID --timeout 30 -- bash -lc 'grep -qE \"^[[:space:]]*\\[heartbeat\\]\" /etc/sigmond/site-profile.toml 2>/dev/null && echo LEAKED || echo CLEAN'" 2>&1)
+case "$HBLEAK" in
+    *CLEAN*)  say "golden template carries no heartbeat config ✓" ;;
+    *LEAKED*) say "FATAL: a live [heartbeat] section leaked into the golden template"; echo "$HBLEAK" | head -6; exit 1 ;;
+    # Neither token means the probe failed to answer.  Say THAT, rather than
+    # reporting a leak — "could not tell" and "found a leak" are different
+    # facts, and conflating them cost a diagnosis today.
+    *) say "FATAL: heartbeat leak probe returned neither CLEAN nor LEAKED"; echo "$HBLEAK" | head -6; exit 1 ;;
+esac
 $SSHN "systemctl is-active sigmond-finalize.path >/dev/null" && say "finalize path unit watching" || say "WARN: finalize path unit not active"
 $SSHN "test -f /root/sigmond-appliance/sigmond-rac/install-host.sh" && say "sigmond-rac payload staged" || say "WARN: rac payload missing"
 
@@ -509,12 +520,18 @@ say "── fleet awareness: heartbeat CLI contract on a CONFIGURED station"
 # "proven live on a configured station, not here": the exit-0 path.  It now
 # exercises the whole route — wizard answer, site profile, config render,
 # CLI — instead of only proving the CLI exists.
-HB=$($SSHN "qm guest exec $VMID --timeout 30 -- bash -lc 'smd admin heartbeat emit --dry-run; echo rc=\$?'" 2>&1)
+# ⛔ Do NOT let the heartbeat PAYLOAD into this output.  `qm guest exec`
+# truncates (out-truncated), the payload is a full JSON document, and the
+# rc we care about trails it — so a long payload would silently carry the
+# verdict off the end.  Redirect the payload to a file in the guest and
+# return only the two facts: the exit code, and whether it said "not
+# enabled".
+HB=$($SSHN "qm guest exec $VMID --timeout 30 -- bash -lc 'o=\$(smd admin heartbeat emit --dry-run 2>&1); echo rc=\$?; echo notenabled=\$(printf %s \"\$o\" | grep -ci \"not enabled\")'" 2>&1)
 echo "$HB" | grep -q "rc=0" \
     && say "heartbeat emit --dry-run: exit 0 on the configured station ✓" \
     || { say "FATAL: heartbeat not emitting after the wizard enabled it"; echo "$HB" | head -6; exit 1; }
-echo "$HB" | grep -q "not enabled" \
-    && { say "FATAL: heartbeat reports NOT ENABLED after the wizard enabled it"; echo "$HB" | head -6; exit 1; } || true
+echo "$HB" | grep -q "notenabled=0" \
+    || { say "FATAL: heartbeat reports NOT ENABLED after the wizard enabled it"; echo "$HB" | head -6; exit 1; }
 $SSHN "qm guest exec $VMID --timeout 30 -- bash -lc 'systemctl list-unit-files sigmond-heartbeat.timer sigmond-gap-hourly.timer'" 2>&1 | grep -q "sigmond-heartbeat.timer" \
     && say "heartbeat + gap-hourly units present in image ✓" \
     || { say "FATAL: awareness units missing from image"; exit 1; }
