@@ -33,6 +33,28 @@ OVMF_CODE=/usr/share/OVMF/OVMF_CODE_4M.fd
 [ -f "$OVMF_CODE" ] || OVMF_CODE=/usr/share/OVMF/OVMF_CODE_4M.secboot.fd
 USBIMG="${USBIMG:-$(ls -t sigmond-appliance-v3*.img 2>/dev/null | head -1)}"
 [ -n "$USBIMG" ] || { say "FATAL: no sigmond-appliance-v3*.img found"; exit 1; }
+
+# USBIMG may arrive as a bare filename (the default, found relative to $PWD)
+# or as an absolute path from a caller that resolved it already.  Normalise
+# ONCE, here, so nothing downstream has to guess.
+#
+# ⛔ And CHECK IT EXISTS.  On 2026-09-23 a chain script passed an absolute
+# path, the qemu line pasted $PWD in front of it, and qemu was handed
+# /root/appliance/v3//root/appliance/v3/...img.  The run died in 11 seconds
+# with "FATAL: qemu did not start", which reads as a broken image or a
+# broken hypervisor; the actual message -- "Could not open ...: No such file
+# or directory" -- was only in the systemd journal of a transient unit. A
+# path bug should never cost a post-mortem.
+case "$USBIMG" in
+    /*) USBIMG_PATH="$USBIMG" ;;
+    *)  USBIMG_PATH="$PWD/$USBIMG" ;;
+esac
+if [ ! -f "$USBIMG_PATH" ]; then
+    say "FATAL: USB image not found: $USBIMG_PATH"
+    say "  USBIMG was: $USBIMG"
+    say "  pass a bare filename in $PWD, or an absolute path — both work."
+    exit 1
+fi
 say "USB image under test: $USBIMG"
 VMID=100
 
@@ -54,7 +76,7 @@ boot_vm(){ # boot_vm <with_usb 0|1> <serial_log>
     local usb="$1" slog="$2"
     vm_kill
     local usbargs=""
-    [ "$usb" = 1 ] && usbargs="-drive if=none,id=ustick,format=raw,file=$PWD/$USBIMG -device usb-storage,id=usbdev,drive=ustick,bootindex=2"
+    [ "$usb" = 1 ] && usbargs="-drive if=none,id=ustick,format=raw,file=$USBIMG_PATH -device usb-storage,id=usbdev,drive=ustick,bootindex=2"
     # Launched as its OWN transient systemd unit, not backgrounded with
     # qemu's -daemonize. -daemonize only detaches from the shell's
     # session/process group via a double-fork+setsid; the resulting process
