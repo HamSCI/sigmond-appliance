@@ -302,22 +302,34 @@ echo "$GK" | grep -q 'hamsci' || { say "FATAL: hamsci user missing in decoder VM
 say "staging a test site-keys tarball (exercises the stick key-restore path)"
 $SSHN "mkdir -p /root/sigmond-appliance /tmp/sk/etc/hs-uploader/keys /tmp/sk/home/timestd/.ssh && echo TESTPRIV > /tmp/sk/etc/hs-uploader/keys/id_ed25519_host && echo TESTPUB > /tmp/sk/etc/hs-uploader/keys/id_ed25519_host.pub && echo TESTRSA > /tmp/sk/home/timestd/.ssh/id_rsa_psws && tar czf /root/sigmond-appliance/site-keys.tar.gz -C /tmp/sk etc home && rm -rf /tmp/sk"
 say "guest kernel + hamsci OK; running wizard with piped answers (identity N0CALL/T1 @ EM00aa)"
-# Answer sequence for the v3.29+ wizard: reporter, grid, antenna, DASI n,
-# remote-access n, PSWS id, GRAPE instr, mag instr, mag station,
-# designator default, apply.  (The wizard's Press-Enter gate is tty-only
-# and its rd() guard aborts loudly on any desync — 2026-08-11.)
-printf 'N0CALL/T1
-EM00aa
-Tier2 test dipole
-n
-n
-S000999
-172
-84
-S000998
-
-Y
-' | $SSHN "sigmond-setup" 2>&1 | tail -40
+# ⛔ ONE ANSWER PER PROMPT, IN ORDER, EACH LABELLED.  This was a bare
+# printf of eleven unlabelled lines, and on 2026-09-23 a wizard change
+# (magnetometer-station prompt removed, three heartbeat prompts added)
+# silently shifted every answer after the eighth: the wizard consumed the
+# designator answer as a heartbeat host, ran out of input, and Phase D
+# failed with "wizard did not complete" — a message that says nothing
+# about which prompt moved.
+#
+# Labelling them makes the mapping checkable by eye and gives the next
+# wizard change an obvious place to add its answer.  The wizard's rd()
+# guard still aborts loudly on desync (2026-08-11), which is how the
+# breakage surfaced at all rather than producing a mis-configured station.
+WIZARD_ANSWERS=(
+    'N0CALL/T1'          # reporter id
+    'EM00aa'             # grid square
+    'Tier2 test dipole'  # antenna description
+    'n'                  # is this a DASI station?
+    'n'                  # enable remote access (RAC)?
+    'S000999'            # PSWS station id
+    '172'                # GRAPE instrument id
+    '84'                 # magnetometer instrument id
+    ''                   # heartbeat: send them? (blank = Y, the default)
+    ''                   # heartbeat: collector host (blank = wd30.wsprdaemon.org)
+    ''                   # heartbeat: collector port (blank = 38222)
+    ''                   # station designator (blank = default from reporter)
+    'Y'                  # apply
+)
+printf '%s\n' "${WIZARD_ANSWERS[@]}" | $SSHN "sigmond-setup" 2>&1 | tail -40
 MARK_OK=0
 for i in $(seq 1 12); do
     $SSHN "test -f /etc/sigmond-appliance/.configured" 2>/dev/null && { MARK_OK=1; break; }
@@ -392,6 +404,22 @@ echo "$PSWS_OUT" | grep -q 'S000999'        || { say "FATAL: PSWS station id mis
 echo "$PSWS_OUT" | grep -q 'MOTD-HOOK-OK'   || { say "FATAL: PSWS motd hook not installed"; exit 1; }
 echo "$PSWS_OUT" | grep -q 'STATION-KEY-OK' || { say "FATAL: station key not generated"; exit 1; }
 echo "$PSWS_OUT" | grep -qi 'not finished\|NOT YET\|verify' || { say "FATAL: pending-enrollment banner missing"; exit 1; }
+
+# The heartbeat prompt shipped in v3.52 and nothing tested it.  Assert what
+# the wizard was asked for actually reached the profile -- above all the
+# PORT: site_profile.py defaults [heartbeat].port to 22 and the collector
+# answers only on 38222, so a profile carrying the host WITHOUT a port
+# produces a station that reports nowhere and looks configured.
+say "verifying the fleet heartbeat the wizard was asked to enable"
+HB_OUT=$($SSHN "qm guest exec $VMID --timeout 60 -- bash -lc 'grep -A4 \"\\[heartbeat\\]\" /etc/sigmond/site-profile.toml'" 2>&1)
+echo "$HB_OUT" | tail -6
+echo "$HB_OUT" | grep -qE 'enabled[[:space:]]*=[[:space:]]*true' \
+    || { say "FATAL: heartbeat not enabled in site profile"; exit 1; }
+echo "$HB_OUT" | grep -q 'wd30.wsprdaemon.org' \
+    || { say "FATAL: heartbeat collector host missing from site profile"; exit 1; }
+echo "$HB_OUT" | grep -qE 'port[[:space:]]*=[[:space:]]*38222' \
+    || { say "FATAL: heartbeat port not 38222 — the code default of 22 never delivers"; exit 1; }
+say "heartbeat enabled, host and port 38222 written ✓"
 say "PSWS: ids recorded, key generated, banner armed — pending verify (as designed)"
 
 say "── v3.4 fixes: wizard unit disabled, getty alive, panel, sentinel, wisdom"
