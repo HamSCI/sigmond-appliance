@@ -60,7 +60,21 @@ if [ -n "$WANT_DEV" ]; then
     rm=$(lsblk -dno RM "$DISK" 2>/dev/null | tr -d ' ')
     tran=$(lsblk -dno TRAN "$DISK" 2>/dev/null | tr -d ' ')
     say "target named explicitly: $DISK (transport=${tran:-?} removable=${rm:-?})"
-    [ "$tran" = "usb" ] || say "  ⚠ NOT a USB transport — read the next lines carefully"
+    # ⛔ "USB" DOES NOT MEAN "STICK".  The appliance build rig boots from an
+    # NVMe but carries a 465 GB USB-attached disk mounted at /srv/build --
+    # every build artefact on the machine.  It is TRAN=usb, so a naive
+    # usb-means-safe check waves it through, and the /-/boot check below does
+    # not cover it either because the OS lives elsewhere.  A DRY_RUN on the
+    # rig on 2026-09-23 said "every check passed" for exactly that disk.
+    #
+    # This tool writes REMOVABLE STICKS.  Anything else has to be asked for
+    # in writing.
+    if [ "$rm" != "1" ]; then
+        say "  ⚠ $DISK is NOT removable (RM=$rm) — that is a fixed disk, not a stick"
+        [ "${ALLOW_FIXED:-0}" = 1 ] \
+            || die "refusing a non-removable disk; set ALLOW_FIXED=1 if you really mean it"
+        say "  ALLOW_FIXED=1 — proceeding against a FIXED disk"
+    fi
 else
     DISK=""; N=0
     while read -r name size tran rm type; do
@@ -82,6 +96,26 @@ for s in $SYS; do
     [ "$s" = "$DISK" ] && die "$DISK CARRIES THE RUNNING SYSTEM — refusing"
 done
 say "system disk(s):${SYS:- none found} — target $DISK is not among them"
+
+# Beyond the OS: refuse a disk carrying MOUNTED DATA.  A stick that was just
+# plugged in automounts under /media, /mnt or /run/media and is fine — those
+# get unmounted below.  A mount anywhere ELSE (/srv/build, /var/lib/vz, a
+# data array) means this disk is in service, and writing it destroys whatever
+# lives there with no way back.
+BUSY=""
+while read -r part mp; do
+    [ -n "$mp" ] || continue
+    case "$mp" in
+        /media/*|/mnt/*|/run/media/*) continue ;;
+    esac
+    BUSY="$BUSY $part=$mp"
+done < <(lsblk -nro NAME,MOUNTPOINT "$DISK" 2>/dev/null | tail -n +2)
+if [ -n "$BUSY" ]; then
+    say "  ⚠ $DISK has partitions MOUNTED IN SERVICE:$BUSY"
+    [ "${ALLOW_MOUNTED:-0}" = 1 ] \
+        || die "refusing a disk with in-service mounts; set ALLOW_MOUNTED=1 if you really mean it"
+    say "  ALLOW_MOUNTED=1 — proceeding against a mounted disk"
+fi
 
 DBYTES=$(sudo blockdev --getsize64 "$DISK") || die "cannot read the size of $DISK (need sudo)"
 [ -n "$DBYTES" ] || die "cannot read the size of $DISK"
