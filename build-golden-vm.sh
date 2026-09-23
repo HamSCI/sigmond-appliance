@@ -111,6 +111,26 @@ if [ "${NKEYS:-0}" -eq 0 ]; then
     say "  VMKEYLESS_OK=1 — continuing WITHOUT any operator ssh key"
     OPKEY=""
 else
+    # ⛔ A fingerprint appearing in two operator files means one of two
+    # things and both are faults: the same key was copied under a second
+    # person's name (misattribution -- caught exactly this way on 2026-09-23,
+    # when mjh.pub was written holding rob's devbox key), or two people share
+    # a private key.  Either way the set can no longer say who holds root,
+    # and independent revocation -- the whole reason for one file per person
+    # -- silently stops working.  Refuse.
+    DUPFP=$(ssh-keygen -lf "$MERGED" 2>/dev/null | awk '{print $2}' | sort | uniq -d)
+    if [ -n "$DUPFP" ]; then
+        say "FATAL: the same key appears under more than one operator:"
+        for _fp in $DUPFP; do
+            say "  $_fp"
+            for _f in "$PWD"/operators/*.pub; do
+                ssh-keygen -lf "$_f" 2>/dev/null | grep -q "$_fp" \
+                    && say "      in $(basename "$_f")"
+            done
+        done
+        say "  One key per person, in that person's own file. Fix operators/ and rebuild."
+        die "refusing to build with a duplicated operator key"
+    fi
     OPKEY="$MERGED"
     say "operator keys: $NKEYS from $KEYSRC"
     ssh-keygen -lf "$MERGED" 2>/dev/null | while read -r bits fp comment _; do
