@@ -1,12 +1,37 @@
 SIGMOND APPLIANCE @@VERSION@@ — QUICK START
 ===========================================
 1. Write the image to a USB stick (>=16 GB).  The image is published
-   UNCOMPRESSED — there is nothing to decompress, just write it:
+   UNCOMPRESSED — there is nothing to decompress, just write it.
+
+   BEST: use the flasher from the sigmond-appliance repo.  It finds the
+   stick by its removable+USB attributes instead of a letter you type,
+   REFUSES the disk carrying the running system, and reads the stick back
+   to compare hashes:
+     ./flash-usb.sh sigmond-appliance-@@VERSION@@-*.img
+
+   By hand, if you have only the image:
      sudo dd if=sigmond-appliance-@@VERSION@@-*.img of=/dev/sdX bs=4M \
              oflag=direct conv=fsync status=progress
-   Verify the stick took a real image before booting — this should say
-   "DOS/MBR boot sector":
-     sudo file -s /dev/sdX
+     sync
+
+   ⚠ /dev/sdX is YOUR job to get right, and getting it wrong overwrites
+   that machine's own disk with no further prompt.  Confirm the target is
+   the stick — size, and that it is removable — before you press enter:
+     lsblk -dno NAME,SIZE,TRAN,RM,MODEL
+
+   Then VERIFY by reading the stick back and comparing hashes — read
+   EXACTLY the image's byte count, which flash-usb.sh does for you:
+     IMG=sigmond-appliance-@@VERSION@@-*.img
+     sudo head -c "$(stat -c %s $IMG)" /dev/sdX | sha256sum
+     sha256sum $IMG
+   The two hashes must match.  (A `dd ... count=N` written in whole 4 MiB
+   blocks silently reads SHORT whenever the image is not an exact multiple
+   of the block size, and then mismatches on a perfectly good write.)
+
+   ⚠ Do NOT verify with `file -s /dev/sdX`.  It reads the boot sector only,
+   so it happily says "DOS/MBR boot sector" for a stick that took the first
+   megabyte and then fell off the bus, and for a stick still carrying last
+   month's image.
 2. Have the RX888 (and GPSDO etc.) ALREADY CONNECTED to the target
    machine, then boot it from the USB.
    Proxmox VE installs AUTOMATICALLY — this ERASES the machine's NVMe disk.
