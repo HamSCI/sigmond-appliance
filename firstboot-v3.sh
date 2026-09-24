@@ -32,6 +32,41 @@ mkdir -p /etc/sigmond-appliance
 echo "$VERSION" > /etc/sigmond-appliance/version
 
 # ── host networking: vmbr0 must be on a NIC that can REACH the LAN ────────
+# ── shared address helpers, used by BOTH sigmond-netfix and sigmond-issue ──
+# One definition, sourced by both.  They were previously defined inside
+# netfix and called from the panel, where they did not exist.
+mkdir -p /usr/local/lib
+cat > /usr/local/lib/sigmond-net.sh <<'NETLIBEOF'
+# Shared by sigmond-netfix and sigmond-issue.  Keep it dependency-free: it is
+# sourced very early at boot, before anything else is guaranteed to exist.
+
+# ⛔ Every address probe here used to be `ip -4` ONLY.  On an IPv6-only LAN
+# that returns nothing, net_dead() fires, and the operator is told the install
+# cannot continue -- on a machine that is perfectly reachable over v6.  A
+# station bound for McMurdo (IPv6-only, 2026-09) would have read as bricked.
+#
+# IPv4 still WINS when both exist: it is what the fleet's reach, frp registry
+# and internal 10.99.0.0/30 management link all speak today.  v6 is the
+# fallback that keeps a v6-only site alive, not a new preference.
+#
+# Link-local (fe80::) is deliberately excluded: without a scope id it is not
+# an address anyone can connect to, and reporting one as "the station's
+# address" is worse than reporting none.
+cur_ip(){
+    local _dev="${1:-vmbr0}" _a
+    _a=$(ip -4 -o addr show "$_dev" 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -1)
+    [ -n "$_a" ] && { printf '%s\n' "$_a"; return 0; }
+    ip -6 -o addr show "$_dev" scope global 2>/dev/null \
+        | grep -v -e temporary -e deprecated \
+        | awk '{print $4}' | cut -d/ -f1 | head -1
+}
+
+# A v6 literal needs brackets in a URL and in anything that appends :port.
+# `https://2001:db8::1:8006` is not a URL; `https://[2001:db8::1]:8006` is.
+ipurl(){ case "${1:-}" in *:*) printf '[%s]\n' "$1";; *) printf '%s\n' "${1:-}";; esac; }
+NETLIBEOF
+chmod 0644 /usr/local/lib/sigmond-net.sh
+
 # Installed as a script + boot unit rather than done inline, because the
 # failure it fixes is not a one-time event: a cable moved to the other socket
 # must heal the machine on the next boot, with nobody at the console.
@@ -72,30 +107,19 @@ reload_net(){
     else ifdown vmbr0 2>/dev/null; ifup vmbr0 2>/dev/null; fi
 }
 
-# ⛔ Every address probe here used to be `ip -4` ONLY.  On an IPv6-only LAN
-# that returns nothing, net_dead() fires, and the operator is told the install
-# cannot continue -- on a machine that is perfectly reachable over v6.  A
-# station bound for McMurdo (IPv6-only, 2026-09) would have read as bricked.
-#
-# IPv4 still WINS when both exist: it is what the fleet's reach, frp registry
-# and internal 10.99.0.0/30 management link all speak today.  v6 is the
-# fallback that keeps a v6-only site alive, not a new preference.
-#
-# Link-local (fe80::) is deliberately excluded: without a scope id it is not
-# an address anyone can connect to, and reporting one as "the station's
-# address" is worse than reporting none.
-cur_ip(){
-    local _dev="${1:-vmbr0}" _a
-    _a=$(ip -4 -o addr show "$_dev" 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -1)
-    [ -n "$_a" ] && { printf '%s\n' "$_a"; return 0; }
-    ip -6 -o addr show "$_dev" scope global 2>/dev/null \
-        | grep -v -e temporary -e deprecated \
-        | awk '{print $4}' | cut -d/ -f1 | head -1
+# cur_ip() and ipurl() now live in /usr/local/lib/sigmond-net.sh, written
+# above, because sigmond-issue needs them too.  They used to be defined HERE
+# and called THERE, which is not a thing shell does: every panel refresh on
+# v3.52 printed
+#     sigmond-issue: line 6:   cur_ip: command not found
+#     sigmond-issue: line 313: ipurl: command not found
+# and the panel lost the host address and the Proxmox URL -- on exactly the
+# console an operator stares at when the network is already misbehaving
+# (rob, installing v3.52, 2026-09-23).
+. /usr/local/lib/sigmond-net.sh 2>/dev/null || {
+    echo "[netfix] FATAL: /usr/local/lib/sigmond-net.sh missing" | tee /dev/console
+    exit 1
 }
-
-# A v6 literal needs brackets in a URL and in anything that appends :port.
-# `https://2001:db8::1:8006` is not a URL; `https://[2001:db8::1]:8006` is.
-ipurl(){ case "${1:-}" in *:*) printf '[%s]\n' "$1";; *) printf '%s\n' "${1:-}";; esac; }
 
 # An install that cannot get an address is FINISHED -- not degraded.  There is
 # no ssh, no Proxmox UI, no RAC, and on this appliance possibly no keyboard.
@@ -177,38 +201,86 @@ esac
 # ── candidate NICs: physical, not the bridge, not virtual ───────────────────
 # Ordered carrier-first so a live cable wins over a dead one regardless of
 # what the installer picked.
-CANDS=""
+# ⛔ TWO DIFFERENT QUESTIONS, AND CONFLATING THEM DECLARES A HEALTHY MACHINE
+# DEAD.  "Which NICs may I run dhclient on?" excludes bridge members, because
+# probing vmbr0's own port and then flushing it tears down the bridge we are
+# repairing.  "Which NICs have a cable in them?" excludes NOTHING -- carrier
+# is a property of the socket, and an enslaved port is the MOST likely place
+# to find a live cable, since that is the one the installer chose.
+#
+# Until now both used one list.  So on the ordinary case -- the live cable in
+# the NIC vmbr0 already owns, the second socket empty -- every candidate was
+# skipped, LIVE came back empty, and netfix printed "NO NETWORK CABLE
+# DETECTED" at the console of a machine whose link light was on.  rob hit
+# exactly that installing v3.52 on 2026-09-23: "there is a link light on that
+# port".  The operator is then told to check a cable that is already fine,
+# while the real fault (no DHCP answer, or a lease that never reached vmbr0)
+# goes unnamed.
+ALLPHYS=""; PROBE=""
 for d in /sys/class/net/*; do
     n=$(basename "$d")
     case "$n" in lo|vmbr*|tap*|fwbr*|fwln*|fwpr*|veth*|bond*|dummy*|wg*|tun*) continue ;; esac
     [ -e "$d/device" ] || continue          # physical only
-    # ⛔ NEVER probe a NIC already enslaved to a bridge.  Running dhclient on
-    # a bridge member and then flushing it tears down the very bridge we are
-    # trying to repair -- vmbr0's own port would otherwise be fair game here,
-    # which is a repair that breaks the thing it repairs.
-    if [ -e "$d/master" ]; then
-        say "  skipping $n — already enslaved to $(basename "$(readlink -f "$d/master")" 2>/dev/null)"
-        continue
-    fi
     ip link set "$n" up 2>/dev/null         # a down NIC reports no carrier
-    CANDS="$CANDS $n"
+    ALLPHYS="$ALLPHYS $n"
+    if [ -e "$d/master" ]; then
+        say "  $n is enslaved to $(basename "$(readlink -f "$d/master")" 2>/dev/null) — link still counts, but not probed"
+    else
+        PROBE="$PROBE $n"
+    fi
 done
-[ -n "$CANDS" ] || { say "no physical NICs found — cannot fix networking"; exit 1; }
-sleep 4                                     # let link negotiate after the ups
+[ -n "$ALLPHYS" ] || { say "no physical NICs found — cannot fix networking"; exit 1; }
 
-LIVE=""; DEAD=""
-for n in $CANDS; do
+# Autonegotiation is not instant.  A fixed 4 s sleep was ROUTINELY too short
+# on gigabit copper (and far too short behind a switch running STP), so a
+# perfectly good port could read carrier=0 and be written off.  Poll instead:
+# stop the moment anything comes up, and only spend the full budget when
+# nothing does.
+CARRIER_WAIT="${SIGMOND_CARRIER_WAIT:-30}"
+_waited=0
+while [ "$_waited" -lt "$CARRIER_WAIT" ]; do
+    for n in $ALLPHYS; do
+        [ "$(cat "/sys/class/net/$n/carrier" 2>/dev/null)" = "1" ] && break 2
+    done
+    sleep 2; _waited=$(( _waited + 2 ))
+    [ $(( _waited % 10 )) -eq 0 ] && say "  waiting for link ... ${_waited}s of ${CARRIER_WAIT}s"
+done
+[ "$_waited" -gt 0 ] && say "  link settled after ${_waited}s"
+
+LIVE=""; DEAD=""; LIVE_ENSLAVED=""
+for n in $ALLPHYS; do
     if [ "$(cat "/sys/class/net/$n/carrier" 2>/dev/null)" = "1" ]; then
-        LIVE="$LIVE $n"
+        case " $PROBE " in
+            *" $n "*) LIVE="$LIVE $n" ;;
+            *)        LIVE_ENSLAVED="$LIVE_ENSLAVED $n" ;;
+        esac
     else
         DEAD="$DEAD $n"
     fi
 done
-say "NICs with link:${LIVE:- none}${DEAD:+ ; no link:$DEAD}"
-if [ -z "$LIVE" ]; then
+say "link up:${LIVE:- none}${LIVE_ENSLAVED:+ ; link up but enslaved:$LIVE_ENSLAVED}${DEAD:+ ; no link:$DEAD}"
+
+if [ -z "$LIVE" ] && [ -z "$LIVE_ENSLAVED" ]; then
     net_dead "NO NETWORK CABLE DETECTED" \
              "None of this machine's network ports has a link signal:" \
-             "$CANDS"
+             "$ALLPHYS"
+    exit 1
+fi
+if [ -z "$LIVE" ]; then
+    # Cable IS in, in the port the bridge already owns.  Nothing to re-bind:
+    # the fault is upstream of us (no DHCP answer, or a v6-only LAN), and
+    # saying "no cable" here would send the operator to the one thing that is
+    # demonstrably fine.
+    say "the only port with a link ($LIVE_ENSLAVED) is already vmbr0's — not a cabling fault"
+    say "retrying DHCP on vmbr0 itself before giving up"
+    timeout 30 dhclient -1 -v vmbr0 >>"$LOG" 2>&1
+    if [ -n "$(cur_ip vmbr0)" ]; then
+        say "vmbr0 now has $(cur_ip vmbr0) — nothing further to do"
+        exit 0
+    fi
+    net_dead "NETWORK PORT IS CONNECTED, BUT NOTHING ANSWERED" \
+             "The cable is in and the link is up on:" \
+             "$LIVE_ENSLAVED"
     exit 1
 fi
 
@@ -933,6 +1005,22 @@ systemctl daemon-reload 2>/dev/null
 cat > /usr/local/sbin/sigmond-issue <<'ISSEOF'
 #!/bin/bash
 # Regenerate the Sigmond access panel in /etc/issue + /etc/motd (markered).
+#
+# ⛔ cur_ip() and ipurl() come from here.  They are NOT defined in this file,
+# and on v3.52 they were not sourced either -- they were defined inside
+# sigmond-netfix, a separate script, so every refresh printed
+#     line 6:   cur_ip: command not found
+#     line 313: ipurl: command not found
+# and the panel showed no host address and a broken Proxmox URL.  If this
+# source line ever goes away, that failure comes straight back.
+. /usr/local/lib/sigmond-net.sh 2>/dev/null || {
+    # Never leave the panel blank: a console with no address on it is how an
+    # operator concludes the machine is dead.  Degrade to IPv4-only rather
+    # than to nothing, and say so.
+    cur_ip(){ ip -4 -o addr show "${1:-vmbr0}" 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -1; }
+    ipurl(){ case "${1:-}" in *:*) printf '[%s]\n' "$1";; *) printf '%s\n' "${1:-}";; esac; }
+    _NETLIB_MISSING=1
+}
 VMID="${SIGMOND_VMID:-100}"
 VERSION="$(cat /etc/sigmond-appliance/version 2>/dev/null || echo '?')"
 CONF="$(cat /etc/sigmond-appliance/.configured 2>/dev/null)"
