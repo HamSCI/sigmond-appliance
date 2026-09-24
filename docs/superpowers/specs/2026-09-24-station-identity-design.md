@@ -23,8 +23,9 @@ Identity here means material the station minted that other parties have since le
 |---|---|---|---|
 | VM | `/etc/ssh/ssh_host_*` | the OS install | every operator's `known_hosts`, the PM's `vm-known_hosts` |
 | VM | `/etc/hs-uploader/keys/` | the wizard | the wd30 heartbeat account, PSWS |
-| VM | `/home/timestd/.ssh/` | older installs | PSWS (legacy per-recorder key) |
+| VM | `/home/timestd/.ssh/id_*` | older installs | PSWS (legacy per-recorder key) |
 | PM | `/etc/ssh/ssh_host_*` | the Proxmox install | every operator's `known_hosts` |
+| PM | `/root/.ssh/id_ed25519` (+ `.pub`) | the Proxmox install / sigmond setup | the VM's sigmond account, for the PM→VM hop; sent as `[metadatas] pubkey` on every RAC login |
 | PM | the RAC `user` and token in `/etc/sigmond/frpc-host.toml` | the RAC registrar | gw2's frps |
 
 The RAC row carries only the credential lines, not the whole file.  The wizard regenerates the proxy list from the station's layout, and a restored list could contradict a changed layout.
@@ -42,7 +43,9 @@ site-deltas/<site>/identity.manifest   # path, owner, mode, fingerprint — no s
 
 The manifest stays in plaintext beside the ciphertext.  It lets anyone ask whether a live station still matches its bundle without decrypting anything.
 
-Plaintext exists in two places only: in the devbox scratch directory for the length of a capture, and on the stick for the length of a reflash.
+Plaintext stays in memory on the devbox, from the ssh read to the age encrypt.  It touches disk only on the stick, for the length of a reflash.
+
+The bundle's own format — member naming, ownership by name and numeric id together, why a restore must not use tarfile's `data` extraction filter, member order — has its own account: the "Bundle format (schema 1)" section of `sigmond/lib/sigmond/identity.py`'s module docstring.  The manifest also carries two keys beyond the file list: `identity_py_sha256`, the digest of the identity.py source that ran the capture, and `recipients`, the fingerprints of every operator key the bundle was encrypted to.
 
 One limit deserves plain statement.  Git keeps history, so an old `identity.age` stays decryptable by whoever could decrypt it then.  Removing an operator protects future bundles only.  Anyone who needs a clean break must rotate the station's keys and re-capture.
 
@@ -52,24 +55,27 @@ sigmond defines the identity file list once, in `sigmond/lib/sigmond/identity.py
 
 ### On the station (sigmond)
 
-- `smd admin identity export --plane vm|pm` writes a tar of that plane's identity files, manifest included, to stdout.  It reads and changes nothing.
-- `smd admin identity fingerprints --plane vm|pm` prints the manifest alone.  It needs no root, since it reads public keys and metadata only.
-- `smd admin identity restore <tarball>` installs the files with their recorded owners and modes, and reports each item as restored, absent or failed.
+- `export --plane vm|pm` writes a tar of that plane's identity files, manifest included, to stdout.  It reads and changes nothing.
+- `fingerprints --plane vm|pm` prints the manifest alone.  It still needs root: it hashes private key halves too, reads directories such as `/home/timestd/.ssh` that sit at 0700, and reads the RAC token to fingerprint it.
+- `restore <tarball>` installs the files with their recorded owners and modes, and reports each item as restored, absent or failed.
 
 ### On the devbox (ops repository, `bin/site-identity`)
 
-- `capture <site>` pulls both planes through `fleet-ssh`, encrypts, writes the two files and commits.  It runs once after bring-up, and again after anyone rotates a key by hand.
-- `check <site>` compares live fingerprints against the committed manifest.  It exits 0 on a match and names every differing item otherwise.  It never decrypts.
+- `capture <site>` reads both planes over ssh, encrypts, writes the two files and commits.  It runs once after bring-up, and again after anyone rotates a key by hand.  It builds its reach from the same fleet inventory `fleet-ssh` itself reads, rather than calling `fleet-ssh`.  A fresh export that differs from the site's already-committed manifest refuses, and writes nothing, unless `--rebaseline` accepts the change; an identical re-capture always proceeds.  Before writing anything it also proves the new bundle decrypts, with a local `~/.ssh/id_*` key that matches one of the operator recipients; finding none refuses the capture, unless `--no-verify` accepts the gap and prints a loud warning instead.
+- `check <site>` compares live fingerprints against the committed manifest.  Exit 0 means a match; 1 names every differing item; 2 means the site carries no committed bundle yet; 3 means ssh could not reach the live station at all.  It never decrypts.
 - `stick <site> <efi-mount>` decrypts onto the stick as `site-keys.tar.gz`, and runs `check` first:
-  - station reachable and matching — it proceeds;
-  - station reachable and not matching — it refuses, because the bundle has gone stale; re-capture first;
-  - station unreachable — it proceeds with a loud warning, from the last bundle.
+  - exit 0 (match) — it proceeds;
+  - exit 1 (mismatch) — it refuses; the bundle has gone stale, re-capture first;
+  - exit 2 (no bundle) — it refuses; no bundle exists yet to decrypt, capture first;
+  - exit 3 (unreachable) — it proceeds with a loud warning, from the last bundle.
 
-The third case covers the reason the whole design exists: a dead disk or a replaced machine, with no chance of a last-minute capture.
+The fourth case covers the reason the whole design exists: a dead disk or a replaced machine, with no chance of a last-minute capture.
 
 The rule "check before you wipe" lives inside `stick`, not in a checklist.  Nobody can build a restore stick from a stale bundle without the command saying so.
 
 INSTALL.md step 4 gets rewritten around `site-identity stick`, and loses its hand-typed `tar czf` line.
+
+Plan 1 wires none of this as `smd admin identity` yet — the PM carries no smd at all, and a station's sigmond checkout may predate this module.  `capture` and `check` instead pipe `identity.py`'s own source over ssh, and run it directly as `python3 - export --plane ...` / `python3 - fingerprints --plane ...`.  Wiring `export`/`fingerprints`/`restore` as real `smd admin identity` verbs is Plan 2's work, alongside the restore path itself.
 
 ## 5. Restoring at install
 
