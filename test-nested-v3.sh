@@ -558,6 +558,16 @@ HBN=$($SSHN "qm guest exec $VMID --timeout 30 -- bash -lc 'smd admin heartbeat e
 echo "$HBN" | grep -qE "count=[1-9][0-9]*" \
     && say "heartbeat emit wrote a spool file in /var/lib/sigmond/heartbeat ✓" \
     || { say "FATAL: heartbeat emit did not write a spool file under /var/lib/sigmond/heartbeat"; echo "$HBN" | head -6; exit 1; }
+# The PM (this nested PVE host, not the VM) ships its own heartbeat emitter
+# too, but nothing ever ran it, so every PM row on the fleet board stayed
+# silent after a fresh install (sigmond-appliance#9).  Checked directly on
+# the PM with $SSHN, not qm guest exec — pm-heartbeat.timer runs on the host.
+$SSHN "systemctl is-enabled pm-heartbeat.timer 2>&1" | grep -q "^enabled$" \
+    && say "pm-heartbeat.timer enabled on the PM ✓" \
+    || { say "FATAL: pm-heartbeat.timer not enabled on the PM — the host heartbeat never got wired up (sigmond-appliance#9)"; exit 1; }
+$SSHN "test -f /etc/pm-heartbeat/config.toml" \
+    && say "pm-heartbeat config.toml present on the PM ✓" \
+    || { say "FATAL: /etc/pm-heartbeat/config.toml missing on the PM (sigmond-appliance#9)"; exit 1; }
 say "── gmag-webui (v3.34): pinned Deno + dashboard unit baked into the VM"
 # sigmond 9833c25 added gmag-webui (HamSCI magnetometer dashboard) as a dasi2
 # core client installed by the smd-native recipe: a pinned Deno under
