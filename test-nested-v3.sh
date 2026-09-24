@@ -532,7 +532,10 @@ say "── fleet awareness: heartbeat CLI contract on a CONFIGURED station"
 # What belongs HERE is the other half, which the old comment said was
 # "proven live on a configured station, not here": the exit-0 path.  It now
 # exercises the whole route — wizard answer, site profile, config render,
-# CLI — instead of only proving the CLI exists.
+# CLI — instead of only proving the CLI exists.  It also checks the timer
+# itself and a REAL (non-dry-run) emit: the v3.52 test checked config and a
+# dry run and passed, on a station whose wizard wrote [heartbeat] but never
+# enabled sigmond-heartbeat.timer, so it never reported (sigmond#94).
 # ⛔ Do NOT let the heartbeat PAYLOAD into this output.  `qm guest exec`
 # truncates (out-truncated), the payload is a full JSON document, and the
 # rc we care about trails it — so a long payload would silently carry the
@@ -548,6 +551,13 @@ echo "$HB" | grep -q "notenabled=0" \
 $SSHN "qm guest exec $VMID --timeout 30 -- bash -lc 'systemctl list-unit-files sigmond-heartbeat.timer sigmond-gap-hourly.timer'" 2>&1 | grep -q "sigmond-heartbeat.timer" \
     && say "heartbeat + gap-hourly units present in image ✓" \
     || { say "FATAL: awareness units missing from image"; exit 1; }
+$SSHN "qm guest exec $VMID --timeout 30 -- bash -lc 'echo HBT-\$(systemctl is-enabled sigmond-heartbeat.timer 2>&1)'" 2>&1 | grep -q "HBT-enabled" \
+    && say "sigmond-heartbeat.timer enabled by the wizard ✓" \
+    || { say "FATAL: the wizard enabled the heartbeat but not its timer — the station will never report (sigmond#94)"; exit 1; }
+HBN=$($SSHN "qm guest exec $VMID --timeout 30 -- bash -lc 'smd admin heartbeat emit >/dev/null 2>&1; echo count=\$(ls /var/lib/sigmond/heartbeat/*.json 2>/dev/null | wc -l)'" 2>&1)
+echo "$HBN" | grep -qE "count=[1-9][0-9]*" \
+    && say "heartbeat emit wrote a spool file in /var/lib/sigmond/heartbeat ✓" \
+    || { say "FATAL: heartbeat emit did not write a spool file under /var/lib/sigmond/heartbeat"; echo "$HBN" | head -6; exit 1; }
 say "── gmag-webui (v3.34): pinned Deno + dashboard unit baked into the VM"
 # sigmond 9833c25 added gmag-webui (HamSCI magnetometer dashboard) as a dasi2
 # core client installed by the smd-native recipe: a pinned Deno under
