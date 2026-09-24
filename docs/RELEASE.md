@@ -167,6 +167,45 @@ is rolled when the station it installed is running. The nested test's Phase D
 now exercises that path, so a regression in first-run bring-up shows up
 before a release, not at a site.
 
+### v3.54: an unattended install finally measures something
+
+Nothing in THIS repo changed between v3.53 and v3.54. The whole difference
+is in the golden VM, which clones `HamSCI/sigmond` at build time — so v3.54
+is a deliberate rebuild of the decoder template, not a payload change, and
+building it on the v3.53 template would have reproduced the defect below.
+
+**The defect it closes.** `sigmond-site-timing` was run by the wizard
+(~line 1083) BEFORE first-run bring-up started (~line 1158). Its step 3
+needs `/etc/hf-timestd/` to exist, so on a fresh install it skipped,
+silently, and nothing re-ran it. The result was a station with **no
+metrology at all**: zero `timestd-metrology@` units, no
+`/etc/hf-timestd/metrology-channels/`, fusion logging `0 entries from 6
+channels`, no T3 — and every unit green.
+
+B4 ran that way from its reflash until 2026-09-23. rob's lab station did the
+same on v3.53 and needed the command run by hand. That is the part that
+matters for this document: **an appliance needing a manual step after an
+unattended install is not unattended**, and this step was invisible, because
+the station looked healthy while measuring nothing.
+
+`sigmond-firstrun-bringup` now re-runs the site wiring after `smd bringup`
+returns, where hf-timestd and its config exist, and then COUNTS the channels
+and logs the number. "Site wiring complete" with zero channels running is
+the exact shape of the failure, and a log line that could not tell the two
+apart is how it hid for a week.
+
+**Also carried, from v3.51–v3.53:** the bring-up race (wizard and
+`sigmond-firstrun-bringup.service` both running `smd bringup` with no mutual
+exclusion — ten lost `smd install` steps on AI6VN); the panel's `cur_ip`/
+`ipurl` helpers being defined in a different script; netfix reading a live
+cable in vmbr0's own port as NO NETWORK CABLE DETECTED; and the port relay
+paying the guest agent's ~3.8 s timeout on every single connection.
+
+Evidence to look for after installing it, in the VM:
+
+    grep -c "lifecycle lock held" /var/log/sigmond/firstrun-bringup.log   # 0
+    systemctl list-units 'timestd-metrology@*' --no-legend | wc -l        # 6
+
 ### v3.44: WITHDRAWN — the build did not ship what the tag said
 
 Do not bless or install v3.44. It was never blessed and the tag was never
