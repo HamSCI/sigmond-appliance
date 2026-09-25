@@ -322,13 +322,21 @@ cfg = sys.argv[1]
 changed = []
 s = open(cfg).read()
 
-# T5: enable when gpsdo-monitor sees a Leo Bodnar with a live fix surface
+# T5: enable only for a GPSDO whose NMEA stream hf-timestd's T5 reader is
+# built for — the LBE-1421/1423 (gpsdo-monitor's has_nmea_cdc models). The
+# old test also fired on `d.get('health')`, which every monitored GPSDO has,
+# so an LBE-mini (HID only, no CDC-NMEA) got lb1421_enabled = true and a T5
+# that never lights (AC0G-ND 2026-09-25). Whether a mini's UBX NAV time can
+# feed T5 is an open question for hf-timestd, not something to switch on here.
+T5_NMEA_MODELS = ('lbe-1421', 'lbe-1423')
 t5 = False
 for p in glob.glob('/run/gpsdo/*.json'):
     if p.endswith('index.json'): continue
     try: d = json.load(open(p))
     except Exception: continue
-    if 'lbe' in (d.get('model') or d.get('product') or '').lower() or d.get('health'):
+    dev = d.get('device') if isinstance(d.get('device'), dict) else {}
+    model = (dev.get('model') or d.get('model') or d.get('product') or '').lower()
+    if model in T5_NMEA_MODELS:
         t5 = True; break
 cur = tomllib.load(open(cfg, 'rb')).get('timing', {})
 if t5 and not cur.get('lb1421_enabled'):
