@@ -715,6 +715,62 @@ case "$BUOUT" in
     ;;
 esac
 
+# ── did the station actually WIRE ITSELF UP? ───────────────────────────────
+# ⛔ Phase D used to end here, and everything above is satisfied by a station
+# that installs cleanly and MEASURES NOTHING.  That is not hypothetical: the
+# wizard runs sigmond-site-timing before bring-up exists, its step 3 skips,
+# and the station ends with ZERO timestd-metrology@ units, fusion reading
+# "0 entries from 6 channels", no T3 -- every unit green.  B4 ran that way
+# from its reflash until 2026-09-23; rob's v3.53 lab station did the same.
+# v3.54 fixes it (sigmond af5aba3, re-running the wiring after bring-up), and
+# until this block existed the fix was proven only by hand, on one station.
+#
+# ⚠ It also repairs a weakness in the checks ABOVE.  "no step lost the
+# lifecycle lock ✓" is trivially true of a bring-up that ran for five seconds
+# and got nowhere -- a pass that means nothing.  So establish COMPLETION
+# first, and make every claim conditional on it.
+say "waiting for first-run bring-up to COMPLETE (its marker), up to ${BRINGUP_WAIT_MIN:-25} min"
+_done=0
+for _i in $(seq 1 $(( ${BRINGUP_WAIT_MIN:-25} * 4 )) ); do
+    $SSHN "qm guest exec $VMID --timeout 30 -- /bin/bash -c 'test -e /var/lib/sigmond/.firstrun-bringup-done'" 2>/dev/null \
+        | grep -q '"exitcode" : 0' && { _done=1; break; }
+    [ $(( _i % 8 )) -eq 0 ] && say "  … still bringing up ($(( _i / 4 )) min)"
+    sleep 15
+done
+
+if [ "$_done" != 1 ]; then
+    # NOT a FATAL: the nested guest has no RX888 and is slower than iron, so a
+    # long bring-up is plausible.  But say plainly that nothing below was
+    # checked -- an unevaluated assertion reported as silence is how the
+    # original defect survived.
+    say "WARN: bring-up did not finish within ${BRINGUP_WAIT_MIN:-25} min"
+    say "  ⚠ THE METROLOGY ASSERTION WAS NOT EVALUATED — this run does not"
+    say "    show whether the station wires its timing chain."
+else
+    say "bring-up completed (marker present)"
+    MET=$($SSHN "qm guest exec $VMID --timeout 60 -- bash -lc '
+        L=/var/log/sigmond/firstrun-bringup.log
+        echo WIRED:\$(grep -c \"re-running site wiring\" \$L 2>/dev/null)
+        echo COUNT:\$(systemctl list-units \"timestd-metrology@*\" --no-legend --plain 2>/dev/null | wc -l)
+        echo ENVS:\$(ls -1 /etc/hf-timestd/metrology-channels/ 2>/dev/null | wc -l)
+    '" 2>&1)
+    _w=$(echo "$MET" | grep -oE 'WIRED:[0-9]+' | head -1 | cut -d: -f2)
+    _c=$(echo "$MET" | grep -oE 'COUNT:[0-9]+' | head -1 | cut -d: -f2)
+    _e=$(echo "$MET" | grep -oE 'ENVS:[0-9]+'  | head -1 | cut -d: -f2)
+    [ "${_w:-0}" -gt 0 ] \
+        && say "site wiring re-ran after bring-up ✓" \
+        || say "WARN: no 're-running site wiring' line — is this image older than sigmond af5aba3?"
+    if [ "${_c:-0}" -gt 0 ]; then
+        say "metrology channels running: ${_c} (channel envs: ${_e:-?}) ✓"
+    else
+        say "FATAL: ZERO timestd-metrology@ units after a completed bring-up."
+        say "  The station installed cleanly and measures nothing — the exact"
+        say "  defect v3.54 exists to close. Do not ship this image."
+        $SSHN "qm guest exec $VMID --timeout 30 -- bash -lc 'tail -20 /var/log/sigmond/firstrun-bringup.log; ls -la /etc/hf-timestd/ 2>&1'" 2>&1
+        exit 1
+    fi
+fi
+
 say "PHASE D PASS — NESTED TEST COMPLETE"
 ;;
 esac
