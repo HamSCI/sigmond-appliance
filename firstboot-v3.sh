@@ -287,43 +287,108 @@ fi
 # ── try DHCP on each live NIC, standalone, before committing ────────────────
 # Carrier alone is not enough: a switch port can be up with nothing behind it.
 # Probe with dhclient on the bare interface so a failure costs nothing.
-WINNER=""
+# ⛔ AND PROBE BOTH FAMILIES.  cur_ip() learned to REPORT an IPv6 address
+# (d696800), but this loop -- the one that DECIDES whether the install is
+# dead -- still asked dhclient for IPv4 and nothing else.  So on an
+# IPv6-only LAN every port would come back "no DHCP answer", net_dead would
+# fire, and the console would tell the operator the install cannot continue
+# on a machine that is perfectly reachable over v6.  Fixing the reporting
+# path without the decision path leaves the dead-install behaviour intact.
+#
+# Order is deliberate: IPv4 first, because it is what the fleet's reach, the
+# frp registry and the 10.99.0.0/30 management link all speak.  v6 is the
+# fallback that keeps a v6-only site alive, not a new preference.
+#
+# v6 needs no DHCP at all on most networks: SLAAC hands out an address from
+# a router advertisement, so the probe is "bring the link up and WAIT",
+# with DHCPv6 tried only if no RA arrives.
+WINNER=""; WINNER_FAMILY=""
+v6_global(){ ip -6 -o addr show "$1" scope global 2>/dev/null \
+    | grep -v -e tentative -e deprecated | awk '{print $4}' | cut -d/ -f1 | head -1; }
+
 for n in $LIVE; do
-    say "trying DHCP on $n ..."
+    say "trying IPv4 DHCP on $n ..."
     timeout 25 dhclient -1 -v "$n" >>"$LOG" 2>&1
     got=$(ip -4 -o addr show "$n" 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -1)
     dhclient -r "$n" >/dev/null 2>&1
-    ip addr flush dev "$n" 2>/dev/null
     if [ -n "$got" ]; then
-        say "  $n got $got — using it for vmbr0"
-        WINNER="$n"; break
+        ip addr flush dev "$n" 2>/dev/null
+        say "  $n got $got (IPv4) — using it for vmbr0"
+        WINNER="$n"; WINNER_FAMILY=inet; break
     fi
-    say "  $n has link but no DHCP answer"
+    say "  $n has link but no IPv4 DHCP answer — trying IPv6"
+
+    # SLAAC: an RA can take a few seconds.  Accept a global v6 the moment
+    # one appears rather than burning the whole budget.
+    sysctl -qw "net.ipv6.conf.$n.accept_ra=2" 2>/dev/null
+    sysctl -qw "net.ipv6.conf.$n.disable_ipv6=0" 2>/dev/null
+    got6=""
+    for _r in $(seq 1 "${SIGMOND_RA_WAIT:-12}"); do
+        got6="$(v6_global "$n")"; [ -n "$got6" ] && break
+        sleep 2
+    done
+    if [ -z "$got6" ] && command -v dhclient >/dev/null 2>&1; then
+        say "  no router advertisement on $n — trying DHCPv6"
+        timeout 25 dhclient -6 -1 -v "$n" >>"$LOG" 2>&1
+        got6="$(v6_global "$n")"
+        dhclient -6 -r "$n" >/dev/null 2>&1
+    fi
+    ip addr flush dev "$n" 2>/dev/null
+    if [ -n "$got6" ]; then
+        say "  $n got $got6 (IPv6) — using it for vmbr0"
+        WINNER="$n"; WINNER_FAMILY=inet6; break
+    fi
+    say "  $n has link but offered no address in either family"
 done
 if [ -z "$WINNER" ]; then
-    net_dead "NO DHCP SERVER ANSWERED" \
-             "These ports have a cable, but nothing offered an address:" \
+    net_dead "NO ADDRESS OFFERED, IPv4 OR IPv6" \
+             "These ports have a cable, but nothing answered on either family:" \
              "$LIVE"
     exit 1
 fi
+say "selected $WINNER (${WINNER_FAMILY})"
 
 # ── rebind vmbr0 to the winner, as DHCP ─────────────────────────────────────
 cp -a "$IFACES" "$IFACES.netfix-bak-$(date -u +%Y%m%dT%H%M%SZ)" 2>/dev/null
-python3 - "$IFACES" "$WINNER" <<'PY'
+python3 - "$IFACES" "$WINNER" "${WINNER_FAMILY:-inet}" <<'PY'
 import re, sys
-path, nic = sys.argv[1], sys.argv[2]
+path, nic, family = sys.argv[1], sys.argv[2], sys.argv[3]
+
+# ⛔ WRITE THE STANZA FOR THE FAMILY WE ACTUALLY FOUND.  This used to emit
+# `iface vmbr0 inet dhcp` unconditionally.  On the v6-only path that is a
+# request for an IPv4 lease nobody is offering: the probe would correctly
+# find a v6 address, and then the bridge would be configured to go looking
+# for v4 and come up with nothing -- the repair writing its own failure.
+#
+# `inet6 auto` is SLAAC, which is how the overwhelming majority of v6
+# networks hand out addresses.  ifupdown accepts `inet6 dhcp` too, but we
+# only get here having already proven which one answered.
 s = open(path).read()
-m = re.search(r'^iface vmbr0 inet \w+\n(?:[ \t]+.*\n|\n)*', s, re.M)
-block = ("iface vmbr0 inet dhcp\n"
-         f"\tbridge-ports {nic}\n"
-         "\tbridge-stp off\n"
-         "\tbridge-fd 0\n")
-if m:
-    s = s[:m.start()] + block + s[m.end():]
+if family == "inet6":
+    body = ("iface vmbr0 inet6 auto\n"
+            f"\tbridge-ports {nic}\n"
+            "\tbridge-stp off\n"
+            "\tbridge-fd 0\n"
+            # accept_ra=2 because a Proxmox host FORWARDS, and the kernel
+            # ignores router advertisements on a forwarding interface unless
+            # told otherwise.  Without this the bridge never takes the RA and
+            # the address we just proved exists never appears.
+            "\tpost-up sysctl -qw net.ipv6.conf.vmbr0.accept_ra=2 || true\n"
+            "\tpost-up sysctl -qw net.ipv6.conf.all.forwarding=1 || true\n")
 else:
-    s += "\nauto vmbr0\n" + block
-if not re.search(r'^auto vmbr0$', s, re.M):
-    s = s.replace("iface vmbr0 inet dhcp", "auto vmbr0\niface vmbr0 inet dhcp", 1)
+    body = ("iface vmbr0 inet dhcp\n"
+            f"\tbridge-ports {nic}\n"
+            "\tbridge-stp off\n"
+            "\tbridge-fd 0\n")
+
+# Replace whichever family's stanza is present, so repeated runs do not
+# stack a v4 and a v6 block for the same bridge.
+for fam in ("inet", "inet6"):
+    s = re.sub(rf'^iface vmbr0 {fam} \w+\n(?:[ \t]+.*\n|\n)*', '', s, flags=re.M)
+if re.search(r'^auto vmbr0$', s, re.M):
+    s = re.sub(r'^auto vmbr0$', 'auto vmbr0\n' + body.rstrip('\n'), s, count=1, flags=re.M)
+else:
+    s = s.rstrip('\n') + "\n\nauto vmbr0\n" + body
 open(path, "w").write(s)
 PY
 reload_net
