@@ -167,6 +167,25 @@ sudo useradd -m -s /bin/bash hamsci 2>/dev/null || true
 echo 'hamsci:hamsci-sigmond' | sudo chpasswd   # ONE password everywhere (rob 2026-07-30)
 echo 'hamsci ALL=(ALL) NOPASSWD:ALL' | sudo tee /etc/sudoers.d/hamsci >/dev/null
 sudo chmod 440 /etc/sudoers.d/hamsci
+# top(1): show P (last-used CPU) beside %CPU.  Stock top omits it, and on
+# this fleet radiod owns one hyperthread sibling pair while the decoders
+# take the rest, so "is this process on the core it should be on?" gets
+# asked constantly.  Per-account because top reads it from $HOME, and
+# ~/.config/procps/toprc is the path modern top prefers over ~/.toprc.
+# Never over an existing file: a hand-tuned config is someone's work.
+if [ -f "$HOME/toprc" ]; then
+    for _h in /home/hamsci /home/sigmond /root; do
+        [ -d "$_h" ] || continue
+        [ -f "$_h/.config/procps/toprc" ] && continue
+        sudo mkdir -p "$_h/.config/procps"
+        sudo cp "$HOME/toprc" "$_h/.config/procps/toprc"
+        sudo chmod 644 "$_h/.config/procps/toprc"
+        _o=$(basename "$_h"); [ "$_o" = root ] || sudo chown -R "$_o:$_o" "$_h/.config" 2>/dev/null
+        echo "### toprc installed for $_o"
+    done
+else
+    echo "### NOTE: no toprc staged — top keeps its stock columns"
+fi
 sudo mkdir -p /home/hamsci/.ssh
 # Operator keys arrive as $HOME/operator-keys (merged from operators/*.pub by
 # build-golden-vm.sh).  $HOME/rob.pub is the legacy name from when the set was

@@ -140,6 +140,9 @@ fi
 $SCP provision.sh provision-components.sh build@127.0.0.1:
 [ -n "$OPKEY" ] && $SCP "$OPKEY" build@127.0.0.1:operator-keys
 $SCP wisdomf-ryzen5825u build@127.0.0.1:wisdomf
+# top(1) config showing P (last-used CPU) beside %CPU — baked into the
+# golden VM so every operator account has it without a per-station step.
+[ -f "$PWD/operator/toprc" ] && $SCP "$PWD/operator/toprc" build@127.0.0.1:toprc
 # radiod's own channel-filter plans — a DIFFERENT file from wisdomf, which
 # is planned non-threaded and which radiod's threaded plans never match.
 # Without this, radiod silently runs FFTW_ESTIMATE plans (see

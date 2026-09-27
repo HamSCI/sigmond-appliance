@@ -619,6 +619,22 @@ if ! grep -Eq '^[[:space:]]*set(-option)?[[:space:]]+(-g[[:space:]]+)?mouse[[:sp
     && say "host: tmux mouse support enabled for root" \
     || say "host: could not write /root/.tmux.conf (tmux mouse stays off)"
 fi
+# top's CPU column for the host's root shell.  Stock top omits P (last-used
+# CPU) entirely, and on this fleet that is not cosmetic: radiod is pinned to
+# one hyperthread sibling pair and the decoders to the remaining cores, so
+# "is this process on the core it is supposed to be on?" gets asked
+# constantly — chasing affinity, checking a taskset took, working out why a
+# box is loaded.  Without P the answer needs a separate `ps -o psr` each time.
+#
+# ~/.config/procps/toprc is the path modern top prefers (~/.toprc is legacy).
+# NEVER overwrite an existing file — a hand-tuned config is someone's work —
+# and never fail the boot over a column layout.
+if [ -f "$APP/toprc" ] && [ ! -f /root/.config/procps/toprc ]; then
+  mkdir -p /root/.config/procps 2>/dev/null \
+    && install -m 644 "$APP/toprc" /root/.config/procps/toprc 2>/dev/null \
+    && say "host: top shows the CPU column for root" \
+    || say "host: could not install toprc (top keeps its defaults)"
+fi
 # optional site-keys tarball: a returning station's registered upload/PSWS
 # keys, dropped by the operator onto the stick's FAT (EFI) volume after
 # burning (writable from Mac/Windows). Staged here; the wizard restores it

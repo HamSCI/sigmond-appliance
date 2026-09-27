@@ -437,6 +437,19 @@ WSEED=""
 # exists.  Shipped because the first McMurdo station will be the fleet's first
 # IPv6-only site and we would otherwise be guessing its topology from here.
 [ -f sigmond-net-probe ] && cp sigmond-net-probe /tmp/sigpay.$$/
+# top(1) config that shows P — the last-used CPU — beside %CPU.  Stock top
+# omits it, and on a fleet where radiod owns one hyperthread sibling pair and
+# the decoders the remaining cores, "is this process on the core it is
+# supposed to be on?" is a constant question; without P it costs a separate
+# `ps -o psr` every time.  firstboot installs it for the host's root, and
+# never over an existing file.
+if [ -f "$RIG_ROOT/v3/operator/toprc" ]; then
+    cp "$RIG_ROOT/v3/operator/toprc" /tmp/sigpay.$$/toprc
+elif [ -f "$REPO/operator/toprc" ]; then
+    cp "$REPO/operator/toprc" /tmp/sigpay.$$/toprc
+else
+    say "WARN: operator/toprc not found — top keeps its stock columns"
+fi
 echo "$VERSION sigmond@$SIGREV built $(date -Iseconds)" > /tmp/sigpay.$$/VERSION
 # component pin manifest (host copy, no image_sha256 -- see above); named
 # without the versioned/timestamped prefix so firstboot never has to know
