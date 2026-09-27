@@ -11,7 +11,13 @@ reporting `succeeded` against one identical 347-plan file.
 
     generated   2026-09-27
     host        W3USR-06 decoder VM (DASI-006, Scranton penthouse)
-    CPU         AMD Ryzen 7 5825U, 14 vCPU, L3 16 MiB (1 instance, unpartitioned)
+    CPU         AMD Ryzen 7 5825U, 14 vCPU
+    L3 budget   10 MiB EXCLUSIVE — the host's resctrl `radiod` CLOS
+                (mask 0x3ff, 10 of 16 ways) on physical CPUs 12-13;
+                everything else shares the other 6 MiB (mask 0xfc00).
+                Verified on W3USR-06-PM, and verified that guest vCPU
+                12/13 map 1:1 to physical 12/13, so the planner really
+                ran inside that slice.
     RAM         9 GB   — production decoder-VM geometry, matching AC0G-B4
     FFTW        3.3.10-sse2-avx
     rigor       FFTW_PATIENT
@@ -27,12 +33,34 @@ and no rigor — and it was NOT a superset: 57 plans existed only in the
 
 ## ⚠ What it is optimised FOR
 
-Planned on an **idle** machine, so the plans assume near-exclusive use of
-the 16 MiB L3. In production radiod shares that cache with the decoders, and
-the best plan under contention may not be the best plan on a quiet box. This
-was a deliberate choice (rob, 2026-09-27) — production *geometry*, idle
-*machine* — not an oversight. Re-planning under representative load is a
-legitimate future experiment.
+Planned on an **idle** machine, inside the **10 MiB exclusive** L3 slice
+that `sigmond-host-resctrl.sh` gives radiod's cores (`RADIOD_L3_FRACTION`
+defaults to 0.62, which on a 16-way L3 rounds to 10 ways). That slice is
+exclusive by design — the `radiod` and `others` masks do not overlap — so
+decoder activity on the worker cores cannot evict radiod's FFT working set,
+and the cache budget the planner measured against is the one production
+actually gives it.
+
+⛔ **VERIFY THE PARTITION BEFORE PLANNING, AND VERIFY IT ON THE HOST.**
+resctrl is a host-side control that follows the PHYSICAL cpu; a guest cannot
+see it and `lscpu` in the guest will always report the full 16 MiB. Checking
+`/sys/fs/resctrl` inside the VM finds nothing and proves nothing — that
+mistake was made on 2026-09-27 and briefly cast doubt on this whole file.
+The checks that actually settle it, on the PM:
+
+    cat /sys/fs/resctrl/radiod/schemata   # expect L3:0=3ff
+    cat /sys/fs/resctrl/radiod/cpus_list  # expect 12-13
+    # and that the guest's vCPUs map 1:1 onto those physical cores:
+    P=$(cat /run/qemu-server/100.pid)
+    for t in $(ps -T -p $P -o spid=,comm= | awk '/CPU 1[23]\/KVM/{print $1}'); do
+        echo -n "$(cat /proc/$t/comm) -> host "; taskset -pc $t | sed 's/.*list: //'
+    done
+
+What remains genuinely open is *load*, not cache size: planning ran with the
+station stopped, so the plans assume radiod has its slice to itself and the
+memory system is quiet. That was a deliberate choice (rob, 2026-09-27) —
+production geometry, idle machine — and re-planning under representative
+load is a legitimate future experiment.
 
 On a CPU with a different cache size FFTW ignores non-matching wisdom and
 falls back to runtime planning, so a wrong-silicon file costs nothing but
