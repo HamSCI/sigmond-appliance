@@ -282,8 +282,56 @@ if [ -z "$LIVE" ]; then
     say "the only port with a link ($LIVE_ENSLAVED) is already vmbr0's — not a cabling fault"
     say "retrying DHCP on vmbr0 itself before giving up"
     timeout 30 dhclient -1 -v vmbr0 >>"$LOG" 2>&1
-    if [ -n "$(cur_ip vmbr0)" ]; then
-        say "vmbr0 now has $(cur_ip vmbr0) — nothing further to do"
+    # ⛔ "has an address" is NOT "is fine".  cur_ip() happily returns the PVE
+    # installer's fossilised 192.168.100.2, which this function has ALREADY
+    # condemned as unroutable a few lines above.  Accepting it here declared
+    # success, exited, and skipped the IPv6 probe entirely -- so on a v6-only
+    # LAN the station sat on an unroutable IPv4 address forever while a perfectly
+    # good RA went unanswered.  Measured in the nested v6-only test,
+    # 2026-09-28: "vmbr0 now has 192.168.100.2 — nothing further to do".
+    _got="$(cur_ip vmbr0)"
+    case "$_got" in
+        ""|192.168.100.*) _got="" ;;
+    esac
+    if [ -n "$_got" ]; then
+        say "vmbr0 now has $_got — nothing further to do"
+        exit 0
+    fi
+    # No usable IPv4.  Before declaring the port dead, ask the OTHER family:
+    # a v6-only site answers no DHCP and still works perfectly.
+    say "no usable IPv4 on vmbr0 — trying IPv6 (SLAAC, then DHCPv6)"
+    # A Proxmox host forwards for the decoder VM, and Linux IGNORES router
+    # advertisements on a forwarding interface unless accept_ra is 2.
+    sysctl -qw net.ipv6.conf.vmbr0.accept_ra=2 2>/dev/null
+    sysctl -qw net.ipv6.conf.vmbr0.accept_ra_defrtr=1 2>/dev/null
+    sysctl -qw net.ipv6.conf.vmbr0.disable_ipv6=0 2>/dev/null
+    ip link set vmbr0 up 2>/dev/null
+    _got6=""
+    for _r in $(seq 1 "${SIGMOND_RA_WAIT:-12}"); do
+        _got6=$(ip -6 -o addr show vmbr0 scope global 2>/dev/null \
+                | grep -v -e temporary -e deprecated | awk '{print $4; exit}')
+        [ -n "$_got6" ] && break
+        sleep 2
+    done
+    if [ -z "$_got6" ] && command -v dhclient >/dev/null 2>&1; then
+        say "no router advertisement — trying DHCPv6"
+        timeout 25 dhclient -6 -1 -v vmbr0 >>"$LOG" 2>&1
+        _got6=$(ip -6 -o addr show vmbr0 scope global 2>/dev/null \
+                | grep -v -e temporary -e deprecated | awk '{print $4; exit}')
+    fi
+    if [ -n "$_got6" ]; then
+        # Drop the fossil: leaving an unroutable IPv4 on the bridge makes every
+        # later "do we have IPv4?" test lie, and sigmond-v6-gateway keys off
+        # exactly that question.
+        ip addr del 192.168.100.2/24 dev vmbr0 2>/dev/null \
+            && say "removed the unroutable installer fallback 192.168.100.2"
+        sed -i -e '/^iface vmbr0 inet static/,/^[[:space:]]*$/{/^[[:space:]]*address[[:space:]]/d;/^[[:space:]]*gateway[[:space:]]/d;}' \
+            /etc/network/interfaces 2>/dev/null
+        if ! grep -q '^iface vmbr0 inet6' /etc/network/interfaces 2>/dev/null; then
+            printf 'iface vmbr0 inet6 auto\n\tpost-up sysctl -qw net.ipv6.conf.vmbr0.accept_ra=2 || true\n\tpost-up sysctl -qw net.ipv6.conf.all.forwarding=1 || true\n' \
+                >> /etc/network/interfaces
+        fi
+        say "vmbr0 is IPv6-only at $_got6 — this site has no IPv4, and that is fine"
         exit 0
     fi
     net_dead "NETWORK PORT IS CONNECTED, BUT NOTHING ANSWERED" \
