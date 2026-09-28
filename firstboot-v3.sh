@@ -677,6 +677,18 @@ exec 9>/run/sigmond-import.lock; flock -n 9 || exit 0
 LOG=/var/log/sigmond-firstboot.log
 VERSION="$(cat /etc/sigmond-appliance/version 2>/dev/null || echo v3)"
 VTAG="${VERSION//./-}"
+# ⛔ AND EVERYTHING ELSE THAT IS NOT [A-Za-z0-9-].  VTAG becomes a VM name, and
+# `qm create --name` requires a valid DNS label: a `--dev` build stamps
+# v0.0-dev+<sha>, and the surviving `+` makes qm refuse with
+#     400 Parameter verification failed.
+#     name: invalid format - value does not look like a valid DNS name
+# so the host installs perfectly and then has NO DECODER VM.  build-usb-v3.sh
+# already carries this second line -- and a comment about the identical `+`
+# breaking prepare-iso -- but the copy here never got it, which made --dev
+# builds (the mode for exercising the pipeline without minting a release)
+# unable to complete.  Four nested runs failed on this before the import path
+# was made to report what qm actually said.
+VTAG="${VTAG//[^A-Za-z0-9-]/-}"
 VMID="${SIGMOND_VMID:-100}"; TPL_NAME="sigmond-decoder-template-v3.qcow2"
 APP=/root/sigmond-appliance
 say(){ local m="[sigmond $(date '+%T')] $*"; echo "$m" >>"$LOG" 2>/dev/null
