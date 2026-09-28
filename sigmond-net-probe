@@ -22,8 +22,25 @@
 # Usage: sigmond-net-probe [--json]
 set -u
 JSON=0; [ "${1:-}" = "--json" ] && JSON=1
+# Pick the interface that actually carries the station's connectivity.
+#
+# ⛔ `ip route show default` is IPv4-ONLY.  On an IPv6-only LAN it returns
+# nothing, and the old fallback -- "first link that is up" -- picks the bridge
+# MEMBER on a Proxmox host (enp2s0), which by design never holds an address.
+# The probe then reported "NO global address in either family. The station is
+# unreachable." about a station that was reaching github.com through NAT64 at
+# that moment (AI6VN-PM on the v6-only bench, 2026-09-28).  A probe that
+# declares a working station dead is worse than no probe.
+#
+# Ask each family for its default route, then fall back to whatever holds a
+# global address, and only then to a link that is merely up.
+_dev_of_route() {   # read a route line, print the word after "dev"
+    awk '{for(i=1;i<=NF;i++) if($i=="dev"){print $(i+1); exit}}'
+}
 DEV="${SIGMOND_NET_DEV:-}"
-[ -n "$DEV" ] || DEV=$(ip route show default 2>/dev/null | awk '{print $5; exit}')
+[ -n "$DEV" ] || DEV=$(ip -4 route show default 2>/dev/null | head -1 | _dev_of_route)
+[ -n "$DEV" ] || DEV=$(ip -6 route show default 2>/dev/null | head -1 | _dev_of_route)
+[ -n "$DEV" ] || DEV=$(ip -o addr show scope global 2>/dev/null | awk '$2!="lo"{print $2; exit}')
 [ -n "$DEV" ] || DEV=$(ip -o link show up 2>/dev/null | awk -F': ' '$2!="lo"{print $2; exit}')
 
 v4_addrs=$(ip -4 -o addr show ${DEV:+dev "$DEV"} scope global 2>/dev/null | awk '{print $4}' | paste -sd, -)
@@ -79,14 +96,24 @@ for _s in $_ns; do case "$_s" in *:*) DNS6="$DNS6 $_s";; *.*) DNS4="$DNS4 $_s";;
 # ── reachability, per family, without assuming either works ────────────────
 # A ping that fails proves nothing on its own (ICMP is filtered in plenty of
 # places), so we test a TCP connect to a service the station actually needs.
-probe_tcp(){ # host port family_flag label
-    local h="$1" p="$2" f="$3"
-    if command -v nc >/dev/null 2>&1; then
-        nc $f -z -w 4 "$h" "$p" >/dev/null 2>&1 && echo ok || echo fail
-    else
-        timeout 5 bash -c "exec 3<>/dev/$( [ "$f" = "-6" ] && echo tcp || echo tcp )/$h/$p" 2>/dev/null \
-            && echo ok || echo fail
-    fi
+probe_tcp(){ # host port family_flag -> ok | fail | n/a
+    # ⛔ DO NOT USE `nc $f`.  Debian's default netcat-traditional (v1.10) has no
+    # -6 flag: it exits non-zero on the unknown option, which this read as
+    # "unreachable".  On the v6-only bench it reported github.com:443 as failing
+    # while /dev/tcp reached it on the same host, same second (2026-09-28).
+    # Only netcat-openbsd understands -4/-6, and nothing guarantees which one is
+    # installed.
+    #
+    # Resolve in the requested family ourselves, then connect to the literal.
+    # That tests the family honestly and needs no external tool -- and "the name
+    # has no address in this family" is a real third answer, not a failure.
+    local h="$1" p="$2" f="$3" lit=""
+    case "$f" in
+        -6) lit=$(getent ahostsv6 "$h" 2>/dev/null | awk '{print $1; exit}') ;;
+        -4) lit=$(getent ahostsv4 "$h" 2>/dev/null | awk '{print $1; exit}') ;;
+    esac
+    [ -n "$lit" ] || { echo "n/a"; return; }
+    timeout 5 bash -c "exec 3<>/dev/tcp/${lit}/${p}" 2>/dev/null && echo ok || echo fail
 }
 HB_HOST="${SIGMOND_HB_HOST:-wd30.wsprdaemon.org}"
 # The collector answers on the operator's forwarded port, not 22.  Probing 22
