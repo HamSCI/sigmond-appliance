@@ -437,6 +437,22 @@ WSEED=""
 # exists.  Shipped because the first McMurdo station will be the fleet's first
 # IPv6-only site and we would otherwise be guessing its topology from here.
 [ -f sigmond-net-probe ] && cp sigmond-net-probe /tmp/sigpay.$$/
+# Offline .deb payload.  A greenfield IPv6-only install cannot use apt: reaching
+# the IPv4 mirrors needs the CLAT, the CLAT is clatd, and installing clatd needs
+# apt.  A host with no Ethernet has the same problem with wpasupplicant.  So the
+# packages ride on the stick and firstboot applies them with dpkg before any
+# network is expected to work.  ~4 MB.  See offline-debs/README.md.
+_DEBSRC=""
+[ -d "$RIG_ROOT/v3/offline-debs" ] && _DEBSRC="$RIG_ROOT/v3/offline-debs"
+[ -z "$_DEBSRC" ] && [ -d "$REPO/offline-debs" ] && _DEBSRC="$REPO/offline-debs"
+if [ -n "$_DEBSRC" ] && ls "$_DEBSRC"/*.deb >/dev/null 2>&1; then
+    mkdir -p /tmp/sigpay.$$/offline-debs
+    cp "$_DEBSRC"/*.deb /tmp/sigpay.$$/offline-debs/
+    say "offline-debs: $(ls /tmp/sigpay.$$/offline-debs/*.deb | wc -l) package(s), $(du -sh /tmp/sigpay.$$/offline-debs | cut -f1)"
+else
+    # Not fatal on an IPv4 site, fatal on the one this exists for.  Say so loudly.
+    say "WARN: NO offline-debs on the stick — a greenfield IPv6-only or Wi-Fi-only install WILL FAIL"
+fi
 # top(1) config that shows P — the last-used CPU — beside %CPU.  Stock top
 # omits it, and on a fleet where radiod owns one hyperthread sibling pair and
 # the decoders the remaining cores, "is this process on the core it is

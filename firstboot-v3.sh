@@ -659,6 +659,36 @@ cp /mnt/sig-media/sigmond-site-timing "$APP"/ 2>/dev/null
 cp /mnt/sig-media/sigmond-operator.sh "$APP"/ 2>/dev/null
 cp /mnt/sig-media/sigmond-location-check "$APP"/ 2>/dev/null
 cp /mnt/sig-media/sigmond-net-probe "$APP"/ 2>/dev/null
+# ─── offline packages, BEFORE anything expects a network ─────────────────────
+# A greenfield IPv6-only site cannot use apt at all: reaching the IPv4 mirrors
+# needs the CLAT, the CLAT is clatd, and installing clatd needs apt.  A host
+# with no Ethernet has the same loop with wpasupplicant.  These ride on the
+# stick for exactly that reason, so apply them now -- before netfix, before the
+# v6 gateway, before the wizard offers Wi-Fi.
+#
+# dpkg -i, not apt: apt would try to reach a mirror.  Order is not known, so
+# run the whole set twice -- the second pass satisfies dependencies the first
+# pass installed.  Already-installed packages are skipped, so this is a no-op
+# on a station that has them.
+if [ -d /mnt/sig-media/offline-debs ] && ls /mnt/sig-media/offline-debs/*.deb >/dev/null 2>&1; then
+    mkdir -p "$APP"/offline-debs
+    cp /mnt/sig-media/offline-debs/*.deb "$APP"/offline-debs/ 2>/dev/null
+    _nd=$(ls "$APP"/offline-debs/*.deb 2>/dev/null | wc -l)
+    DEBIAN_FRONTEND=noninteractive dpkg -i "$APP"/offline-debs/*.deb >>"$LOG" 2>&1 || true
+    DEBIAN_FRONTEND=noninteractive dpkg -i "$APP"/offline-debs/*.deb >>"$LOG" 2>&1 || true
+    _missing=""
+    for _b in clatd tayga dnsmasq rdisc6 wpa_supplicant iw; do
+        command -v "$_b" >/dev/null 2>&1 || _missing="$_missing $_b"
+    done
+    if [ -z "$_missing" ]; then
+        say "offline packages: $_nd .deb applied — clatd, tayga, dnsmasq, rdisc6, wpa_supplicant, iw all present"
+    else
+        say "⚠ offline packages: applied $_nd .deb but still missing:$_missing"
+        say "  an IPv6-only or Wi-Fi-only site will NOT come up; see $LOG"
+    fi
+else
+    say "⚠ no offline-debs on the media — IPv6-only and Wi-Fi-only installs cannot work"
+fi
 if [ -f "$APP"/sigmond-net-probe ]; then
     chmod +x "$APP"/sigmond-net-probe 2>/dev/null
     ln -sf "$APP"/sigmond-net-probe /usr/local/sbin/sigmond-net-probe 2>/dev/null

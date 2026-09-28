@@ -38,7 +38,16 @@ echo "sync-rig: $SRC ($(git -C "$SRC" rev-parse --short HEAD)) -> $DST"
 # forgotten here; forgetting one is exactly how rob.pub diverged.
 CHANGED=0
 while IFS= read -r rel; do
-    case "$rel" in */*) [ "${rel%%/*}" = "operators" ] || continue ;; esac
+    # Subdirectories are opt-in, because most of the repo (docs/, tests/) has no
+    # business on the rig.  ⚠ A new build-input DIRECTORY must be added here --
+    # the git-derived list protects against forgetting a new FILE, not a new
+    # directory, and offline-debs/ would otherwise have been silently skipped.
+    case "$rel" in
+        */*) case "${rel%%/*}" in
+                 operators|offline-debs) ;;
+                 *) continue ;;
+             esac ;;
+    esac
     s="$SRC/$rel"; d="$DST/$rel"
     [ -f "$s" ] || continue
     if [ -f "$d" ] && cmp -s "$s" "$d"; then continue; fi

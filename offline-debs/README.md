@@ -1,0 +1,40 @@
+# offline-debs — packages the media must carry
+
+A greenfield **IPv6-only** install cannot use apt. The chicken-and-egg is exact:
+
+- reaching the IPv4 package mirrors needs the CLAT,
+- the CLAT is `clatd`,
+- installing `clatd` needs apt.
+
+Likewise a host with **no Ethernet** cannot install `wpasupplicant` to bring up
+the Wi-Fi it would need to reach apt.
+
+So these ship on the install media and are applied with `dpkg -i` before any
+network is expected to work. 4 MB total — cheap insurance.
+
+| package | why |
+|---|---|
+| `clatd` + `tayga` | 464XLAT: gives the host an IPv4 default route over a translating tun, so IPv4 *literals* work — which plain NAT64+DNS64 does not provide |
+| `dnsmasq`, `dnsmasq-base` | the decoder VM is IPv4-only and cannot reach the site's IPv6 resolver; the PM serves it DNS over IPv4 |
+| `ndisc6` | `rdisc6`, to read RDNSS out of a Router Advertisement. Nothing on Proxmox consumes RDNSS, so without this a v6-only station has **no resolver at all** |
+| `rdnssd` | the daemon form of the same, for ongoing RA changes |
+| `wpasupplicant`, `iw` | Wi-Fi association and scanning. **Neither is in stock PVE** |
+| the rest | dependency closure of the above that stock PVE lacks |
+
+## Refreshing
+
+Computed against a real PVE host, not guessed:
+
+```bash
+WANT="clatd tayga dnsmasq dnsmasq-base rdnssd ndisc6 wpasupplicant iw"
+apt-cache depends --recurse --no-recommends --no-suggests --no-conflicts \
+    --no-breaks --no-replaces --no-enhances $WANT | grep '^[a-z0-9]' | sort -u
+# keep the ones a stock PVE does not already have, then:
+apt-get download <that list>
+```
+
+Over-collecting is safe: `dpkg -i` skips what is already installed. Under-collecting
+is not — it fails on the one station that cannot reach a mirror to recover.
+
+⚠ These pin to the Debian 13 / PVE 9 versions current at build time. Refresh them
+when the base moves, or `dpkg -i` will fail on a libc mismatch.
