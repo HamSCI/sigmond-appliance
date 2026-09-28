@@ -152,6 +152,14 @@ net_dead(){
 "##     It refuses to keep an address whose gateway does not answer, so" \
 "##     it cannot strand you the way the installer default did." \
 "##" \
+"##  3) Or join Wi-Fi — this host has a radio and the tools are already" \
+"##     installed, so no network is needed to get onto a network:" \
+"##        sigmond-wifi scan" \
+"##        echo -n '''your-passphrase''' | sigmond-wifi join YourAP" \
+"##     On a DASI station Wi-Fi is often the BETTER link: an Ethernet" \
+"##     cable entering the shack is a conducted noise path into the HF" \
+"##     receiver. It handles an IPv6-only access point too." \
+"##" \
 "##  Current state is recorded in" \
 "##     /etc/sigmond-appliance/.network-unreachable" \
 "########################################################################" \
@@ -659,6 +667,9 @@ cp /mnt/sig-media/sigmond-site-timing "$APP"/ 2>/dev/null
 cp /mnt/sig-media/sigmond-operator.sh "$APP"/ 2>/dev/null
 cp /mnt/sig-media/sigmond-location-check "$APP"/ 2>/dev/null
 cp /mnt/sig-media/sigmond-net-probe "$APP"/ 2>/dev/null
+if [ -f /mnt/sig-media/sigmond-wifi ]; then
+    install -m 755 /mnt/sig-media/sigmond-wifi /usr/local/sbin/sigmond-wifi
+fi
 # ─── offline packages, BEFORE anything expects a network ─────────────────────
 # A greenfield IPv6-only site cannot use apt at all: reaching the IPv4 mirrors
 # needs the CLAT, the CLAT is clatd, and installing clatd needs apt.  A host

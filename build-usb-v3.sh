@@ -437,6 +437,10 @@ WSEED=""
 # exists.  Shipped because the first McMurdo station will be the fleet's first
 # IPv6-only site and we would otherwise be guessing its topology from here.
 [ -f sigmond-net-probe ] && cp sigmond-net-probe /tmp/sigpay.$$/
+# Wi-Fi bring-up.  A DASI station SHOULD be able to run without an Ethernet
+# cable: the cable is a conducted noise path into an HF receiver.  Ships on
+# the stick because a host with no Ethernet cannot fetch it.
+[ -f sigmond-wifi ] && cp sigmond-wifi /tmp/sigpay.$$/
 # Offline .deb payload.  A greenfield IPv6-only install cannot use apt: reaching
 # the IPv4 mirrors needs the CLAT, the CLAT is clatd, and installing clatd needs
 # apt.  A host with no Ethernet has the same problem with wpasupplicant.  So the

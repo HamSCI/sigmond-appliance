@@ -1,0 +1,226 @@
+#!/bin/bash
+# sigmond-wifi — scan for, join and persist a Wi-Fi link on a sigmond PM.
+#
+#   sigmond-wifi scan              list access points, strongest first
+#   sigmond-wifi join <ssid>       passphrase on stdin; associate, address, persist
+#   sigmond-wifi status
+#   sigmond-wifi forget            drop the association and its persistence
+#
+# WHY A DEDICATED TOOL
+# On a DASI station Wi-Fi is not a convenience.  An Ethernet cable entering the
+# shack is a conducted noise path into an HF receiver: 1000BASE-T signals at a
+# 125 MHz symbol rate, and unshielded twisted pair carries the PHY's switching
+# noise in as common-mode current on what is electrically an antenna.  Wi-Fi at
+# 2.4/5 GHz is nowhere near the passband.  So a station SHOULD be able to run
+# without a cable -- and a host with no Ethernet cannot install wpasupplicant to
+# get there, which is why the packages ship on the install media.
+#
+# IPv6-ONLY ACCESS POINTS ARE EXPECTED.  A site that is IPv6-only on the wire is
+# IPv6-only on the air.  After associating this asks for an address in BOTH
+# families and reports what it actually got, rather than assuming DHCPv4.
+#
+# ⛔ accept_ra=2 is not optional here: a Proxmox host forwards (it routes for
+# the decoder VM), and Linux IGNORES Router Advertisements on a forwarding
+# interface at the default accept_ra=1.  SLAAC silently does nothing without it.
+set -u
+export PATH=$PATH:/usr/sbin:/sbin
+
+TAG=sigmond-wifi
+CONF_DIR=/etc/wpa_supplicant
+STATE_DIR=/var/lib/sigmond
+WARN_DBM="${SIGMOND_WIFI_WARN_DBM:--70}"
+
+say(){ printf '%s\n' "$*"; }
+log(){ logger -t "$TAG" -- "$*" 2>/dev/null || true; }
+
+need_root(){ [ "$(id -u)" = 0 ] || { say "must run as root"; exit 1; }; }
+
+# ── find the radio ───────────────────────────────────────────────────────────
+wifi_dev(){
+    [ -n "${SIGMOND_WIFI_DEV:-}" ] && { printf '%s\n' "$SIGMOND_WIFI_DEV"; return; }
+    local d
+    for d in /sys/class/net/*/wireless; do
+        [ -e "$d" ] || continue
+        basename "$(dirname "$d")"
+        return
+    done
+}
+
+# ── scan ─────────────────────────────────────────────────────────────────────
+# The radio comes up DOWN with NO-CARRIER; scanning before `ip link set up`
+# returns nothing, which looks exactly like "there are no networks here".
+scan_raw(){
+    local dev="$1"
+    ip link set "$dev" up 2>/dev/null
+    sleep 1
+    iw dev "$dev" scan 2>/dev/null
+}
+
+cmd_scan(){
+    local dev; dev=$(wifi_dev)
+    [ -n "$dev" ] || { say "no wireless interface on this host"; return 1; }
+    say "scanning on $dev ..."
+    # ⛔ Fields arrive in the order iw prints them and SSID comes BEFORE RSN:
+    # recording a network the moment its SSID appears captures the security of
+    # the PREVIOUS block, so everything reads "open".  Accumulate per BSS and
+    # flush on the NEXT BSS header (and at END), when the block is complete.
+    scan_raw "$dev" | awk -v warn="$WARN_DBM" '
+        function flush(   band, key) {
+            if (ssid == "") return
+            band = (freq+0 > 5000) ? "5GHz" : "2.4GHz"
+            key = ssid "|" band
+            if (!(key in best) || sig > best[key]) { best[key] = sig; secn[key] = sec }
+        }
+        /^BSS/       { flush(); ssid=""; sig=-999; freq=0; sec="open"; next }
+        /freq:/      { freq=$2+0 }
+        /signal:/    { sig=$2+0 }
+        /SSID:/      { ssid=substr($0, index($0,$2)) }
+        /RSN:/       { if (sec=="open" || sec=="WPA") sec="WPA2" }
+        /WPA:/       { if (sec=="open") sec="WPA" }
+        /SAE/        { sec="WPA3" }
+        END { flush(); for (k in best) printf "%d\t%s\t%s\n", best[k], k, secn[k] }
+    ' | sort -rn | while IFS=$'\t' read -r sig key sec; do
+        name="${key%|*}"; band="${key##*|}"
+        flag=""
+        [ "$sig" -lt "$WARN_DBM" ] && flag="  ⚠ weak — a cable may be more reliable"
+        printf '  %-28s %-7s %5s dBm  %-5s%s\n' "$name" "$band" "$sig" "$sec" "$flag"
+    done
+    say ""
+    say "  ⚠ below ${WARN_DBM} dBm the link is marginal. On a DASI station that is"
+    say "    still often the right trade: an Ethernet cable is a noise path into"
+    say "    the receiver. Weigh reliability against your noise floor."
+}
+
+# ── join ─────────────────────────────────────────────────────────────────────
+cmd_join(){
+    need_root
+    local ssid="${1:-}"
+    [ -n "$ssid" ] || { say "usage: sigmond-wifi join <ssid>   (passphrase on stdin)"; return 2; }
+    local dev; dev=$(wifi_dev)
+    [ -n "$dev" ] || { say "no wireless interface on this host"; return 1; }
+    command -v wpa_supplicant >/dev/null 2>&1 || { say "wpa_supplicant missing — the offline-debs payload did not apply"; return 1; }
+
+    local pass; pass=$(cat)
+    [ -n "$pass" ] || { say "no passphrase on stdin"; return 2; }
+
+    mkdir -p "$CONF_DIR" "$STATE_DIR"
+    local conf="$CONF_DIR/wpa_supplicant-${dev}.conf"
+    umask 077
+    { printf 'ctrl_interface=/run/wpa_supplicant\nupdate_config=1\n'
+      printf '%s' "$pass" | wpa_passphrase "$ssid" 2>/dev/null | grep -v '^[[:space:]]*#psk='
+    } > "$conf"
+    chmod 600 "$conf"
+
+    pkill -f "wpa_supplicant.*${dev}" 2>/dev/null; sleep 1
+    systemctl stop "wpa_supplicant@${dev}.service" 2>/dev/null
+    ip link set "$dev" up
+    systemctl enable "wpa_supplicant@${dev}.service" >/dev/null 2>&1
+    systemctl restart "wpa_supplicant@${dev}.service" >/dev/null 2>&1
+
+    # ⛔ Distinguish the two failures.  A wrong passphrase leaves wpa_state at
+    # SCANNING, which is indistinguishable from "that network is not here" --
+    # and the journal says nothing useful.  The honest signal is list_networks
+    # reporting the network TEMP-DISABLED after a failed 4-way handshake.
+    local st="" i
+    for i in $(seq 1 20); do
+        st=$(wpa_cli -i "$dev" status 2>/dev/null | sed -n 's/^wpa_state=//p')
+        [ "$st" = "COMPLETED" ] && break
+        case "$(wpa_cli -i "$dev" list_networks 2>/dev/null | tail -1)" in
+            *TEMP-DISABLED*) say "FAILED: the access point rejected that passphrase."
+                             say "  (the network is there; the key is wrong)"
+                             log "join $ssid: bad passphrase"
+                             return 1 ;;
+        esac
+        sleep 2
+    done
+    if [ "$st" != "COMPLETED" ]; then
+        if scan_raw "$dev" | grep -qF "SSID: $ssid"; then
+            say "FAILED: '$ssid' is in range but would not associate (state=$st)."
+        else
+            say "FAILED: '$ssid' was not found in a scan. Check the name, and note"
+            say "  that a 5 GHz-only network is invisible when the regulatory domain"
+            say "  is unset (iw reg get -> country 00)."
+        fi
+        log "join $ssid: no association (state=$st)"
+        return 1
+    fi
+    say "associated with $ssid ($(wpa_cli -i "$dev" status | sed -n 's/^freq=//p') MHz)"
+
+    # ── address, BOTH families ───────────────────────────────────────────────
+    # Start clean.  Joining a network while a previous address is still on the
+    # interface leaves TWO addresses and makes "what did I get?" ambiguous --
+    # observed on AI6VN-PM, where a hand-set static survived the join and was
+    # reported instead of the DHCP lease.
+    ip addr flush dev "$dev" 2>/dev/null
+    # An IPv6-only AP is expected, so do not assume DHCPv4.
+    sysctl -qw "net.ipv6.conf.${dev}.accept_ra=2" 2>/dev/null
+    sysctl -qw "net.ipv6.conf.${dev}.accept_ra_defrtr=1" 2>/dev/null
+    sysctl -qw "net.ipv6.conf.${dev}.disable_ipv6=0" 2>/dev/null
+
+    local got4="" got6=""
+    if command -v dhclient >/dev/null 2>&1; then
+        timeout 25 dhclient -1 "$dev" >/dev/null 2>&1
+        got4=$(ip -4 -o addr show dev "$dev" scope global 2>/dev/null | awk '{print $4; exit}')
+    fi
+    for i in $(seq 1 "${SIGMOND_RA_WAIT:-12}"); do
+        got6=$(ip -6 -o addr show dev "$dev" scope global 2>/dev/null \
+               | grep -v -e temporary -e deprecated | awk '{print $4; exit}')
+        [ -n "$got6" ] && break
+        sleep 2
+    done
+    if [ -z "$got6" ] && command -v dhclient >/dev/null 2>&1; then
+        timeout 25 dhclient -6 -1 "$dev" >/dev/null 2>&1
+        got6=$(ip -6 -o addr show dev "$dev" scope global 2>/dev/null \
+               | grep -v -e temporary -e deprecated | awk '{print $4; exit}')
+    fi
+
+    printf '%s\n' "$ssid" > "$STATE_DIR/wifi-ssid"
+    say "  IPv4: ${got4:-none}"
+    say "  IPv6: ${got6:-none}"
+    if [ -z "$got4" ] && [ -z "$got6" ]; then
+        say "  ⚠ associated but NO address in either family — the AP gave us nothing."
+        log "join $ssid: associated, no address"
+        return 1
+    fi
+    if [ -z "$got4" ] && [ -n "$got6" ]; then
+        say "  this is an IPv6-only access point."
+        if [ -x /usr/local/sbin/sigmond-v6-gateway ]; then
+            say "  running sigmond-v6-gateway on $dev (resolver, CLAT, VM DNS)"
+            SIGMOND_V6_DEV="$dev" /usr/local/sbin/sigmond-v6-gateway 2>&1 | sed 's/^/    /'
+        else
+            say "  ⚠ sigmond-v6-gateway missing — this host will have no resolver and no CLAT"
+        fi
+    fi
+    log "join $ssid: ok (v4=${got4:-none} v6=${got6:-none})"
+}
+
+cmd_status(){
+    local dev; dev=$(wifi_dev)
+    [ -n "$dev" ] || { say "no wireless interface on this host"; return 1; }
+    say "interface   $dev"
+    say "ssid        $(wpa_cli -i "$dev" status 2>/dev/null | sed -n 's/^ssid=//p' || echo '(not associated)')"
+    say "state       $(wpa_cli -i "$dev" status 2>/dev/null | sed -n 's/^wpa_state=//p' || echo unknown)"
+    say "signal      $(iw dev "$dev" link 2>/dev/null | sed -n 's/.*signal: //p' | head -1)"
+    ip -br addr show "$dev" 2>/dev/null | sed 's/^/address     /'
+    say "persistent  $(systemctl is-enabled "wpa_supplicant@${dev}.service" 2>/dev/null)"
+}
+
+cmd_forget(){
+    need_root
+    local dev; dev=$(wifi_dev)
+    [ -n "$dev" ] || return 1
+    systemctl disable --now "wpa_supplicant@${dev}.service" >/dev/null 2>&1
+    rm -f "$CONF_DIR/wpa_supplicant-${dev}.conf" "$STATE_DIR/wifi-ssid"
+    ip addr flush dev "$dev" 2>/dev/null
+    say "forgotten; $dev is down and will not reconnect"
+}
+
+case "${1:-}" in
+    scan)   cmd_scan ;;
+    join)   shift; cmd_join "$@" ;;
+    status) cmd_status ;;
+    forget) cmd_forget ;;
+    *) say "usage: sigmond-wifi {scan | join <ssid> | status | forget}"
+       say "       passphrase is read from stdin:  echo -n 'secret' | sigmond-wifi join MyAP"
+       exit 2 ;;
+esac
