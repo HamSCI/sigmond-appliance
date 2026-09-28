@@ -147,11 +147,25 @@ cmd_join(){
     say "associated with $ssid ($(wpa_cli -i "$dev" status | sed -n 's/^freq=//p') MHz)"
 
     # ── address, BOTH families ───────────────────────────────────────────────
-    # Start clean.  Joining a network while a previous address is still on the
-    # interface leaves TWO addresses and makes "what did I get?" ambiguous --
-    # observed on AI6VN-PM, where a hand-set static survived the join and was
-    # reported instead of the DHCP lease.
-    ip addr flush dev "$dev" 2>/dev/null
+    # Start clean -- but SCOPE GLOBAL ONLY.
+    #
+    # ⛔ A bare `ip addr flush dev X` also removes the IPv6 LINK-LOCAL, and the
+    # kernel does not regenerate it on an interface that is already up.  Without
+    # a link-local address IPv6 cannot function at all: no router solicitation,
+    # no router advertisement, no SLAAC.  Measured against a real IPv6-only AP
+    # 2026-09-28 -- the client associated, then sat with no address in either
+    # family and "Network is unreachable" for the router, because the flush had
+    # destroyed the one address IPv6 bootstraps from.
+    #
+    # `scope global` still clears the stale IPv4 and any old global v6, which is
+    # all this needed to do.
+    ip addr flush dev "$dev" scope global 2>/dev/null
+    # Belt and braces: if something already removed the link-local, bounce the
+    # link so the kernel builds a new one.
+    if ! ip -6 -o addr show dev "$dev" scope link 2>/dev/null | grep -q .; then
+        ip link set "$dev" down 2>/dev/null; sleep 1; ip link set "$dev" up 2>/dev/null
+        sleep 2
+    fi
     # An IPv6-only AP is expected, so do not assume DHCPv4.
     sysctl -qw "net.ipv6.conf.${dev}.accept_ra=2" 2>/dev/null
     sysctl -qw "net.ipv6.conf.${dev}.accept_ra_defrtr=1" 2>/dev/null
