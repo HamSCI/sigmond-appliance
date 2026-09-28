@@ -560,8 +560,9 @@ filter-AAAA
 CONF
     systemctl enable dnsmasq >/dev/null 2>&1
     systemctl restart dnsmasq >/dev/null 2>&1
-    say "VM resolver: dnsmasq on ${MGMT_PM_IP}, forwarding to ${up}, filter-AAAA"
-    say "  point the guest at ${MGMT_PM_IP} — it must NOT use the site DNS64"
+    say "VM resolver: dnsmasq on ${MGMT_PM_IP} re-pointed at ${up}"
+    say "  (firstboot already stood this up; this only follows the resolver"
+    say "   change that arriving on a v6-only site causes)"
 else
     say "WARNING: dnsmasq not installed; the VM will have no resolver"
 fi
@@ -990,6 +991,42 @@ iptables -t nat -C POSTROUTING -s "$MGMT_NET" -o vmbr0 -j MASQUERADE 2>/dev/null
 # The CLAT path, for an IPv6-only site.  See the comment on the vmbr1 stanza.
 iptables -t nat -C POSTROUTING -s "$MGMT_NET" -o clat -j MASQUERADE 2>/dev/null \
   || iptables -t nat -A POSTROUTING -s "$MGMT_NET" -o clat -j MASQUERADE
+
+# ─── a resolver for the decoder VM, on EVERY site ────────────────────────────
+# The VM is IPv4-only and always will be, and it has exactly one link: this
+# host.  Handing it the SITE's resolver worked by luck on an IPv4 LAN and failed
+# outright on an IPv6-only one, where the site resolver is an IPv6 address the
+# guest cannot reach -- routing fine, name resolution dead.
+#
+# So the host answers DNS for it, always, at the /30 address the VM already
+# calls its gateway.  One rule on every site in either family, instead of a
+# special case that only exists where someone remembered to add it.
+if command -v dnsmasq >/dev/null 2>&1; then
+    mkdir -p /etc/dnsmasq.d
+    cat > /etc/dnsmasq.d/sigmond-vm.conf <<DNSEOF
+# Managed by sigmond firstboot. Serves the decoder VM and nothing else.
+# bind-interfaces + listen-address: never answer on the site LAN.
+interface=vmbr1
+listen-address=${MGMT_PM}
+bind-interfaces
+no-dhcp-interface=vmbr1
+no-resolv
+server=${PM_DNS}
+# The guest is IPv4-only with no IPv6 route of any kind.  On a NAT64 site the
+# upstream is a DNS64 and will synthesise AAAA for every name; handing those to
+# the guest buys only a happy-eyeballs stall before it falls back to A.
+filter-AAAA
+DNSEOF
+    systemctl enable dnsmasq >/dev/null 2>&1
+    if systemctl restart dnsmasq >/dev/null 2>&1; then
+        say "VM resolver: dnsmasq on ${MGMT_PM} -> ${PM_DNS} (the VM asks its gateway, not the site)"
+    else
+        say "⚠ dnsmasq would not start — the decoder VM will have NO name resolution"
+        journalctl -u dnsmasq -n 5 --no-pager >>"$LOG" 2>&1
+    fi
+else
+    say "⚠ dnsmasq absent — the decoder VM will have NO name resolution"
+fi
 # The VM's operator-facing services must not vanish from the LAN just
 # because it moved behind us.  Reach them at THIS host's address -- the same
 # one already used for ssh and the Proxmox UI, so one address per station
@@ -1103,7 +1140,16 @@ if qm start "$VMID"; then
     '[Network]' \
     "Address=${MGMT_VM}/30" \
     "Gateway=${MGMT_PM}" \
-    "DNS=${PM_DNS}" | base64 -w0)
+    '# The VM asks its own ROUTER for DNS, not whatever this host happens to' \
+    '# use.  PM_DNS is the SITE resolver, and on an IPv6-only site that is an' \
+    '# IPv6 address an IPv4-only guest can never reach: the VM came up with' \
+    '# routing that worked and name resolution that did not.  Measured in the' \
+    '# nested v6 test 2026-09-28 -- curl to a v4 LITERAL returned HTTP 301 in' \
+    '# 0.16s while curl by NAME said "Could not resolve host: github.com".' \
+    '# 10.99.0.1 is a constant of the host-only /30, so it is correct on every' \
+    '# site in either family, and the host now runs a resolver there' \
+    '# unconditionally (see the dnsmasq block by the vmbr1 setup).' \
+    "DNS=${MGMT_PM}" | base64 -w0)
 
   say "import: waiting for the decoder VM's guest agent to give it its address…"
   _agent_ok=0
