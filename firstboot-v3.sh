@@ -1004,12 +1004,34 @@ if [ -x /usr/local/sbin/sigmond-v6-gateway ]; then
     /usr/local/sbin/sigmond-v6-gateway 2>&1 | while IFS= read -r _l; do say "v6gw: $_l"; done
 fi
 
-qm create "$VMID" --name "sigmond-decoder-${VTAG}" --machine q35 --memory "$VMMEM" $CORES_ARGS \
+if ! qm create "$VMID" --name "sigmond-decoder-${VTAG}" --machine q35 --memory "$VMMEM" $CORES_ARGS \
   --cpu host --net0 virtio,bridge=vmbr1 --ostype l26 --scsihw virtio-scsi-single \
-  --agent 1 --serial0 socket --onboot 1
-qm importdisk "$VMID" /tmp/decoder.qcow2 "$STORE"
+  --agent 1 --serial0 socket --onboot 1 >>"$LOG" 2>&1; then
+    say "import: qm create FAILED — see $LOG; the decoder VM cannot be created"
+    rm -f /tmp/decoder.qcow2; exit 1
+fi
+# ⛔ CAPTURE THE OUTPUT.  These two ran with stdout and stderr going nowhere,
+# so when the import failed all the operator got was "no unused0" -- a symptom
+# with the cause thrown away.  On the nested IPv6 run that cost an investigation
+# to get back to "what did qm actually say?", and the answer was unrecoverable
+# because the failure path purges the VM and deletes the source image.
+_IMPLOG=/tmp/sigmond-import.$$.log
+qm importdisk "$VMID" /tmp/decoder.qcow2 "$STORE" >"$_IMPLOG" 2>&1
+_IMPRC=$?
+[ "$_IMPRC" -ne 0 ] && say "import: qm importdisk exited $_IMPRC"
 DISK="$(qm config "$VMID"|awk -F': ' '/^unused0:/{print $2;exit}')"
-[ -z "$DISK" ] && { say "import: no unused0"; qm destroy "$VMID" --purge 2>/dev/null; rm -f /tmp/decoder.qcow2; exit 1; }
+if [ -z "$DISK" ]; then
+    say "import: no unused0 after importdisk — the decoder VM CANNOT be created."
+    say "  qm importdisk said:"
+    tail -8 "$_IMPLOG" 2>/dev/null | while IFS= read -r _l; do say "    $_l"; done
+    say "  storage:"
+    pvesm status 2>/dev/null | awk 'NR>1{print "    "$1" "$2" "$3" avail="$6}' \
+        | while IFS= read -r _l; do say "$_l"; done
+    say "  source: $(ls -l /tmp/decoder.qcow2 2>/dev/null | awk '{print $5" bytes"}' || echo MISSING)"
+    cat "$_IMPLOG" >>"$LOG" 2>/dev/null; rm -f "$_IMPLOG"
+    qm destroy "$VMID" --purge 2>/dev/null; rm -f /tmp/decoder.qcow2; exit 1
+fi
+cat "$_IMPLOG" >>"$LOG" 2>/dev/null; rm -f "$_IMPLOG"
 qm set "$VMID" --scsi0 "$DISK" --boot order=scsi0
 # size the decoder disk to the host's storage: the full timing chain's
 # 6-channel raw archive needs ~77G baseline (metrology preflight starved
