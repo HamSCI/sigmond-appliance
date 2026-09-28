@@ -409,6 +409,115 @@ case "${IP:-}" in
 esac
 exit 0
 NETFIXEOF
+
+# ─── sigmond-v6-gateway: make an IPv6-only site usable ───────────────────────
+# Validated on a real NAT64/DNS64 network (AI6VN-PM against a bench gateway,
+# 2026-09-28).  Everything here is a NO-OP on an IPv4 site, by construction:
+# each step checks the condition it needs rather than assuming the site shape.
+#
+# The decoder VM stays IPv4 forever and never learns IPv6.  This host is the
+# translation boundary -- see sigmond/tasks/plan-ipv6-support.md §3.
+cat > /usr/local/sbin/sigmond-v6-gateway <<'V6GWEOF'
+#!/bin/bash
+# sigmond-v6-gateway — give an IPv6-only site a working station.
+# Idempotent and safe to re-run.  Exits 0 doing nothing on an IPv4 site.
+set -u
+export PATH=$PATH:/usr/sbin:/sbin
+TAG=sigmond-v6-gateway
+say(){ printf '%s\n' "$*"; logger -t "$TAG" -- "$*" 2>/dev/null || true; }
+
+DEV="${SIGMOND_V6_DEV:-vmbr0}"
+MGMT_VM_NET="${SIGMOND_MGMT_NET:-10.99.0.0/30}"
+MGMT_PM_IP="${SIGMOND_MGMT_PM:-10.99.0.1}"
+
+have4=$(ip -4 -o addr show dev "$DEV" scope global 2>/dev/null | wc -l)
+have6=$(ip -6 -o addr show dev "$DEV" scope global 2>/dev/null | grep -vc -e temporary -e deprecated)
+
+if [ "$have4" -gt 0 ]; then
+    say "$DEV has IPv4 — nothing to do (this runs only on an IPv6-only site)"
+    exit 0
+fi
+if [ "$have6" -eq 0 ]; then
+    say "$DEV has neither family yet — too early; re-run after the link comes up"
+    exit 0
+fi
+
+# 1. A RESOLVER.  Nothing on Proxmox consumes RDNSS: no rdnssd, no
+#    systemd-resolved.  A v6-only station therefore boots with resolv.conf
+#    still naming a dead IPv4 server and cannot resolve anything -- which also
+#    blocks RFC 7050 NAT64 discovery, so nothing downstream can work either.
+cur_ns=$(awk '/^nameserver/{print $2; exit}' /etc/resolv.conf 2>/dev/null)
+ns_ok=0
+[ -n "${cur_ns:-}" ] && timeout 3 getent hosts ipv4only.arpa >/dev/null 2>&1 && ns_ok=1
+if [ "$ns_ok" -eq 0 ]; then
+    rdnss=""
+    if command -v rdisc6 >/dev/null 2>&1; then
+        rdnss=$(rdisc6 -1 -w 3000 "$DEV" 2>/dev/null | awk '/Recursive DNS server/{getline; print $1; exit}')
+    fi
+    if [ -n "$rdnss" ]; then
+        cp -p /etc/resolv.conf /etc/resolv.conf.sigmond-pre-v6 2>/dev/null
+        printf 'nameserver %s\n' "$rdnss" > /etc/resolv.conf
+        say "resolver set from the RA's RDNSS: $rdnss"
+    else
+        say "WARNING: no usable resolver and the RA advertised no RDNSS."
+        say "  This station cannot resolve names. Set one by hand in /etc/resolv.conf."
+        exit 1
+    fi
+fi
+
+# 2. THE CLAT.  clatd discovers the site's NAT64 prefix by RFC 7050 and gives
+#    this host an IPv4 default route over a translating tun device, so IPv4
+#    LITERALS work -- which plain NAT64+DNS64 does not provide.  clatd checks
+#    for existing IPv4 connectivity and stands down by itself, so enabling it
+#    is harmless anywhere.
+if command -v clatd >/dev/null 2>&1; then
+    systemctl enable clatd >/dev/null 2>&1
+    systemctl restart clatd >/dev/null 2>&1
+    for i in $(seq 1 15); do ip link show clat >/dev/null 2>&1 && break; sleep 2; done
+    if ip link show clat >/dev/null 2>&1; then
+        say "CLAT up: $(ip -4 -o addr show clat | awk '{print $4}') (464XLAT active)"
+    else
+        say "WARNING: clatd did not create a CLAT device — IPv4 literals will fail"
+    fi
+else
+    say "WARNING: clatd is not installed; the VM will have no IPv4 path off-site"
+fi
+
+# 3. A RESOLVER FOR THE VM.  The guest is IPv4-only and cannot reach the site's
+#    IPv6 resolver at all.  Serve DNS to it over IPv4 on the host-only /30 and
+#    forward upstream over IPv6.  filter-AAAA because the site resolver is a
+#    DNS64: it synthesises AAAA for every name, and handing those to a guest
+#    with no IPv6 route buys only a happy-eyeballs stall before the fallback.
+if command -v dnsmasq >/dev/null 2>&1; then
+    up=$(awk '/^nameserver/{print $2; exit}' /etc/resolv.conf)
+    mkdir -p /etc/dnsmasq.d
+    cat > /etc/dnsmasq.d/sigmond-vm.conf <<CONF
+# Managed by sigmond-v6-gateway. Serves the decoder VM only.
+interface=vmbr1
+listen-address=${MGMT_PM_IP}
+bind-interfaces
+no-dhcp-interface=vmbr1
+no-resolv
+server=${up}
+# The guest is IPv4-only with no IPv6 route; synthesised AAAA are unusable.
+filter-AAAA
+CONF
+    systemctl enable dnsmasq >/dev/null 2>&1
+    systemctl restart dnsmasq >/dev/null 2>&1
+    say "VM resolver: dnsmasq on ${MGMT_PM_IP}, forwarding to ${up}, filter-AAAA"
+    say "  point the guest at ${MGMT_PM_IP} — it must NOT use the site DNS64"
+else
+    say "WARNING: dnsmasq not installed; the VM will have no resolver"
+fi
+
+# 4. The VM's egress.  Written by the vmbr1 stanza too, but re-assert it here:
+#    a host that reached this point has no IPv4 on $DEV, so the vmbr0 rule
+#    matches nothing and this is the only one that carries the guest.
+iptables -t nat -C POSTROUTING -s "$MGMT_VM_NET" -o clat -j MASQUERADE 2>/dev/null \
+  || iptables -t nat -A POSTROUTING -s "$MGMT_VM_NET" -o clat -j MASQUERADE
+say "done"
+V6GWEOF
+chmod +x /usr/local/sbin/sigmond-v6-gateway
 chmod +x /usr/local/sbin/sigmond-netfix
 
 cat > /usr/local/sbin/sigmond-setnet <<'SETNETEOF'
@@ -737,6 +846,14 @@ iface vmbr1 inet static
     bridge-fd 0
     post-up sysctl -q -w net.ipv4.ip_forward=1
     post-up iptables -t nat -C POSTROUTING -s ${MGMT_NET} -o vmbr0 -j MASQUERADE 2>/dev/null || iptables -t nat -A POSTROUTING -s ${MGMT_NET} -o vmbr0 -j MASQUERADE
+    # ⛔ AND out the CLAT.  On an IPv6-only site vmbr0 has NO IPv4 address, so
+    # the rule above matches nothing and the VM -- which is IPv4-only and can
+    # never be anything else -- is cut off completely.  clatd puts the host's
+    # IPv4 default route on a 'clat' tun device; masquerading out that too is
+    # the single line that restores the VM.  Measured on AI6VN-PM 2026-09-28:
+    # VM dead before, working immediately after.  Harmless where clat never
+    # exists -- iptables accepts an interface name that is not present yet.
+    post-up iptables -t nat -C POSTROUTING -s ${MGMT_NET} -o clat -j MASQUERADE 2>/dev/null || iptables -t nat -A POSTROUTING -s ${MGMT_NET} -o clat -j MASQUERADE
     post-up iptables -t nat -C PREROUTING -p tcp --dport 8000 -j DNAT --to-destination ${MGMT_VM}:8000 2>/dev/null || iptables -t nat -A PREROUTING -p tcp --dport 8000 -j DNAT --to-destination ${MGMT_VM}:8000
     post-up iptables -t nat -C PREROUTING -p tcp --dport 8081 -j DNAT --to-destination ${MGMT_VM}:8081 2>/dev/null || iptables -t nat -A PREROUTING -p tcp --dport 8081 -j DNAT --to-destination ${MGMT_VM}:8081
     post-up iptables -t nat -C PREROUTING -p tcp --dport 8082 -j DNAT --to-destination ${MGMT_VM}:8082 2>/dev/null || iptables -t nat -A PREROUTING -p tcp --dport 8082 -j DNAT --to-destination ${MGMT_VM}:8082
@@ -750,6 +867,9 @@ sysctl -q -w net.ipv4.ip_forward=1
 printf 'net.ipv4.ip_forward = 1\n' > /etc/sysctl.d/99-sigmond-vm-router.conf
 iptables -t nat -C POSTROUTING -s "$MGMT_NET" -o vmbr0 -j MASQUERADE 2>/dev/null \
   || iptables -t nat -A POSTROUTING -s "$MGMT_NET" -o vmbr0 -j MASQUERADE
+# The CLAT path, for an IPv6-only site.  See the comment on the vmbr1 stanza.
+iptables -t nat -C POSTROUTING -s "$MGMT_NET" -o clat -j MASQUERADE 2>/dev/null \
+  || iptables -t nat -A POSTROUTING -s "$MGMT_NET" -o clat -j MASQUERADE
 # The VM's operator-facing services must not vanish from the LAN just
 # because it moved behind us.  Reach them at THIS host's address -- the same
 # one already used for ssh and the Proxmox UI, so one address per station
@@ -766,6 +886,14 @@ if ip -4 addr show vmbr1 2>/dev/null | grep -q "$MGMT_PM"; then
   say "import: vmbr1 up — VM will be at ${MGMT_VM}, NATed out vmbr0, :8081 forwarded here"
 else
   say "import: WARNING — vmbr1 did not come up; the VM may be unreachable from this host"
+fi
+
+# An IPv6-only site needs a resolver, a CLAT and a resolver FOR THE VM before
+# the guest can reach anything.  Runs here because vmbr1 and the NAT rules now
+# exist and the site link has settled.  No-op on an IPv4 site.
+if [ -x /usr/local/sbin/sigmond-v6-gateway ]; then
+  SIGMOND_MGMT_NET="$MGMT_NET" SIGMOND_MGMT_PM="$MGMT_PM" \
+    /usr/local/sbin/sigmond-v6-gateway 2>&1 | while IFS= read -r _l; do say "v6gw: $_l"; done
 fi
 
 qm create "$VMID" --name "sigmond-decoder-${VTAG}" --machine q35 --memory "$VMMEM" $CORES_ARGS \
