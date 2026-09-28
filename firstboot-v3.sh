@@ -735,15 +735,34 @@ if [ -d /mnt/sig-media/offline-debs ] && ls /mnt/sig-media/offline-debs/*.deb >/
     _nd=$(ls "$APP"/offline-debs/*.deb 2>/dev/null | wc -l)
     DEBIAN_FRONTEND=noninteractive dpkg -i "$APP"/offline-debs/*.deb >>"$LOG" 2>&1 || true
     DEBIAN_FRONTEND=noninteractive dpkg -i "$APP"/offline-debs/*.deb >>"$LOG" 2>&1 || true
+    # ⛔ AND CONFIGURE.  dpkg -i can leave a package "install ok unpacked" when a
+    # dependency is missing, and an UNPACKED wpasupplicant is actively harmful:
+    # it installs the /etc/network/if-{pre-,}up.d/wpasupplicant symlinks while
+    # their targets are still .dpkg-new, and ifupdown2 then FAILS EVERY
+    # INTERFACE BRING-UP with ENOENT.  On the nested v6 test that took vmbr1
+    # down and the decoder VM never imported.  A half-installed payload is worse
+    # than no payload.
+    DEBIAN_FRONTEND=noninteractive dpkg --configure -a >>"$LOG" 2>&1 || true
+    _unpacked=$(dpkg-query -W -f='${Package} ${Status}\n' 2>/dev/null \
+                | awk '$NF=="unpacked"{print $1}' | tr '\n' ' ')
+    if [ -n "$_unpacked" ]; then
+        say "⛔ offline packages LEFT UNCONFIGURED:$_unpacked"
+        say "  the payload is missing one of their dependencies. An unpacked"
+        say "  wpasupplicant breaks ifupdown2 on EVERY interface, so removing"
+        say "  its hooks now rather than leaving the host unable to bring up"
+        say "  vmbr1 (which is how the decoder VM reaches anything)."
+        rm -f /etc/network/if-pre-up.d/wpasupplicant /etc/network/if-up.d/wpasupplicant \
+              /etc/network/if-down.d/wpasupplicant /etc/network/if-post-down.d/wpasupplicant 2>/dev/null
+    fi
     _missing=""
     for _b in clatd tayga dnsmasq rdisc6 wpa_supplicant iw; do
         command -v "$_b" >/dev/null 2>&1 || _missing="$_missing $_b"
     done
-    if [ -z "$_missing" ]; then
-        say "offline packages: $_nd .deb applied — clatd, tayga, dnsmasq, rdisc6, wpa_supplicant, iw all present"
+    if [ -z "$_missing" ] && [ -z "$_unpacked" ]; then
+        say "offline packages: $_nd .deb applied and configured — clatd, tayga, dnsmasq, rdisc6, wpa_supplicant, iw all present"
     else
-        say "⚠ offline packages: applied $_nd .deb but still missing:$_missing"
-        say "  an IPv6-only or Wi-Fi-only site will NOT come up; see $LOG"
+        say "⚠ offline packages: applied $_nd .deb; missing binaries:${_missing:- none}"
+        say "  an IPv6-only or Wi-Fi-only site may NOT come up; see $LOG"
     fi
 else
     say "⚠ no offline-debs on the media — IPv6-only and Wi-Fi-only installs cannot work"

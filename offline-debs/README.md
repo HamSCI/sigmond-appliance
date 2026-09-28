@@ -36,5 +36,21 @@ apt-get download <that list>
 Over-collecting is safe: `dpkg -i` skips what is already installed. Under-collecting
 is not — it fails on the one station that cannot reach a mirror to recover.
 
+⛔ **Compute the closure on a host that does NOT already have these packages.**
+The first version of this payload was 17 packages and was missing
+`libnl-genl-3-200` and `libpcsclite1`, because it was computed on a host where
+`wpasupplicant` had already been installed via apt — so the dependencies apt had
+pulled in were invisible to the "what is missing here" filter. The result was a
+`wpasupplicant` left `install ok unpacked`, which is **worse than not shipping it
+at all**: the unpack installs `/etc/network/if-{pre-,}up.d/wpasupplicant` while
+their targets are still `.dpkg-new`, and ifupdown2 then fails EVERY interface
+bring-up with ENOENT. On the nested IPv6 test that took `vmbr1` down and the
+decoder VM never imported.
+
+`dpkg --simulate -i *.deb` does NOT catch this — it reported no dependency
+problems for the incomplete set. The check that matters is that no package is
+left in state `unpacked` after `dpkg --configure -a`, which firstboot now
+asserts and reports.
+
 ⚠ These pin to the Debian 13 / PVE 9 versions current at build time. Refresh them
 when the base moves, or `dpkg -i` will fail on a libc mismatch.
