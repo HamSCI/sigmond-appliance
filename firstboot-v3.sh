@@ -527,6 +527,39 @@ fi
 #    for existing IPv4 connectivity and stands down by itself, so enabling it
 #    is harmless anywhere.
 if command -v clatd >/dev/null 2>&1; then
+    # ⛔ clatd MUST NOT be left to race the resolver.  Its RFC 7050 discovery
+    # needs a working DNS64, which on an IPv6-only site arrives by RA/rdnssd
+    # after the link comes up; when discovery finds nothing clatd exits ZERO, so
+    # systemd records success and NEVER retries.  A boot-order race then becomes
+    # a permanent outage -- and because the IPv4-only decoder VM reaches the
+    # world only through this CLAT, that outage is the VM's entire internet.
+    # AI6VN-PM lost five component installs to exactly this on 2026-09-29.
+    #
+    # Gate the start on discovery actually working, and retry on failure.  This
+    # is a persistent drop-in, not a first-boot-only fix: the race is a race at
+    # EVERY boot, so the repair has to live in the unit.
+    install -m 755 /mnt/sig-media/sigmond-wait-nat64 \
+        /usr/local/sbin/sigmond-wait-nat64 2>/dev/null
+    if [ -x /usr/local/sbin/sigmond-wait-nat64 ]; then
+        mkdir -p /etc/systemd/system/clatd.service.d
+        cat > /etc/systemd/system/clatd.service.d/10-sigmond-wait-nat64.conf <<'CLATD_EOF'
+# Installed by sigmond firstboot.  See /usr/local/sbin/sigmond-wait-nat64 for
+# the full reasoning; in short, clatd's PLAT discovery needs the DNS64 resolver
+# that RA/rdnssd supplies seconds later, and clatd exits 0 -- "success" -- when
+# it finds nothing, so without this it never tries again.
+[Unit]
+After=network-online.target rdnssd.service
+Wants=network-online.target
+
+[Service]
+ExecStartPre=/usr/local/sbin/sigmond-wait-nat64
+# on-failure, not always: a clatd that stands down because the site has native
+# IPv4 has nothing to retry, but a lost discovery race must self-heal.
+Restart=on-failure
+RestartSec=30
+CLATD_EOF
+        systemctl daemon-reload >/dev/null 2>&1
+    fi
     systemctl enable clatd >/dev/null 2>&1
     systemctl restart clatd >/dev/null 2>&1
     for i in $(seq 1 15); do ip link show clat >/dev/null 2>&1 && break; sleep 2; done

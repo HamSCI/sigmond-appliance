@@ -1,0 +1,60 @@
+#!/bin/bash
+# sigmond-wait-nat64 — block until this site's NAT64 prefix is discoverable.
+#
+# ⛔ WHY THIS EXISTS.  clatd finds the PLAT (NAT64) prefix by RFC 7050: it asks
+# for AAAA records of `ipv4only.arpa`, a name that has ONLY A records, so any
+# AAAA that comes back was synthesised by the site's DNS64 and carries the PLAT
+# prefix.  That means clatd's startup DEPENDS ON A WORKING DNS64 RESOLVER -- and
+# on an IPv6-only site the resolver arrives in a Router Advertisement (RDNSS),
+# picked up by rdnssd, some seconds AFTER the network comes up.
+#
+# clatd does not wait, and worse, when discovery finds nothing it exits ZERO:
+#
+#     No PLAT prefix could be discovered. Your ISP probably doesn't provide
+#     NAT64/DNS64 PLAT service. Exiting.
+#     clatd.service: Deactivated successfully.
+#
+# systemd records that as success, so nothing ever retries and a lost boot race
+# becomes a PERMANENT outage.  Measured on AI6VN-PM, 2026-09-29: clatd had
+# exited at boot with Result=success/NRestarts=0 and no `clat` device existed,
+# while `getent ahostsv6 ipv4only.arpa` answered fd4f:a955:ac3d:64::c000:aa the
+# moment anyone looked.  The host had no IPv4 default route, so the IPv4-only
+# decoder VM -- which reaches the world only through this CLAT -- had no egress
+# during first-boot, and five components failed to fetch with "Failed to connect
+# to github.com port 443 after 2 ms".  ka9q-web never got a systemd unit at all.
+#
+# So gate clatd on discovery actually working, and let systemd retry us.
+#
+#   exit 0  — a PLAT prefix is discoverable (or this host has native IPv4 and
+#             clatd will stand down on its own, which is fine)
+#   exit 1  — no prefix within the deadline; the caller should retry later
+set -u
+DEADLINE="${SIGMOND_NAT64_WAIT:-180}"     # seconds
+INTERVAL="${SIGMOND_NAT64_INTERVAL:-5}"
+
+say(){ printf 'sigmond-wait-nat64: %s\n' "$*"; }
+
+# A host with a native IPv4 default route needs no CLAT.  clatd detects this and
+# stands down by itself, so let it start and decide -- blocking here would spin
+# forever on every ordinary dual-stack site.
+if ip -4 route show default 2>/dev/null | grep -q .; then
+    say "host already has an IPv4 default route — no CLAT needed"
+    exit 0
+fi
+
+end=$(( $(date +%s) + DEADLINE ))
+while :; do
+    # Any AAAA for ipv4only.arpa is by definition DNS64-synthesised.
+    if getent ahostsv6 ipv4only.arpa 2>/dev/null | grep -qE '^[0-9a-fA-F:]+[[:space:]]'; then
+        say "NAT64 prefix discoverable: $(getent ahostsv6 ipv4only.arpa \
+             | awk 'NR==1{print $1}')"
+        exit 0
+    fi
+    now=$(date +%s)
+    [ "$now" -ge "$end" ] && break
+    sleep "$INTERVAL"
+done
+
+say "no NAT64 prefix discoverable after ${DEADLINE}s — not starting clatd yet"
+say "  (if this site really has no NAT64, clatd is simply not applicable here)"
+exit 1

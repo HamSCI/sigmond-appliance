@@ -441,6 +441,11 @@ WSEED=""
 # cable: the cable is a conducted noise path into an HF receiver.  Ships on
 # the stick because a host with no Ethernet cannot fetch it.
 [ -f sigmond-wifi ] && cp sigmond-wifi /tmp/sigpay.$$/
+# CLAT start gate.  clatd's NAT64 discovery needs the RA-supplied DNS64 resolver
+# and exits 0 when it finds none, so a boot-order race silently leaves an
+# IPv6-only host with no IPv4 path -- and the decoder VM with no internet at all.
+# Ships here because firstboot installs it before any network is assumed.
+[ -f sigmond-wait-nat64 ] && cp sigmond-wait-nat64 /tmp/sigpay.$$/
 # Offline .deb payload.  A greenfield IPv6-only install cannot use apt: reaching
 # the IPv4 mirrors needs the CLAT, the CLAT is clatd, and installing clatd needs
 # apt.  A host with no Ethernet has the same problem with wpasupplicant.  So the
