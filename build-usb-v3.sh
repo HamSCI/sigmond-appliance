@@ -261,8 +261,11 @@ sed -e "s|@@VERSION@@|${VERSION}|g" -e "s|@@VTAG@@|${VTAG}|g" QUICKSTART.txt > Q
 # decoder VM is VMID 100 in v3 (fleet convention); wizard default was 120
 sed -e 's|SIGMOND_VMID:-120|SIGMOND_VMID:-100|g' \
     -e 's|"SIGMOND_VMID", "120"|"SIGMOND_VMID", "100"|g' sigmond-wizard.sh > sigmond-wizard-rendered.sh
-if grep -q '120' sigmond-wizard-rendered.sh; then
-    grep -n '120' sigmond-wizard-rendered.sh | grep -qiv 'timeout\|sleep\|port\|freq\|OnUnitActiveSec' && say "WARN: wizard still mentions 120 somewhere — check"
+# Check CODE, not prose.  The wizard now explains in comments why the default
+# moved off 120, and a check that greps the whole file warns on every build
+# because of that explanation — which is how a warning stops being read.
+if grep -v '^[[:space:]]*#' sigmond-wizard-rendered.sh | grep -q '120'; then
+    grep -v '^[[:space:]]*#' sigmond-wizard-rendered.sh | grep -n '120' | grep -qiv 'timeout\|sleep\|port\|freq\|OnUnitActiveSec' && say "WARN: wizard still mentions 120 in code somewhere — check"
 fi
 
 say "sigmond repo payload (host tuning scripts ride on the stick)"
