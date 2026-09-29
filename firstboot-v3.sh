@@ -876,11 +876,11 @@ if [ -d /mnt/sig-media/offline-debs ] && ls /mnt/sig-media/offline-debs/*.deb >/
               /etc/network/if-down.d/wpasupplicant /etc/network/if-post-down.d/wpasupplicant 2>/dev/null
     fi
     _missing=""
-    for _b in clatd tayga dnsmasq rdisc6 wpa_supplicant iw; do
+    for _b in clatd tayga dnsmasq rdisc6 wpa_supplicant iw btop tmux; do
         command -v "$_b" >/dev/null 2>&1 || _missing="$_missing $_b"
     done
     if [ -z "$_missing" ] && [ -z "$_unpacked" ]; then
-        say "offline packages: $_nd .deb applied and configured — clatd, tayga, dnsmasq, rdisc6, wpa_supplicant, iw all present"
+        say "offline packages: $_nd .deb applied and configured — clatd, tayga, dnsmasq, rdisc6, wpa_supplicant, iw, btop, tmux all present"
     else
         say "⚠ offline packages: applied $_nd .deb; missing binaries:${_missing:- none}"
         say "  an IPv6-only or Wi-Fi-only site may NOT come up; see $LOG"

@@ -19,6 +19,7 @@ network is expected to work. 4 MB total — cheap insurance.
 | `ndisc6` | `rdisc6`, to read RDNSS out of a Router Advertisement. Nothing on Proxmox consumes RDNSS, so without this a v6-only station has **no resolver at all** |
 | `rdnssd` | the daemon form of the same, for ongoing RA changes |
 | `wpasupplicant`, `iw` | Wi-Fi association and scanning. **Neither is in stock PVE** |
+| `btop`, `tmux` | operator tooling on the PM — rob works from tmux and reads per-core load in btop, and a station on an IPv6-only site cannot apt them in. **Neither is in stock PVE**; every dependency of both already is |
 | the rest | dependency closure of the above that stock PVE lacks |
 
 ## Refreshing
@@ -26,12 +27,20 @@ network is expected to work. 4 MB total — cheap insurance.
 Computed against a real PVE host, not guessed:
 
 ```bash
-WANT="clatd tayga dnsmasq dnsmasq-base rdnssd ndisc6 wpasupplicant iw"
+WANT="clatd tayga dnsmasq dnsmasq-base rdnssd ndisc6 wpasupplicant iw btop tmux"
 apt-cache depends --recurse --no-recommends --no-suggests --no-conflicts \
     --no-breaks --no-replaces --no-enhances $WANT | grep '^[a-z0-9]' | sort -u
 # keep the ones a stock PVE does not already have, then:
 apt-get download <that list>
 ```
+
+⛔ **Over-collecting is safe only for LEAF packages.**  The btop/tmux closure
+(2026-09-29) was 11 packages, nine of which were `libc6`, `libsystemd0`,
+`libstdc++6` and friends — all already present on a fresh PVE.  Shipping those
+would put core libraries in a payload that is applied with `dpkg -i` on a
+running station, where a version mismatch is far worse than a missing tool.
+Checked each against a freshly installed v3.56 PM: only `btop` and `tmux` were
+absent, so only those two ship.
 
 Over-collecting is safe: `dpkg -i` skips what is already installed. Under-collecting
 is not — it fails on the one station that cannot reach a mirror to recover.
