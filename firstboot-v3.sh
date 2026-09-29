@@ -169,6 +169,46 @@ net_dead(){
     done
 }
 
+# ── ⛔ a Wi-Fi NIC must NEVER be a bridge port ──────────────────────────────
+# 802.11 station mode will not carry arbitrary source MACs, so a managed-mode
+# wlan cannot be bridged (that needs 4addr/WDS, which an ordinary AP will not
+# give us).  The bridge therefore never comes up -- and the attempt leaves
+# `disable_ipv6=1` on the wlan, which kills IPv6 on it completely: no
+# link-local, so no router solicitation, so no address and no route.
+#
+# The Proxmox installer does exactly this when Wi-Fi is the only link at
+# install time: it picks the wlan as the management interface and writes
+# `bridge-ports wlp3s0`.  Measured on AI6VN-PM 2026-09-29 (v3.56, installed
+# over Wi-Fi): vmbr0 DOWN with zero members, wlp3s0 associated at -39 dBm with
+# disable_ipv6=1 and not one IPv6 address.  The station looked connected and
+# was unreachable.
+#
+# Repair it: take the wlan out of the bridge, give it its own stanza, and put
+# IPv6 back.  The decoder VM does not need vmbr0 to have a port -- it lives on
+# the host-only vmbr1 and is NATed out of whatever uplink exists.
+_wl_bridged=""
+for _p in $(sed -n 's/^[[:space:]]*bridge-ports[[:space:]]\+//p' "$IFACES" 2>/dev/null); do
+    [ "$_p" = none ] && continue
+    [ -e "/sys/class/net/$_p/wireless" ] && _wl_bridged="$_p"
+done
+if [ -n "$_wl_bridged" ]; then
+    say "vmbr0 is bridged onto Wi-Fi NIC $_wl_bridged — that cannot work; un-bridging"
+    cp -a "$IFACES" "$IFACES.pre-unbridge" 2>/dev/null
+    sed -i "s|^\([[:space:]]*\)bridge-ports[[:space:]]\+$_wl_bridged[[:space:]]*$|\1bridge-ports none|" "$IFACES"
+    if ! grep -qE "^iface[[:space:]]+$_wl_bridged[[:space:]]+inet6" "$IFACES"; then
+        # accept_ra=2 because this host FORWARDS (it routes for the decoder VM)
+        # and Linux ignores RAs on a forwarding interface at the default 1.
+        printf '\nauto %s\niface %s inet6 auto\n\tpost-up sysctl -qw net.ipv6.conf.%s.disable_ipv6=0 || true\n\tpost-up sysctl -qw net.ipv6.conf.%s.accept_ra=2 || true\n\tpost-up sysctl -qw net.ipv6.conf.%s.accept_ra_defrtr=1 || true\n' \
+            "$_wl_bridged" "$_wl_bridged" "$_wl_bridged" "$_wl_bridged" "$_wl_bridged" >> "$IFACES"
+    fi
+    # Undo the damage the failed enslavement already did, now, without a reboot.
+    ip link set "$_wl_bridged" nomaster 2>/dev/null
+    sysctl -qw "net.ipv6.conf.$_wl_bridged.disable_ipv6=0" 2>/dev/null
+    sysctl -qw "net.ipv6.conf.$_wl_bridged.accept_ra=2" 2>/dev/null
+    sysctl -qw "net.ipv6.conf.$_wl_bridged.accept_ra_defrtr=1" 2>/dev/null
+    say "  $_wl_bridged is now standalone with IPv6 enabled (backup: $IFACES.pre-unbridge)"
+fi
+
 # ── is there anything to do? ────────────────────────────────────────────────
 # Only act when vmbr0 has NO address or is sitting on the installer's
 # fallback.  A station with a real lease is never touched -- this must not
@@ -229,6 +269,10 @@ for d in /sys/class/net/*; do
     n=$(basename "$d")
     case "$n" in lo|vmbr*|tap*|fwbr*|fwln*|fwpr*|veth*|bond*|dummy*|wg*|tun*) continue ;; esac
     [ -e "$d/device" ] || continue          # physical only
+    # A Wi-Fi NIC is not a bridge-port candidate: see the un-bridge block above.
+    # Without this, netfix would "fix" a dead vmbr0 by binding it to the wlan
+    # and reproduce the exact fault it just repaired.
+    [ -e "$d/wireless" ] && { say "  $n is Wi-Fi — never a bridge port"; continue; }
     ip link set "$n" up 2>/dev/null         # a down NIC reports no carrier
     ALLPHYS="$ALLPHYS $n"
     if [ -e "$d/master" ]; then
@@ -538,8 +582,17 @@ if command -v clatd >/dev/null 2>&1; then
     # Gate the start on discovery actually working, and retry on failure.  This
     # is a persistent drop-in, not a first-boot-only fix: the race is a race at
     # EVERY boot, so the repair has to live in the unit.
-    install -m 755 /mnt/sig-media/sigmond-wait-nat64 \
-        /usr/local/sbin/sigmond-wait-nat64 2>/dev/null
+    # The helper is installed by first-boot, off the media, while the media is
+    # still mounted.  Do NOT try to fetch it from /mnt/sig-media here: this
+    # script also runs long after first-boot (sigmond-wifi calls it when it
+    # joins an IPv6-only AP), when that path is unmounted and empty.  That is
+    # exactly how v3.56 shipped an ungated clatd.  Fall back to the media only
+    # if it happens to still be there, which is the first-boot case.
+    if [ ! -x /usr/local/sbin/sigmond-wait-nat64 ] \
+       && [ -f /mnt/sig-media/sigmond-wait-nat64 ]; then
+        install -m 755 /mnt/sig-media/sigmond-wait-nat64 \
+            /usr/local/sbin/sigmond-wait-nat64 2>/dev/null
+    fi
     if [ -x /usr/local/sbin/sigmond-wait-nat64 ]; then
         mkdir -p /etc/systemd/system/clatd.service.d
         cat > /etc/systemd/system/clatd.service.d/10-sigmond-wait-nat64.conf <<'CLATD_EOF'
@@ -559,6 +612,9 @@ Restart=on-failure
 RestartSec=30
 CLATD_EOF
         systemctl daemon-reload >/dev/null 2>&1
+    else
+        say "WARNING: sigmond-wait-nat64 missing — clatd runs UNGATED, so a lost"
+        say "  NAT64-discovery race will be permanent (it exits 0 on no prefix)"
     fi
     systemctl enable clatd >/dev/null 2>&1
     systemctl restart clatd >/dev/null 2>&1
@@ -763,6 +819,25 @@ cp /mnt/sig-media/sigmond-location-check "$APP"/ 2>/dev/null
 cp /mnt/sig-media/sigmond-net-probe "$APP"/ 2>/dev/null
 if [ -f /mnt/sig-media/sigmond-wifi ]; then
     install -m 755 /mnt/sig-media/sigmond-wifi /usr/local/sbin/sigmond-wifi
+fi
+# ⛔ INSTALL THE CLAT GATE HERE, WHILE THE MEDIA IS STILL MOUNTED.
+# v3.56 installed it from inside sigmond-v6-gateway instead — and that helper
+# runs LATER: when sigmond-wifi joins an IPv6-only AP, or on any later boot, by
+# which time /mnt/sig-media is unmounted and empty.  The `install` failed
+# silently (2>/dev/null), the `[ -x ... ]` guard was false, and the clatd
+# drop-in was never written, so clatd stayed ungated and exited 0 exactly as
+# before.  Measured on AI6VN-PM 2026-09-29 running v3.56: the gate was in
+# sigmond-v6-gateway, /usr/local/sbin/sigmond-wait-nat64 did not exist, and the
+# decoder VM had no IPv4 egress — the very failure v3.56 exists to prevent.
+#
+# Anything the running system needs must be copied off the stick during
+# first-boot.  The media is not a runtime resource.
+if [ -f /mnt/sig-media/sigmond-wait-nat64 ]; then
+    install -m 755 /mnt/sig-media/sigmond-wait-nat64 /usr/local/sbin/sigmond-wait-nat64
+    say "clat gate installed: /usr/local/sbin/sigmond-wait-nat64"
+else
+    say "WARNING: sigmond-wait-nat64 not on the media — clatd will be ungated;"
+    say "  a lost NAT64-discovery race would then be permanent (see its header)"
 fi
 # ─── offline packages, BEFORE anything expects a network ─────────────────────
 # A greenfield IPv6-only site cannot use apt at all: reaching the IPv4 mirrors
