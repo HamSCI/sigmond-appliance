@@ -85,6 +85,14 @@ usable_gw4(){
             *linkdown*)           continue ;;
             *"via 192.168.100."*) continue ;;
         esac
+        # ⛔ A default route need not HAVE a gateway.  clatd installs
+        #     default dev clat scope link
+        # -- point-to-point, no `via` at all -- and `awk '{print $3}'` on that
+        # yields the word "clat".  The console then pinged "clat" and announced
+        # "gateway clat DOES NOT RESPOND <- this host cannot reach the LAN"
+        # about a host whose IPv4 was working perfectly through that very
+        # route (AI6VN-PM v3.62, 2026-09-30).  No `via`, no gateway to report.
+        case "$_r" in *" via "*) ;; *) continue ;; esac
         _d=${_r#*" dev "}; _d=${_d%% *}
         [ -n "$_d" ] || continue
         [ "$(cat "/sys/class/net/$_d/carrier" 2>/dev/null)" = 1 ] || continue
@@ -1265,6 +1273,7 @@ iface vmbr1 inet static
     post-up iptables -t nat -C PREROUTING -p tcp --dport 8000 -j DNAT --to-destination ${MGMT_VM}:8000 2>/dev/null || iptables -t nat -A PREROUTING -p tcp --dport 8000 -j DNAT --to-destination ${MGMT_VM}:8000
     post-up iptables -t nat -C PREROUTING -p tcp --dport 8081 -j DNAT --to-destination ${MGMT_VM}:8081 2>/dev/null || iptables -t nat -A PREROUTING -p tcp --dport 8081 -j DNAT --to-destination ${MGMT_VM}:8081
     post-up iptables -t nat -C PREROUTING -p tcp --dport 8082 -j DNAT --to-destination ${MGMT_VM}:8082 2>/dev/null || iptables -t nat -A PREROUTING -p tcp --dport 8082 -j DNAT --to-destination ${MGMT_VM}:8082
+    post-up iptables -t nat -C PREROUTING -p tcp --dport 8765 -j DNAT --to-destination ${MGMT_VM}:8765 2>/dev/null || iptables -t nat -A PREROUTING -p tcp --dport 8765 -j DNAT --to-destination ${MGMT_VM}:8765
     post-up iptables -t nat -C PREROUTING -p tcp --dport 2222 -j DNAT --to-destination ${MGMT_VM}:22 2>/dev/null || iptables -t nat -A PREROUTING -p tcp --dport 2222 -j DNAT --to-destination ${MGMT_VM}:22
 NETEOF
   say "import: host-only bridge vmbr1 (${MGMT_PM}/30) added to /etc/network/interfaces"
@@ -1321,7 +1330,10 @@ fi
 # decoder VM binds externally on 22, 8000 (station-web), 8081 (ka9q-web) and
 # 8082 (gmag-webui).  ssh is forwarded on 2222 because this host's own sshd
 # owns 22.
-for _pf in 8000:8000 8081:8081 8082:8082 2222:22; do
+# 8765 is mag-usb's live sample feed: the magnetometer page is on 8082 and its
+# websocket is on 8765, so forwarding one without the other gives a dashboard
+# that loads and then reports "disconnected" for ever (AI6VN 2026-09-30).
+for _pf in 8000:8000 8081:8081 8082:8082 8765:8765 2222:22; do
   _hp=${_pf%%:*}; _gp=${_pf##*:}
   iptables -t nat -C PREROUTING -p tcp --dport "$_hp" -j DNAT --to-destination "${MGMT_VM}:${_gp}" 2>/dev/null \
     || iptables -t nat -A PREROUTING -p tcp --dport "$_hp" -j DNAT --to-destination "${MGMT_VM}:${_gp}"
@@ -1717,8 +1729,20 @@ HOSTIP=$(cur_ip vmbr0)
 # need to exclude 10.99").  Ask vmbr0 directly, and fall back excluding it.
 # hostname -I lists every address; drop the internal PM<->VM link, loopback
 # and IPv6 link-local, which is unusable without a scope id.
-[ -n "$HOSTIP" ] || HOSTIP=$(hostname -I 2>/dev/null | tr ' ' '\n' | grep -vE '^(10\.99\.0\.|127\.|fe80:)' | head -1)
-VMIP=""
+# ⛔ EXCLUDE 192.0.0.0/29 TOO.  That is the CLAT's own translation endpoint
+# (RFC 7335), present on every IPv6-only station, and it is not an address
+# anyone can reach -- not even this host, from anywhere but itself.  Without
+# this the panel advertised `ssh root@192.0.0.1`, `https://192.0.0.1:8006` and
+# `http://192.0.0.1:8081` as the station's addresses, which is every URL on the
+# screen wrong (AI6VN-PM v3.62, 2026-09-30).
+# Prefer a real global IPv6 over any leftover IPv4: on a v6-only site the
+# radio's address is the only one that works.
+[ -n "$HOSTIP" ] || HOSTIP=$(ip -6 -o addr show scope global 2>/dev/null \
+    | grep -v -e temporary -e deprecated -e ' lo ' \
+    | awk '{print $4}' | cut -d/ -f1 | head -1)
+[ -n "$HOSTIP" ] || HOSTIP=$(hostname -I 2>/dev/null | tr ' ' '\n' \
+    | grep -vE '^(10\.99\.0\.|127\.|192\.0\.0\.|fe80:)' | head -1)
+VMIP=""; VMNOTE=""
 for i in 1 2 3 4 5 6; do
   # Print the VM address THIS HOST can actually reach.  Taking whichever
   # address the guest agent happened to list first assumes they are all
@@ -1773,7 +1797,14 @@ done
 if [ -z "$VMIP" ]; then
   _mac=$(qm config "$VMID" 2>/dev/null | grep -oE "(virtio|e1000|vmxnet3|rtl8139)=[0-9A-Fa-f:]{17}" | head -1 | cut -d= -f2 | tr A-Z a-z)
   [ -n "$_mac" ] && VMIP=$(ip -4 neigh show 2>/dev/null | awk -v m="$_mac" 'tolower($5)==m && $1 !~ /^169\.254\./ {print $1; exit}')
-  [ -n "$VMIP" ] && VMIP="$VMIP (via ARP — guest agent not answering)"
+  # ⛔ KEEP THE NOTE OUT OF THE ADDRESS.  This used to append the caveat to
+  # VMIP itself, and VMIP is substituted into a command line -- so the panel
+  # printed
+  #     ssh sigmond@10.99.0.2 (via ARP — guest agent not answering)
+  # which is not a command anyone can paste, on the row an operator reaches
+  # for when the guest agent is exactly what is not answering (rob's console,
+  # v3.62, 2026-09-30).  Carry it as a separate label.
+  [ -n "$VMIP" ] && VMNOTE=" (address via ARP — guest agent not answering)"
 fi
 # ── is the station still BUILDING? ─────────────────────────────────────────
 # ⛔ "still installing" and "broken" looked identical from outside, and that
@@ -1863,8 +1894,23 @@ KA9QURL="http://${VMIP:-<starting>}:8081"
 case "${VMIP:-}" in
   10.99.0.*)
     VMBEHIND="   (private link to this host — not on your LAN)"
-    KA9QURL="http://${HOSTIP:-<no-ip-yet>}:8081        <- via this host
-   station-web  http://${HOSTIP:-<no-ip-yet>}:8000
+    # ⛔ ipurl(), not the bare address.  Once the panel started preferring the
+    # radio's global IPv6 these became `http://fd4f:a955:ac3d:2:...:8081`,
+    # which is not a URL at all -- a v6 literal needs brackets before anything
+    # can append :port (rob's console, v3.62, 2026-09-30).  The web UI line
+    # above always used ipurl; these two were simply missed, and it did not
+    # show while HOSTIP was IPv4.  ssh takes a bare literal, so the VM ssh
+    # line below is right as it stands.
+    # ⛔ ALL of them, not the two we happened to think of.  The decoder VM
+    # serves four operator-facing pages and the panel listed two, so the
+    # magnetometer dashboard and its live feed were invisible on the console
+    # even while recording (rob, v3.62, 2026-09-30) -- the same omission the
+    # RAC section had.  Ports are spelled out because the operator is often
+    # reading this while deciding what to forward.
+    KA9QURL="http://$(ipurl "${HOSTIP:-<no-ip-yet>}"):8081        <- via this host
+   station-web  http://$(ipurl "${HOSTIP:-<no-ip-yet>}"):8000
+   magnetometer http://$(ipurl "${HOSTIP:-<no-ip-yet>}"):8082
+   mag feed     ws://$(ipurl "${HOSTIP:-<no-ip-yet>}"):8765/   (live samples)
    VM ssh     ssh -p 2222 sigmond@${HOSTIP:-<no-ip-yet>}   (or: sigmond-vm)"
     ;;
 esac
@@ -1889,17 +1935,66 @@ RACBLOCK=""
 RACN=$(cat /etc/sigmond-appliance/rac-number 2>/dev/null)
 if [ -n "$RACN" ] && [ -r /etc/sigmond/frpc-host.toml ]; then
     RSRV=$(awk -F'"' '/^serverAddr/{print $2; exit}' /etc/sigmond/frpc-host.toml)
+    # ⚠ This is the frp CLIENT IDENTITY (e.g. DASI-009), not an SSH account.
+    # The panel used to print it as the ssh username on both RAC lines, so the
+    # console offered `ssh -p 51029 DASI-009@vpn.hamsci.org` -- which cannot
+    # work, on the one line an operator needs when the VM is unreachable.  It
+    # is kept only for display/diagnostics; the logins are root (Proxmox host)
+    # and hamsci (decoder VM), exactly as the local sections above say.
     RUSR=$(awk -F'"' '/^user *=/{print $2; exit}' /etc/sigmond/frpc-host.toml)
     RTIER=$(cat /etc/sigmond-appliance/rac-tier 2>/dev/null)
     RREG=$(cat /etc/sigmond-appliance/rac-registrar 2>/dev/null)
-    # name= / remotePort= pairs, in file order
-    eval "$(awk -F'"' '/^name *=/{n=$2}
-                       /^remotePort *=/{split($0,a,"="); gsub(/[ \t]/,"",a[2]);
-                                        if (n ~ /-vm-ssh$/)   print "P_VMSSH=" a[2];
-                                        else if (n ~ /-vm-web$/)  print "P_VMWEB=" a[2];
-                                        else if (n ~ /-host-ssh$/) print "P_HSSH=" a[2];
-                                        else if (n ~ /-host-ui$/)  print "P_HUI=" a[2]}' \
-              /etc/sigmond/frpc-host.toml)"
+    # ── every declared channel, grouped by WHO CAN REACH IT ────────────────
+    # ⛔ The old parser recognised exactly four suffixes and printed exactly
+    # four lines.  A station that declares six channels showed "6/6 channels
+    # up" and then listed four of them, so station-web and the magnetometer --
+    # both perfectly reachable -- were invisible to the operator reading the
+    # console (rob, v3.62, 2026-09-30).  Anything unrecognised now still gets
+    # a line, named after its own suffix, because a channel nobody can see is
+    # worse than a channel with an ugly name.
+    #
+    # The split is not cosmetic.  These are two different audiences:
+    #
+    #   ADMINISTRATORS  the Proxmox host's ssh and web UI.  Full control of
+    #                   the machine, never published to anyone else.
+    #   HamSCI USERS    the decoder VM's ssh and its web pages.  Private by
+    #                   default too: they need a WireGuard config for this
+    #                   gateway, unless a site administrator has deliberately
+    #                   published one channel.
+    #
+    # Printing them as one undifferentiated list invites exactly the wrong
+    # assumption -- that a port on a public hostname is a public service.
+    _racline(){   # _racline <suffix> <port>
+        case "$1" in
+          *-host-ssh) printf '   host ssh     ssh -p %s root@%s\n' "$2" "$RSRV" ;;
+          *-host-ui)  printf '   host UI      https://%s:%s\n' "$(ipurl "$RSRV")" "$2" ;;
+          *-vm-ssh)   printf '   VM ssh       ssh -p %s hamsci@%s\n' "$2" "$RSRV" ;;
+          *-vm-web)   printf '   ka9q-web     http://%s:%s\n' "$(ipurl "$RSRV")" "$2" ;;
+          *-vm-web2)  printf '   ka9q-web #2  http://%s:%s\n' "$(ipurl "$RSRV")" "$2" ;;
+          *-vm-web3)  printf '   ka9q-web #3  http://%s:%s\n' "$(ipurl "$RSRV")" "$2" ;;
+          *-vm-station) printf '   station-web  http://%s:%s\n' "$(ipurl "$RSRV")" "$2" ;;
+          *-vm-gmag)  printf '   magnetometer http://%s:%s\n' "$(ipurl "$RSRV")" "$2" ;;
+          *-vm-grape) printf '   GRAPE charts http://%s:%s\n' "$(ipurl "$RSRV")" "$2" ;;
+          *-ssh)      printf '   ssh          ssh -p %s hamsci@%s\n' "$2" "$RSRV" ;;
+          *-web)      printf '   web          http://%s:%s\n' "$(ipurl "$RSRV")" "$2" ;;
+          *)          printf '   %-12s port %s\n' "${1##*-}" "$2" ;;
+        esac
+    }
+    RAC_ADMIN=""; RAC_USER=""
+    while read -r _nm _pt; do
+        [ -n "$_nm" ] && [ -n "$_pt" ] || continue
+        case "$_nm" in
+            *-host-ssh|*-host-ui) RAC_ADMIN="$RAC_ADMIN$(_racline "$_nm" "$_pt")
+" ;;
+            *)                    RAC_USER="$RAC_USER$(_racline "$_nm" "$_pt")
+" ;;
+        esac
+    done <<RACEOF
+$(awk -F'"' '/^name *=/{n=$2}
+             /^remotePort *=/{split($0,a,"="); gsub(/[ \t]/,"",a[2]);
+                              if (n != "") print n, a[2]; n=""}' \
+         /etc/sigmond/frpc-host.toml)
+RACEOF
     # Live state, not a claim: frpc publishes per-proxy status on its local
     # admin API, and that is the only thing that proves the gateway accepted
     # the channels.  Fall back to the unit state if the API is not up.
@@ -1916,13 +2011,16 @@ if [ -n "$RACN" ] && [ -r /etc/sigmond/frpc-host.toml ]; then
         else RSTAT="service running, no channel accepted yet"; fi
     fi
     RACBLOCK=" Remote access  RAC $RACN on ${RSRV:-<no server>}${RTIER:+  (tier: $RTIER)}
-   status     $RSTAT
-   host ssh   ssh -p ${P_HSSH:-?} ${RUSR:-<user>}@${RSRV:-<server>}
-   host UI    https://${RSRV:-<server>}:${P_HUI:-?}
-   VM ssh     ssh -p ${P_VMSSH:-?} ${RUSR:-<user>}@${RSRV:-<server>}
-   VM web     http://${RSRV:-<server>}:${P_VMWEB:-?}${RREG:+
+   status     $RSTAT${RREG:+
    registrar  $RREG}
-"
+${RAC_ADMIN:+
+   -- ADMINISTRATORS ONLY -- full control of this machine, never published --
+$RAC_ADMIN}${RAC_USER:+
+   -- HamSCI users -- private by default, NOT public --
+$RAC_USER   These need a WireGuard config for ${RSRV:-the gateway}. A site
+   administrator can publish one of them individually; none is public
+   just because the hostname is.
+}"
 elif [ -n "$RACN" ]; then
     RACBLOCK=" Remote access  RAC $RACN assigned, but /etc/sigmond/frpc-host.toml is missing
    ==> the tunnel is NOT configured; rerun: sigmond-setup --reconfigure
@@ -1974,6 +2072,10 @@ _gw=$(usable_gw4 2>/dev/null)
 if [ -n "$_gw" ]; then
     if ping -c1 -W2 "$_gw" >/dev/null 2>&1; then _gwl="gateway $_gw responds"
     else _gwl="gateway $_gw DOES NOT RESPOND  <- this host cannot reach the LAN"; fi
+elif ip -4 route show default 2>/dev/null | grep -q " dev clat"; then
+    # 464XLAT: IPv4 leaves through the CLAT, which is point-to-point and has no
+    # gateway address.  Nothing to ping, and nothing wrong.
+    _gwl="IPv4 via the CLAT (464XLAT) -- no gateway to ping, this is normal"
 elif ip -6 route show default 2>/dev/null | grep -q .; then
     _gwl="no IPv4 gateway; this site is IPv6 -- normal here"
 else
@@ -1984,6 +2086,12 @@ _stray=""
 for _d in /sys/class/net/*; do
     _n=$(basename "$_d"); [ -e "$_d/device" ] || continue
     case "$_n" in lo|vmbr*|tap*|fwbr*|fwln*|fwpr*|veth*|bond*|dummy*|wg*|tun*) continue ;; esac
+    # ⛔ A RADIO IS NOT A STRAY CABLE.  wlp3s0 always has carrier when it is
+    # associated and is never vmbr0's port (managed mode cannot be bridged), so
+    # this fired on every healthy Wi-Fi-only station and told the operator to
+    # "move the cable, or reboot" -- advice that is wrong twice over, on a
+    # machine that was working (AI6VN-PM v3.62, 2026-09-30).
+    [ -e "$_d/wireless" ] && continue
     if [ "$(cat "$_d/carrier" 2>/dev/null)" = "1" ] && [ "$_n" != "$_vmbr_port" ]; then
         _stray=" !! $_n has a cable but vmbr0 uses ${_vmbr_port:-?}. If the network
  !!   is not working, move the cable, or reboot: the host re-binds vmbr0 to
@@ -2008,7 +2116,7 @@ ${_stray}
    web UI     https://$(ipurl "${HOSTIP:-<no-ip-yet>}"):8006
    login      root / $PWLINE
 
- Decoder VM   ${VMIP:-<starting — this panel refreshes every 5 min>}${VMBEHIND}
+ Decoder VM   ${VMIP:-<starting — this panel refreshes every 5 min>}${VMNOTE}${VMBEHIND}
    ssh        ssh sigmond@${VMIP:-<starting>}      (also: hamsci@)
    ka9q-web   ${KA9QURL}
    login      sigmond / $PWLINE
@@ -2093,7 +2201,19 @@ HOSTIP=$(cur_ip vmbr0)
 # need to exclude 10.99").  Ask vmbr0 directly, and fall back excluding it.
 # hostname -I lists every address; drop the internal PM<->VM link, loopback
 # and IPv6 link-local, which is unusable without a scope id.
-[ -n "$HOSTIP" ] || HOSTIP=$(hostname -I 2>/dev/null | tr ' ' '\n' | grep -vE '^(10\.99\.0\.|127\.|fe80:)' | head -1)
+# ⛔ EXCLUDE 192.0.0.0/29 TOO.  That is the CLAT's own translation endpoint
+# (RFC 7335), present on every IPv6-only station, and it is not an address
+# anyone can reach -- not even this host, from anywhere but itself.  Without
+# this the panel advertised `ssh root@192.0.0.1`, `https://192.0.0.1:8006` and
+# `http://192.0.0.1:8081` as the station's addresses, which is every URL on the
+# screen wrong (AI6VN-PM v3.62, 2026-09-30).
+# Prefer a real global IPv6 over any leftover IPv4: on a v6-only site the
+# radio's address is the only one that works.
+[ -n "$HOSTIP" ] || HOSTIP=$(ip -6 -o addr show scope global 2>/dev/null \
+    | grep -v -e temporary -e deprecated -e ' lo ' \
+    | awk '{print $4}' | cut -d/ -f1 | head -1)
+[ -n "$HOSTIP" ] || HOSTIP=$(hostname -I 2>/dev/null | tr ' ' '\n' \
+    | grep -vE '^(10\.99\.0\.|127\.|192\.0\.0\.|fe80:)' | head -1)
 say "─────────────────────────────────────────────────────────"
 say " Sigmond appliance $VERSION: Proxmox is installed and running."
 say "   console/SSH login: root / hamsci-sigmond  (CHANGE IT: 'passwd')"

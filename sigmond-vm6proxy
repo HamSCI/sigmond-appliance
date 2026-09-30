@@ -25,7 +25,10 @@
 set -u
 VM_IP="${SIGMOND_MGMT_VM:-10.99.0.2}"
 # listen:target -- 2222 maps to the VM's 22 because the host's own sshd owns 22.
-PORTS="8000:8000 8081:8081 8082:8082 2222:22"
+# 8765 is mag-usb's live sample feed.  Without it the magnetometer dashboard
+# loads over IPv6 and then sits "disconnected" for ever, because the page can
+# reach :8082 and its websocket cannot reach the instrument (AI6VN 2026-09-30).
+PORTS="8000:8000 8081:8081 8082:8082 8765:8765 2222:22"
 PROXY=/lib/systemd/systemd-socket-proxyd
 [ -x "$PROXY" ] || PROXY=/usr/lib/systemd/systemd-socket-proxyd
 

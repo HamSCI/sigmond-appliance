@@ -546,6 +546,63 @@ else
     bad "unit timeout (${_ut:-?}min) must exceed the gate deadline (${_gt:-?}s)"
 fi
 
+# ═══════════════════════════════════════════════════════════════════════════
+echo
+echo "console panel: says what is true, and lists everything"
+echo "───────────────────────────────────────────────────────"
+# Every one of these was WRONG on rob's console while the station was healthy
+# (AI6VN-PM, v3.62, 2026-09-30).  A panel is the only thing an operator can
+# read when the network is the thing that is broken, so a confident wrong
+# answer there is worse than no answer.
+PANEL="$WORK/sigmond-issue"
+awk '/^cat > \/usr\/local\/sbin\/sigmond-issue <<.ISSEOF.$/{f=1;next} /^ISSEOF$/{f=0} f' \
+    firstboot-v3.sh > "$PANEL"
+bash -n "$PANEL" 2>/dev/null && ok "the panel parses" || bad "the panel parses"
+
+# ── every page the VM serves, local and via RAC ────────────────────────────
+# The lists were hand-maintained: the RAC block printed "6/6 channels up" over
+# four entries, and the local block named two of four pages.
+for _p in 8081 8000 8082 8765; do
+    check "local list includes port $_p" "$PANEL" ":$_p"
+done
+check "RAC list is GENERATED from frpc-host.toml, not hardcoded" "$PANEL" \
+      'while read -r _nm _pt; do'
+check "an unknown channel still gets a line"  "$PANEL" "port %s"
+
+# ── the two audiences are not one list ─────────────────────────────────────
+check "admin-only channels are called that"  "$PANEL" "ADMINISTRATORS ONLY"
+check "and user channels are marked private" "$PANEL" "private by default, NOT public"
+check "a public hostname is not a public service" "$PANEL" "none is public"
+
+# ── ⛔ no annotation may live inside a command ─────────────────────────────
+# `VMIP="$VMIP (via ARP ...)"` put prose inside `ssh sigmond@...`, producing a
+# line that cannot be pasted -- on the row an operator needs precisely when
+# the guest agent is the thing not answering.
+if grep -q 'VMIP="\$VMIP (' "$PANEL"; then
+    bad "the ARP note is not appended to the address"
+else
+    ok "the ARP note is not appended to the address"
+fi
+check "it is carried as its own label" "$PANEL" "VMNOTE="
+
+# ── IPv6 literals must be bracketed in URLs ────────────────────────────────
+# Preferring the radio's global v6 turned these into `http://fd4f:...:8081`,
+# which is not a URL.  ssh takes a bare literal; only URLs need ipurl.
+for _svc in 8081 8000 8082; do
+    check "port $_svc URL brackets the v6 literal" "$PANEL" "ipurl \"\${HOSTIP:-<no-ip-yet>}\"):$_svc"
+done
+
+# ── the RAC logins are accounts, not the frp client identity ───────────────
+if grep -q '\*-host-ssh).*root@%s' "$PANEL"; then
+    ok "RAC host ssh uses root"; else bad "RAC host ssh uses root"; fi
+if grep -q '\*-vm-ssh).*hamsci@%s' "$PANEL"; then
+    ok "RAC VM ssh uses hamsci"; else bad "RAC VM ssh uses hamsci"; fi
+if grep -qE '\$\{RUSR:-<user>\}@' "$PANEL"; then
+    bad "the frp client identity is not used as an ssh username"
+else
+    ok "the frp client identity is not used as an ssh username"
+fi
+
 echo
 echo "─────────────────────────────────────────────────"
 printf '%d passed, %d failed\n' "$PASS" "$FAIL"
