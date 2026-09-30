@@ -647,6 +647,20 @@ if [ "$SHIP" = 1 ]; then
                         say "  [$_lab] NOTE: could not prune pending/ — remove superseded builds by hand"
                     fi
                 fi
+                # Publish credential-free fetch URLs.  A WsprDaemon station
+                # cannot install rclone to receive an image, and most have no
+                # route to wd30 or gw2 -- outbound frpc only.  Sharing is
+                # anyone-WITH-THE-LINK: not listed, not indexed, but anyone
+                # holding the URL can download it.  rob asked for exactly this
+                # (2026-09-30) so `curl` alone is enough on any station.
+                if ! _pub_is_ssh "$_d"; then
+                    for _f in "$(basename "$IMG")" "$(basename "${IMG%.img}").sha256" \
+                              "$(basename "$MANIFEST")"; do
+                        _u=$(pub_fetch_url "$_d" "pending/$_f" 2>/dev/null)
+                        [ -n "$_u" ] && say "  [$_lab] fetch $_f
+        curl -L -o '$_f' '$_u'"
+                    done
+                fi
             else
                 _allup=0
                 say "  [$_lab] WARNING: upload to $_d FAILED — check rclone and upload by hand"

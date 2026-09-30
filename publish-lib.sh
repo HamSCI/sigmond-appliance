@@ -152,6 +152,40 @@ pub_delete_pending() {
     fi
 }
 
+# pub_fetch_url <dest> <sub/name> — a URL any machine can curl, no credentials.
+#
+# ⛔ WHY.  A WsprDaemon station cannot install rclone just to receive an image,
+# and most of them have no route to wd30 or gw2 at all: they sit behind NAT
+# with nothing but an outbound frpc connection.  WB6CXC-7 on 2026-09-30 had
+# general internet, no rclone, and no route to either gateway -- so the image
+# was undeliverable despite the station being perfectly reachable FROM us.
+# rob: "there's no reason for them to [install] rclone ... you should make sure
+# [the three files] are publicly available and you can then use curl."
+#
+# `rclone link` shares the file (anyone WITH THE LINK may read; it is not
+# listed or indexed) and returns a VIEWER url.  That viewer page is not a
+# download: curl follows it to HTML, and for a multi-GB file Drive inserts a
+# virus-scan interstitial as well.  drive.usercontent.google.com with
+# `confirm=t` is the endpoint that streams the bytes, so that is what callers
+# are handed.  Verified end to end from WB6CXC-7, which fetched a published
+# checksum with no credentials of any kind.
+pub_fetch_url() {
+    local d="$1" p="$2" link id
+    if _pub_is_ssh "$d"; then
+        # Already a plain file on a host; scp is the fetch.
+        pub_link "$d" "$p"
+        return
+    fi
+    link="$(pub_link "$d" "$p")" || return 1
+    [ -n "$link" ] || return 1
+    # https://drive.google.com/open?id=<ID>  ->  the streaming endpoint
+    case "$link" in
+        *id=*) id="${link##*id=}"; id="${id%%&*}" ;;
+        *)     printf '%s\n' "$link"; return 0 ;;
+    esac
+    printf 'https://drive.usercontent.google.com/download?id=%s&export=download&confirm=t\n' "$id"
+}
+
 # pub_describe — print the resolved destinations. Call before any upload so
 # the log always answers "where did this go?" without reading the script.
 pub_describe() {
