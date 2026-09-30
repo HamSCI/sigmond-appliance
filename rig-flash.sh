@@ -16,7 +16,18 @@
 #   usage: ./rig-flash.sh [/path/to/image.img]     (default: newest in $BUILD)
 set -u
 BUILD="${SIGMOND_BUILD_DIR:-/srv/build/v3}"
-MAXSZ_GB="${RIG_FLASH_MAX_GB:-256}"
+# Upper bound on what counts as "a card someone plugged in to receive an
+# image".  rob, 2026-09-30, on the rig's own stick -- a microSD in a USB
+# adapter, 238 GiB: "look for anything under a terabyte ... removable USB disc,
+# that would be a qualification for writing to it."  Cards keep growing; 256
+# was already too tight for the one actually in use.
+#
+# ⚠ This is the LOOSEST of the three guards and the only one that is a
+# judgement call.  removable=1 and USB-attached are facts about the device; a
+# size cap is a guess about intent, and at 1 TB a USB-attached backup HDD can
+# qualify.  It is the "exactly one candidate" rule that carries the weight
+# here: two attached disks and this refuses rather than picks.
+MAXSZ_GB="${RIG_FLASH_MAX_GB:-1024}"
 ts(){ printf '%s %s\n' "$(date -u +%H:%M:%SZ)" "$*"; }
 die(){ ts "FATAL: $*"; exit 1; }
 

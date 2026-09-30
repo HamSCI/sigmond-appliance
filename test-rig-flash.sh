@@ -112,10 +112,19 @@ case "$out" in *"exactly one"*) ok "refuses when two sticks are present" ;;
 grep -q DD-CALLED "$W/ddlog" && bad "MUST NOT write when ambiguous" || ok "writes nothing when ambiguous"
 
 # ── a big USB disk (someone's backup drive) is not a target ────────────────
+# 5 TB: comfortably over the 1 TB cap, i.e. someone's backup drive.
 setup_big_usb(){ mkdisk "$1" sda 0 ata 976773168; mkdisk "$1" sdb 1 usb 9767731680; }
 out=$(run "big usb" setup_big_usb)
 case "$out" in *"NO USB STICK"*) ok "ignores a USB disk over the size cap" ;;
                *) bad "ignores a USB disk over the size cap" ;; esac
+
+# ── the card actually in the rig: a 238 GiB microSD in a USB adapter ──────
+# This is the real device, and the old 256 GB cap left it one notch from being
+# rejected.  Cards grow; the cap must not be the thing that fails.
+setup_microsd(){ mkdisk "$1" sda 0 ata 976773168; mkdisk "$1" sdb 1 usb 500118192; }
+out=$(run "238 GiB microSD" setup_microsd)
+case "$out" in *"target /dev/sdb"*) ok "a 238 GiB card qualifies" ;;
+               *) bad "a 238 GiB card qualifies: $(echo "$out" | tail -1)" ;; esac
 
 echo; printf '%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]
