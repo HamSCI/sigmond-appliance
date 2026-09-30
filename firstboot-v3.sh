@@ -990,6 +990,14 @@ cp /mnt/sig-media/sigmond-site-timing "$APP"/ 2>/dev/null
 cp /mnt/sig-media/sigmond-operator.sh "$APP"/ 2>/dev/null
 cp /mnt/sig-media/sigmond-location-check "$APP"/ 2>/dev/null
 cp /mnt/sig-media/sigmond-net-probe "$APP"/ 2>/dev/null
+# ⛔ THE STEP THAT WAS MISSING.  build-usb-v3.sh puts operator/toprc on the
+# media and firstboot installs it FROM "$APP/toprc" -- but nothing ever copied
+# it between the two, so the guard `[ -f "$APP/toprc" ]` was false on every
+# build and the block skipped in silence.  rob asked for top's P (processor)
+# column and it never shipped in any image: v3.63 has it on neither the media
+# payload nor any user's config, and the firstboot log contains neither the
+# success line nor the failure line (2026-09-30).
+cp /mnt/sig-media/toprc "$APP"/ 2>/dev/null
 if [ -f /mnt/sig-media/sigmond-wifi ]; then
     install -m 755 /mnt/sig-media/sigmond-wifi /usr/local/sbin/sigmond-wifi
 fi
@@ -1150,11 +1158,33 @@ fi
 # ~/.config/procps/toprc is the path modern top prefers (~/.toprc is legacy).
 # NEVER overwrite an existing file — a hand-tuned config is someone's work —
 # and never fail the boot over a column layout.
-if [ -f "$APP/toprc" ] && [ ! -f /root/.config/procps/toprc ]; then
-  mkdir -p /root/.config/procps 2>/dev/null \
-    && install -m 644 "$APP/toprc" /root/.config/procps/toprc 2>/dev/null \
-    && say "host: top shows the CPU column for root" \
-    || say "host: could not install toprc (top keeps its defaults)"
+# ⛔ SYSTEM-WIDE, not per-user.  rob, 2026-09-30: "make it a global so that any
+# user who invokes top gets that processor column, rather than trying to patch
+# it into each of the users' private toprcs."  He was right twice over: the
+# per-user approach also has to GUESS which accounts a human will use, and it
+# guessed wrong -- the decoder VM seeded only the installer's account and
+# `sigmond`, while rob logs in as `hamsci` and saw stock columns.
+#
+# procps-ng 4.x supports exactly this: /etc/topdefaultrc holds "defaults for
+# users who have not saved their own configuration file", in the same format
+# as a personal one (top(1) 6c).  A user who later presses `W` writes their own
+# file and takes over, which is the right precedence.
+#
+# ⚠ /etc/toprc IS A DIFFERENT FILE AND MUST NOT BE USED FOR THIS.  That is the
+# SYSTEM RESTRICTIONS file (top(1) 6d): its presence FORBIDS ordinary users
+# from kill, renice and changing the delay.  Writing a field layout there would
+# silently take capabilities away from every operator on the box.
+if [ -f "$APP/toprc" ]; then
+  if install -m 644 "$APP/toprc" /etc/topdefaultrc 2>/dev/null; then
+    say "host: top shows the CPU (P) column for every user (/etc/topdefaultrc)"
+  else
+    say "host: WARNING could not write /etc/topdefaultrc — top keeps stock columns"
+  fi
+else
+  # ⛔ Say so.  The old code could not distinguish "already present" from
+  # "never shipped", and that silence is why this went unnoticed through
+  # every build up to v3.63.
+  say "host: WARNING toprc not on the media — top will keep its default columns"
 fi
 # optional site-keys tarball: a returning station's registered upload/PSWS
 # keys, dropped by the operator onto the stick's FAT (EFI) volume after

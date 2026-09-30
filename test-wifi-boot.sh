@@ -603,6 +603,40 @@ else
     ok "the frp client identity is not used as an ssh username"
 fi
 
+# ═══════════════════════════════════════════════════════════════════════════
+echo
+echo "toprc: the file has to travel the whole way"
+echo "────────────────────────────────────────────"
+# ⛔ build-usb-v3.sh put operator/toprc on the media and firstboot installed it
+# FROM "$APP/toprc" -- and nothing copied it between the two.  The guard was
+# false on every build, the block skipped in SILENCE, and rob's `top -H`
+# processor column never shipped in any image.  v3.63 had it on neither the
+# media payload nor any user's config, and the firstboot log contained neither
+# the success line nor the failure line.
+check "the build puts toprc on the media"      build-usb-v3.sh '/tmp/sigpay.$$/toprc'
+IMPORTER2="$WORK/importer2.sh"
+awk '/^cat > \/usr\/local\/sbin\/sigmond-import.sh <<.IMPEOF.$/{f=1;next} /^IMPEOF$/{f=0} f' \
+    firstboot-v3.sh > "$IMPORTER2"
+check "and the importer stages it off the media" "$IMPORTER2" \
+      'cp /mnt/sig-media/toprc "$APP"/'
+# ⛔ SYSTEM-WIDE, not per-user.  Guessing which accounts a human will use is
+# how this goes missing: the VM seeded the installer's account and `sigmond`,
+# while rob logs in as `hamsci`.  procps-ng 4.x reads /etc/topdefaultrc as
+# "defaults for users who have not saved their own" (top(1) 6c).
+check "firstboot installs it SYSTEM-WIDE"        firstboot-v3.sh \
+      'install -m 644 "$APP/toprc" /etc/topdefaultrc'
+# ⚠ /etc/toprc is the SYSTEM RESTRICTIONS file (top(1) 6d): its presence
+# forbids ordinary users from kill, renice and changing the delay.  Writing a
+# field layout there would silently take capabilities away from every operator.
+if grep -qE '^[^#]*/etc/toprc' firstboot-v3.sh; then
+    bad "never writes /etc/toprc (that is the restrictions file)"
+else
+    ok "never writes /etc/toprc (that is the restrictions file)"
+fi
+# The silence is what hid this for good: no success line AND no failure line.
+check "a missing toprc is reported, not skipped" firstboot-v3.sh \
+      'WARNING toprc not on the media'
+
 echo
 echo "─────────────────────────────────────────────────"
 printf '%d passed, %d failed\n' "$PASS" "$FAIL"
