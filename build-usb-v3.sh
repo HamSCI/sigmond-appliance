@@ -521,6 +521,27 @@ rm -f "$IMG.xz"
 sha256sum "$IMG" | tee "${IMG%.img}.sha256"
 ls -la "$IMG"
 
+# ── a stick in the rig gets the image immediately, in parallel ─────────────
+# ⛔ The image is BUILT here.  Anyone at this machine used to wait for a 5.3 GB
+# upload to Drive and then download the same bytes back.  rob, 2026-09-30:
+# "as soon as the image is created, if there is a flash drive in that machine,
+# you should in parallel to everything else start the copy and verification."
+#
+# Backgrounded ON PURPOSE: writing and verifying a stick takes longer than the
+# uploads, and neither needs the other.  The uploads run while this does; the
+# result is collected at the END of the build so it cannot be lost in the
+# upload chatter.
+#
+# rig-flash.sh exits 2 when no stick is attached -- "nothing to write to" is
+# not a build failure, and is reported as its own case.
+_RIGFLASH_LOG=""
+if [ -x "$(dirname "$0")/rig-flash.sh" ]; then
+    _RIGFLASH_LOG="${IMG%.img}.rig-flash.log"
+    say "rig stick: write+verify started in parallel (log: $_RIGFLASH_LOG)"
+    setsid nohup "$(dirname "$0")/rig-flash.sh" "$IMG" > "$_RIGFLASH_LOG" 2>&1 < /dev/null &
+    _RIGFLASH_PID=$!
+fi
+
 # The component pin manifest: what a Release attaches, and the only record
 # of which commit of each of the ~20 components (ka9q-radio, hf-timestd,
 # wspr-recorder, ...) rode into this image. build-golden-vm.sh captures the
@@ -668,5 +689,16 @@ if [ "$SHIP" = 1 ]; then
         done
         [ "$_allup" = 1 ] || say "NOTE: at least one target above did not receive the build."
     fi
+fi
+# Collect the parallel stick write.  Reported at the END so a long verify
+# cannot be lost above the upload chatter.
+if [ -n "${_RIGFLASH_LOG:-}" ]; then
+    wait "${_RIGFLASH_PID:-0}" 2>/dev/null; _rf=$?
+    case "$_rf" in
+        0) say "rig stick: $(grep -E 'VERIFIED' "$_RIGFLASH_LOG" | tail -1)" ;;
+        2) say "rig stick: none attached — nothing written (plug one in, then run rig-flash.sh)" ;;
+        *) say "rig stick: WRITE FAILED — see $_RIGFLASH_LOG"
+           grep -E 'FATAL|MISMATCH' "$_RIGFLASH_LOG" | tail -2 | while read -r l; do say "  $l"; done ;;
+    esac
 fi
 say "USB IMAGE BUILD COMPLETE: $VERSION ($IMG)"
