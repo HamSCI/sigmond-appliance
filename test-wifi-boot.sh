@@ -461,6 +461,27 @@ grep -q '^MGMT_VM_IP=' "$V6GW" && ok "MGMT_VM_IP is defined, not assumed" \
 check "the relay binds v6 only"  sigmond-vm6proxy "BindIPv6Only=ipv6-only"
 check "and maps 2222 to the VM's 22" sigmond-vm6proxy "2222:22"
 
+# ⛔ The relay is invoked from the END of the v6 gateway, and the gateway is
+# called by sigmond-wifi-up.service. On AI6VN-PM v3.59 that unit was KILLED
+# mid-gateway: `systemctl restart clatd` blocks on clatd's ExecStartPre, which
+# is sigmond-wait-nat64 with a 180 s deadline -- identical to the unit's
+# TimeoutStartSec=3min. Everything after that line was skipped. So the relay
+# would have been absent on exactly the slow-discovery boot it exists for.
+check "the gateway does not block on clatd" "$V6GW" "systemctl restart --no-block clatd"
+if grep -qE '^[[:space:]]*systemctl restart clatd' "$V6GW"; then
+    bad "no blocking clatd restart remains"
+else
+    ok "no blocking clatd restart remains"
+fi
+# And the unit must not be able to expire inside a wait it cannot control.
+_gt=$(grep -oE 'SIGMOND_NAT64_WAIT:-[0-9]+' sigmond-wait-nat64 | grep -oE '[0-9]+$')
+_ut=$(grep -oE 'TimeoutStartSec=[0-9]+min' sigmond-wifi | grep -oE '[0-9]+')
+if [ -n "$_gt" ] && [ -n "$_ut" ] && [ "$((_ut * 60))" -gt "$_gt" ]; then
+    ok "unit timeout (${_ut}min) exceeds the gate deadline (${_gt}s)"
+else
+    bad "unit timeout (${_ut:-?}min) must exceed the gate deadline (${_gt:-?}s)"
+fi
+
 echo
 echo "─────────────────────────────────────────────────"
 printf '%d passed, %d failed\n' "$PASS" "$FAIL"

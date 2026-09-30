@@ -257,7 +257,12 @@ ExecStart=/usr/local/sbin/sigmond-wifi up
 # Never fail the boot over it: netfix runs later and reports the state, and a
 # host that will not finish booting is worse than one with no address.
 SuccessExitStatus=0 1
-TimeoutStartSec=3min
+# ⚠ Comfortably longer than anything this can wait on. It was 3min, which is
+# EXACTLY sigmond-wait-nat64's default deadline -- so a slow NAT64 discovery
+# killed this unit with certainty, and everything after the v6-gateway call was
+# skipped (AI6VN-PM, 2026-09-30). The gateway no longer blocks on clatd either;
+# this is the belt to that braces.
+TimeoutStartSec=10min
 
 [Install]
 WantedBy=multi-user.target

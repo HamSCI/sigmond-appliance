@@ -724,12 +724,31 @@ CLATD_EOF
         say "  NAT64-discovery race will be permanent (it exits 0 on no prefix)"
     fi
     systemctl enable clatd >/dev/null 2>&1
-    systemctl restart clatd >/dev/null 2>&1
+    # ⛔ --no-block, OR THIS SCRIPT'S CALLER DIES.  clatd's ExecStartPre is the
+    # gate above, which waits up to SIGMOND_NAT64_WAIT (180 s) for RFC 7050
+    # discovery.  A blocking `systemctl restart` therefore inherits that 180 s
+    # -- and sigmond-wifi-up.service, which calls this script, has
+    # TimeoutStartSec=3min.  The two numbers are identical, so a slow discovery
+    # kills the caller with certainty.  Measured on AI6VN-PM v3.59, 2026-09-30:
+    #
+    #   04:49:56 sigmond-wifi: running sigmond-v6-gateway on wlp3s0
+    #   04:52:27 sigmond-wifi-up.service: start operation timed out. Terminating.
+    #
+    # The radio had already been addressed, so the damage was not the address --
+    # it was that everything AFTER this line was skipped, and the unit was left
+    # `failed` on a host that was working.  The IPv6->VM relay is one of the
+    # things that comes after, so on precisely the boot where discovery is slow,
+    # the relay would never be installed.
+    #
+    # Nothing here needs clatd to have finished: the wait below reports on it,
+    # and clatd's own Restart=on-failure carries the retry.
+    systemctl restart --no-block clatd >/dev/null 2>&1
     for i in $(seq 1 15); do ip link show clat >/dev/null 2>&1 && break; sleep 2; done
     if ip link show clat >/dev/null 2>&1; then
         say "CLAT up: $(ip -4 -o addr show clat | awk '{print $4}') (464XLAT active)"
     else
-        say "WARNING: clatd did not create a CLAT device — IPv4 literals will fail"
+        say "CLAT not up yet — clatd is still waiting for NAT64 discovery, and"
+        say "  systemd will retry it; this is not a failure of this script"
     fi
 else
     say "WARNING: clatd is not installed; the VM will have no IPv4 path off-site"
