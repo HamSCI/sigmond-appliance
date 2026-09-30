@@ -117,6 +117,9 @@ case "$dev:$fam:${WIFI_ADDR:-none}" in
     wlp3s0:6:v6) echo "3: wlp3s0    inet6 2001:db8::5/64 scope global" ;;
     wlp3s0:4:v4) echo "3: wlp3s0    inet 192.168.9.5/24 scope global" ;;
 esac
+# A wired port that a DHCP server actually answers on.
+[ "$dev" = eno1 ] && [ "$fam" = 4 ] && [ -n "${ENO1_V4:-}" ] \
+    && echo "2: eno1    inet $ENO1_V4/24 scope global"
 [ "$dev" = vmbr0 ] && [ "$fam" = 4 ] && [ -n "${VMBR0_V4:-}" ] \
     && echo "4: vmbr0    inet $VMBR0_V4/24 scope global"
 exit 0
@@ -210,6 +213,20 @@ export WIFI_ADDR=none VMBR0_V4= WIFI_UP_SUCCEEDS=no
 run_netfix "$OUT"
 check "tries to bring a saved profile up" "$STUBLOG" "sigmond-wifi up"
 check "says why"                          "$OUT"     "saved Wi-Fi profile exists but the radio has no address"
+
+# ── 3b. a LIVE CABLE still wins — the new early exit must not fire ─────────
+# The Wi-Fi branch is an early `exit 0`. If it ever fired while a cable was
+# live, netfix would stop repairing vmbr0 on every ordinary wired station --
+# a far bigger regression than the bug it fixes.
+build_fake v6 yes
+echo 1 > "$WORK/root/sys/eno1/carrier"          # cable in eno1
+OUT="$WORK/out3b"; export STUBLOG="$WORK/stub3b"; : > "$STUBLOG"
+export WIFI_ADDR=v6 VMBR0_V4=192.168.100.2 WIFI_UP_SUCCEEDS=no ENO1_V4=10.0.0.50
+run_netfix "$OUT"
+unset ENO1_V4
+check_not "does not short-circuit while a cable works" "$OUT" "this station is on Wi-Fi"
+check     "probes the live wired port"                 "$OUT" "trying IPv4 DHCP on eno1"
+check     "and rebinds vmbr0 to it"                    "$OUT" "selected eno1"
 
 # ═══════════════════════════════════════════════════════════════════════════
 echo
