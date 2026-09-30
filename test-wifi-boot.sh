@@ -263,6 +263,71 @@ in_fake bash -c 'bash "$0" forget; [ -f /etc/systemd/system/sigmond-wifi-up.serv
 check_not "forget removes the boot unit" "$OUT" "UNIT-SURVIVED"
 check     "forget disables it"           "$STUBLOG" "systemctl disable --now sigmond-wifi-up.service"
 
+# ═══════════════════════════════════════════════════════════════════════════
+echo
+echo "clat gate: the installer's fossil is not an IPv4 uplink"
+echo "────────────────────────────────────────────────────────"
+# The same station, the same boot.  sigmond-wait-nat64 exists to hold clatd back
+# until NAT64 discovery works; on AI6VN-PM it waved clatd straight through
+# because it counted `default via 192.168.100.1 dev vmbr0 ... linkdown` -- the
+# PVE installer's unroutable fallback -- as a working IPv4 uplink.  clatd then
+# lost the discovery race and exited 0, permanently, leaving the IPv4-only
+# decoder VM with no egress.
+
+gate_run(){ # gate_run <route-output> <carrier-of-that-dev> <dns64?>
+    local route="$1" carrier="$2" dns64="$3" root="$WORK/gate"
+    rm -rf "$root"; mkdir -p "$root/bin" "$root/sys/vmbr0" "$root/sys/wlp3s0" "$root/sys/eno1"
+    printf '%s\n' "$carrier" > "$root/sys/vmbr0/carrier"
+    printf '%s\n' "$carrier" > "$root/sys/eno1/carrier"
+    printf '1\n'             > "$root/sys/wlp3s0/carrier"
+    printf '#!/bin/bash\n[ "$*" = "-4 route show default" ] && printf "%%s\\n" "$ROUTE"\nexit 0\n' \
+        > "$root/bin/ip"
+    # getent is how RFC 7050 discovery is actually performed here.
+    if [ "$dns64" = yes ]; then
+        printf '#!/bin/bash\necho "fd4f:a955:ac3d:64::c000:ab STREAM ipv4only.arpa"\n' > "$root/bin/getent"
+    else
+        printf '#!/bin/bash\nexit 2\n' > "$root/bin/getent"
+    fi
+    chmod +x "$root"/bin/*
+    ROUTE="$route" SIGMOND_NAT64_WAIT=1 SIGMOND_NAT64_INTERVAL=1 \
+        unshare -rm bash -c '
+            root="$1"; shift
+            mount --bind "$root/sys" /sys/class/net
+            export PATH="$root/bin:$PATH"
+            exec "$@"
+        ' _ "$root" bash "$REPO/sigmond-wait-nat64"
+}
+
+FOSSIL='default via 192.168.100.1 dev vmbr0 proto kernel onlink linkdown'
+REAL='default via 10.0.0.1 dev eno1 proto dhcp metric 100'
+
+# -- 8. the regression: the fossil must not count as IPv4 --------------------
+OUT="$WORK/out8"; gate_run "$FOSSIL" 0 yes > "$OUT" 2>&1; rc=$?
+check_not "fossil route is not called a working uplink" "$OUT" "no CLAT needed"
+check     "gate waits and finds the NAT64 prefix"       "$OUT" "NAT64 prefix discoverable"
+[ "$rc" = 0 ] && ok "gate lets clatd start once discovery works" \
+               || bad "gate lets clatd start once discovery works (got $rc)"
+
+# -- 9. a REAL IPv4 uplink still stands clatd down ---------------------------
+# Mutation guard: if the fix were "never take the shortcut", this fails and the
+# gate would spin for its full deadline on every ordinary dual-stack site.
+OUT="$WORK/out9"; gate_run "$REAL" 1 no > "$OUT" 2>&1; rc=$?
+check "real IPv4 route still short-circuits" "$OUT" "no CLAT needed"
+[ "$rc" = 0 ] && ok "and exits 0" || bad "and exits 0 (got $rc)"
+
+# -- 10b. a route out a port with no cable is not an uplink either -----------
+# Not every dead route carries the `linkdown` annotation -- a static route
+# written while the cable was out looks perfectly ordinary.  Carrier is the
+# question that does not depend on how the route was phrased.
+OUT="$WORK/out10b"; gate_run "$REAL" 0 yes > "$OUT" 2>&1; rc=$?
+check_not "route out a dark port is not an uplink" "$OUT" "no CLAT needed"
+check     "and the gate does its real job instead" "$OUT" "NAT64 prefix discoverable"
+
+# -- 10. no IPv4, no DNS64 yet: hold clatd back ------------------------------
+OUT="$WORK/out10"; gate_run "$FOSSIL" 0 no > "$OUT" 2>&1; rc=$?
+check "holds clatd back when nothing is discoverable" "$OUT" "not starting clatd yet"
+[ "$rc" = 1 ] && ok "and exits 1 so systemd retries" || bad "and exits 1 so systemd retries (got $rc)"
+
 echo
 echo "─────────────────────────────────────────────────"
 printf '%d passed, %d failed\n' "$PASS" "$FAIL"

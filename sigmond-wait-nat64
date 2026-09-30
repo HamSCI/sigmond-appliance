@@ -37,8 +37,47 @@ say(){ printf 'sigmond-wait-nat64: %s\n' "$*"; }
 # A host with a native IPv4 default route needs no CLAT.  clatd detects this and
 # stands down by itself, so let it start and decide -- blocking here would spin
 # forever on every ordinary dual-stack site.
-if ip -4 route show default 2>/dev/null | grep -q .; then
-    say "host already has an IPv4 default route — no CLAT needed"
+#
+# ⛔ BUT "HAS AN IPv4 DEFAULT ROUTE" IS NOT "HAS IPv4", AND THE DIFFERENCE COST
+# US THE WHOLE GATE.  The PVE installer fossilises an unroutable
+# 192.168.100.2/24 on vmbr0 when its own DHCP finds nothing, and the kernel duly
+# installs `default via 192.168.100.1 dev vmbr0 proto kernel onlink linkdown`.
+# That is a default route on a bridge with no carrier, going nowhere -- and the
+# bare `grep -q .` above matched it.
+#
+# Measured on AI6VN-PM running v3.57, 2026-09-30 01:05:00Z:
+#     sigmond-wait-nat64: host already has an IPv4 default route — no CLAT needed
+#     clatd: No PLAT prefix could be discovered ... Exiting.
+# The gate waved clatd straight through at the exact moment it was supposed to
+# hold it back; clatd lost the discovery race and exited 0, permanently, exactly
+# as before this script existed.  `getent ahostsv6 ipv4only.arpa` answered
+# fd4f:a955:ac3d:64::c000:ab when anyone asked afterwards, so the wait would have
+# succeeded.  The IPv4-only decoder VM was left with no egress at all.
+#
+# netfix deletes that fossil for the same reason -- it makes every later "do we
+# have IPv4?" test lie.  This gate must not depend on netfix having got there
+# first, so it re-asks the question honestly: a default route on an interface
+# with CARRIER, that is not the installer's fallback.
+native4=""
+while read -r _r; do
+    [ -n "$_r" ] || continue
+    case "$_r" in
+        *linkdown*)          continue ;;   # a route out a port with no cable
+        *"via 192.168.100."*) continue ;;  # the PVE installer's fossil
+    esac
+    _d=${_r#*" dev "}; _d=${_d%% *}
+    [ -n "$_d" ] || continue
+    # A bridge with no ports reports carrier 0 (or nothing at all), which is the
+    # honest answer for the fossil case and harmless for a real uplink.
+    [ "$(cat "/sys/class/net/$_d/carrier" 2>/dev/null)" = 1 ] || continue
+    native4="$_r"
+    break
+done <<EOF
+$(ip -4 route show default 2>/dev/null)
+EOF
+if [ -n "$native4" ]; then
+    say "host already has a working IPv4 default route — no CLAT needed"
+    say "  $native4"
     exit 0
 fi
 
