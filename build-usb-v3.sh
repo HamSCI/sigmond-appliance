@@ -449,6 +449,12 @@ WSEED=""
 # IPv6-only host with no IPv4 path -- and the decoder VM with no internet at all.
 # Ships here because firstboot installs it before any network is assumed.
 [ -f sigmond-wait-nat64 ] && cp sigmond-wait-nat64 /tmp/sigpay.$$/
+# IPv6 -> decoder-VM relay.  The VM is IPv4-only by design and the host forwards
+# its web ports with iptables DNAT, which cannot change address family -- so on
+# an IPv6-only site every one of the VM's operator-facing ports is dead while
+# the host's own sshd answers fine.  Measured on AI6VN-PM v3.59, 2026-09-30:
+# station-web and ka9q-web unreachable, `ip6tables -t nat -S PREROUTING` empty.
+[ -f sigmond-vm6proxy ] && cp sigmond-vm6proxy /tmp/sigpay.$$/
 # Offline .deb payload.  A greenfield IPv6-only install cannot use apt: reaching
 # the IPv4 mirrors needs the CLAT, the CLAT is clatd, and installing clatd needs
 # apt.  A host with no Ethernet has the same problem with wpasupplicant.  So the

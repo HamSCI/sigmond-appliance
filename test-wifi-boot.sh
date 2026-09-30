@@ -297,8 +297,14 @@ gate_run(){ # gate_run <route-output> <carrier-of-that-dev> <dns64?>
     printf '%s\n' "$carrier" > "$root/sys/vmbr0/carrier"
     printf '%s\n' "$carrier" > "$root/sys/eno1/carrier"
     printf '1\n'             > "$root/sys/wlp3s0/carrier"
-    printf '#!/bin/bash\n[ "$*" = "-4 route show default" ] && printf "%%s\\n" "$ROUTE"\nexit 0\n' \
-        > "$root/bin/ip"
+    cat > "$root/bin/ip" <<'IPSTUB'
+#!/bin/bash
+case "$*" in
+    "-4 route show default") printf '%s\n' "$ROUTE" ;;
+    "-4 route del"*)         echo "ip $*" >> "$ROUTELOG" ;;
+esac
+exit 0
+IPSTUB
     # getent is how RFC 7050 discovery is actually performed here.
     if [ "$dns64" = yes ]; then
         printf '#!/bin/bash\necho "fd4f:a955:ac3d:64::c000:ab STREAM ipv4only.arpa"\n' > "$root/bin/getent"
@@ -306,7 +312,8 @@ gate_run(){ # gate_run <route-output> <carrier-of-that-dev> <dns64?>
         printf '#!/bin/bash\nexit 2\n' > "$root/bin/getent"
     fi
     chmod +x "$root"/bin/*
-    ROUTE="$route" SIGMOND_NAT64_WAIT=1 SIGMOND_NAT64_INTERVAL=1 \
+    : > "$WORK/routelog"
+    ROUTE="$route" ROUTELOG="$WORK/routelog" SIGMOND_NAT64_WAIT=1 SIGMOND_NAT64_INTERVAL=1 \
         unshare -rm bash -c '
             root="$1"; shift
             mount --bind "$root/sys" /sys/class/net
@@ -325,6 +332,16 @@ check     "gate waits and finds the NAT64 prefix"       "$OUT" "NAT64 prefix dis
 [ "$rc" = 0 ] && ok "gate lets clatd start once discovery works" \
                || bad "gate lets clatd start once discovery works (got $rc)"
 
+# -- 8b. the fossil route is REMOVED, because clatd asks the same naive question
+# Teaching the gate to see through the fossil is not enough: clatd v2.1.0 runs
+# its own `ip -4 route list default` a few seconds later and stands down on any
+# match. On the v3.59 install the gate passed correctly at 04:52:27 and clatd
+# still exited at 04:52:38 -- netfix did not clear the fossil until 04:53:29,
+# 51 s late, and cannot win that race by construction (30 s carrier wait vs
+# clatd's 10 s check). So the gate removes the lie before releasing clatd.
+check "the dead route is deleted, not just ignored" "$WORK/routelog" \
+      "route del default via 192.168.100.1 dev vmbr0"
+
 # -- 9. a REAL IPv4 uplink still stands clatd down ---------------------------
 # Mutation guard: if the fix were "never take the shortcut", this fails and the
 # gate would spin for its full deadline on every ordinary dual-stack site.
@@ -339,6 +356,10 @@ check "real IPv4 route still short-circuits" "$OUT" "no CLAT needed"
 OUT="$WORK/out10b"; gate_run "$REAL" 0 yes > "$OUT" 2>&1; rc=$?
 check_not "route out a dark port is not an uplink" "$OUT" "no CLAT needed"
 check     "and the gate does its real job instead" "$OUT" "NAT64 prefix discoverable"
+# The gate deletes routes that go nowhere. It must not treat "I cannot use this
+# right now" as "this is rubbish": a cable being out is temporary, and deleting
+# the site's real default route would outlive the reason for deleting it.
+check_not "an ordinary route is never deleted"     "$WORK/routelog" "via 10.0.0.1"
 
 # -- 10. no IPv4, no DNS64 yet: hold clatd back ------------------------------
 OUT="$WORK/out10"; gate_run "$FOSSIL" 0 no > "$OUT" 2>&1; rc=$?
@@ -395,6 +416,50 @@ got=$(gw_run "$FOSSIL
 $REAL" 1)
 [ "$got" = "10.0.0.1" ] && ok "picks the real route past the fossil" \
     || bad "picks the real route past the fossil (got '$got')"
+
+# ═══════════════════════════════════════════════════════════════════════════
+echo
+echo "sigmond-vm6proxy: the VM is reachable on an IPv6-only site"
+echo "───────────────────────────────────────────────────────────"
+# rob, v3.59 install 2026-09-30: "vm web and station web are down on the
+# dashboard". Both services were running INSIDE the VM; the host simply had no
+# way to hand IPv6 clients to them. The host forwards those ports with
+# `iptables -t nat ... DNAT --to 10.99.0.2:PORT`, and a NAT rule cannot change
+# address family -- the VM is IPv4-only by design. `ip6tables -t nat -S
+# PREROUTING` on that box was empty. The relay existed and had been proven on
+# the bench weeks earlier; it had never been committed to firstboot.
+
+[ -x sigmond-vm6proxy ] && ok "the relay ships in the repo" \
+    || bad "the relay ships in the repo"
+bash -n sigmond-vm6proxy 2>/dev/null && ok "and it parses" || bad "and it parses"
+
+grep -q 'cp sigmond-vm6proxy /tmp/sigpay' build-usb-v3.sh \
+    && ok "the build copies it onto the media" \
+    || bad "the build copies it onto the media"
+
+# ⛔ Installed WHILE THE MEDIA IS MOUNTED -- the v3.56 lesson. The v6 gateway
+# that invokes it runs later, when /mnt/sig-media is gone.
+IMPORTER="$WORK/importer.sh"
+awk '/^cat > \/usr\/local\/sbin\/sigmond-import.sh <<.IMPEOF.$/{f=1;next} /^IMPEOF$/{f=0} f' \
+    firstboot-v3.sh > "$IMPORTER"
+check "the importer installs it off the media" "$IMPORTER" \
+      "install -m 755 /mnt/sig-media/sigmond-vm6proxy /usr/local/sbin/sigmond-vm6proxy"
+check "and passes the VM address to the gateway" "$IMPORTER" 'SIGMOND_MGMT_VM="$MGMT_VM"'
+
+V6GW="$WORK/v6gw.sh"
+awk '/^cat > \/usr\/local\/sbin\/sigmond-v6-gateway <<.V6GWEOF.$/{f=1;next} /^V6GWEOF$/{f=0} f' \
+    firstboot-v3.sh > "$V6GW"
+bash -n "$V6GW" 2>/dev/null && ok "the v6 gateway still parses" || bad "the v6 gateway still parses"
+check "the gateway invokes the relay" "$V6GW" "/usr/local/sbin/sigmond-vm6proxy install"
+# set -u is on in that script, so an undefined MGMT_VM_IP would abort the whole
+# gateway at runtime -- resolver, CLAT rule and all.
+grep -q '^MGMT_VM_IP=' "$V6GW" && ok "MGMT_VM_IP is defined, not assumed" \
+    || bad "MGMT_VM_IP is defined, not assumed"
+
+# The relay must bind IPv6 ONLY: IPv4 already reaches the VM through the
+# in-kernel DNAT, and a userspace hop in front of that would be a regression.
+check "the relay binds v6 only"  sigmond-vm6proxy "BindIPv6Only=ipv6-only"
+check "and maps 2222 to the VM's 22" sigmond-vm6proxy "2222:22"
 
 echo
 echo "─────────────────────────────────────────────────"

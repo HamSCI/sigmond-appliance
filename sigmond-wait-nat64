@@ -81,6 +81,53 @@ if [ -n "$native4" ]; then
     exit 0
 fi
 
+# ── ⛔ AND clatd ASKS THE SAME NAIVE QUESTION ITSELF ────────────────────────
+# Teaching this gate to see through the fossil was not enough, because clatd
+# v2.1.0 runs its own check a few seconds later (clatd:892):
+#
+#     open(my $fd, '-|', cfg("cmd-ip"), qw(-4 route list default))
+#     while(<$fd>) { if(/^default /) {
+#         p("This system already has IPv4 connectivity; no need for a CLAT.");
+#         cleanup_and_exit(0); } }
+#
+# Any default route at all, `linkdown` or not.  So on the v3.59 install of
+# AI6VN-PM the gate did its job perfectly and clatd still stood down:
+#
+#     04:52:27  clatd starts; gate says "NAT64 prefix discoverable" -> exit 0
+#     04:52:38  clatd's own check sees the fossil -> "already has IPv4" -> exit 0
+#     04:53:29  netfix removes the fossil -- 51 seconds too late
+#
+# netfix cannot win that race by construction: it spends 30 s in the carrier
+# wait before it can conclude anything, and clatd's check fires at 10 s.
+#
+# Fixing it in clatd's config would mean disabling v4-conncheck outright, which
+# would break the ordinary dual-stack site where standing down is CORRECT.  So
+# remove the LIE instead of teaching each consumer about it: by here we have
+# established there is no usable IPv4 default route, and every route still in
+# the table is therefore one that goes nowhere.  Drop them, and clatd's check
+# then sees the truth.  netfix removes the matching address later; this only
+# needs to get there first.
+#
+# ⚠ Rebuild the spec from its parts rather than feeding the line back to `ip`.
+# `linkdown` is a STATUS flag in the output, not something `ip route del`
+# accepts, so `ip route del $line` fails on exactly the routes we care about.
+while read -r _r; do
+    [ -n "$_r" ] || continue
+    case "$_r" in
+        *linkdown*|*"via 192.168.100."*) ;;
+        *) continue ;;                      # not ours to touch
+    esac
+    _gw=${_r#*" via "}; _gw=${_gw%% *}
+    _dv=${_r#*" dev "}; _dv=${_dv%% *}
+    [ -n "$_gw" ] && [ -n "$_dv" ] || continue
+    if ip -4 route del default via "$_gw" dev "$_dv" 2>/dev/null; then
+        say "removed a default route that goes nowhere, so clatd is not fooled by it"
+        say "  was: $_r"
+    fi
+done <<EOF
+$(ip -4 route show default 2>/dev/null)
+EOF
+
 end=$(( $(date +%s) + DEADLINE ))
 while :; do
     # Any AAAA for ipv4only.arpa is by definition DNS64-synthesised.

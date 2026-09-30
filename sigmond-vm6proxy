@@ -1,0 +1,107 @@
+#!/bin/bash
+# sigmond-vm6proxy — let IPv6 clients reach the IPv4-only decoder VM.
+#
+# ⛔ WHY DNAT CANNOT DO THIS.  The host forwards the VM's operator-facing ports
+# with `iptables -t nat ... DNAT --to-destination 10.99.0.2:PORT`.  That is
+# IPv4-to-IPv4.  A NAT rule cannot change address family, and the VM is IPv4-only
+# BY DESIGN (see sigmond/tasks/plan-ipv6-support.md §3: the VM never learns IPv6,
+# the host translates).  So on an IPv6-only site an operator reaching the host
+# over v6 finds ssh working -- the host's own sshd listens on v6 -- and every
+# forwarded web port dead.  Measured on AI6VN-PM after the v3.55 install,
+# 2026-09-29: IPv4 DNAT rules present, `ip6tables -t nat -S PREROUTING` empty.
+#
+# The fix is a userspace relay: accept on IPv6, connect to the VM over the
+# host-only /30.  systemd-socket-proxyd ships with systemd, so nothing new is
+# installed, and socket activation means a port with no service behind it costs
+# nothing until someone connects.
+#
+# IPv6-ONLY sockets on purpose: the existing IPv4 DNAT already handles v4 and is
+# faster (in-kernel).  Binding dual-stack here would put a userspace hop in the
+# path of traffic that works today.
+#
+#   sigmond-vm6proxy install [vm-ip]   write + enable the units
+#   sigmond-vm6proxy status
+#   sigmond-vm6proxy remove
+set -u
+VM_IP="${SIGMOND_MGMT_VM:-10.99.0.2}"
+# listen:target -- 2222 maps to the VM's 22 because the host's own sshd owns 22.
+PORTS="8000:8000 8081:8081 8082:8082 2222:22"
+PROXY=/lib/systemd/systemd-socket-proxyd
+[ -x "$PROXY" ] || PROXY=/usr/lib/systemd/systemd-socket-proxyd
+
+say(){ printf '%s\n' "$*"; }
+
+cmd_install(){
+    [ -x "$PROXY" ] || { say "systemd-socket-proxyd not found — cannot proxy"; return 1; }
+    local pair lp tp
+    for pair in $PORTS; do
+        lp="${pair%%:*}"; tp="${pair##*:}"
+        cat > "/etc/systemd/system/sigmond-vm6proxy@${lp}.socket" <<EOF
+[Unit]
+Description=IPv6 listener for the decoder VM's port ${lp}
+Documentation=man:systemd-socket-proxyd(8)
+
+[Socket]
+# IPv6 ONLY: IPv4 already reaches the VM through the in-kernel DNAT rule, and
+# putting a userspace hop in front of that would be a regression.
+ListenStream=[::]:${lp}
+BindIPv6Only=ipv6-only
+Accept=no
+
+[Install]
+WantedBy=sockets.target
+EOF
+        cat > "/etc/systemd/system/sigmond-vm6proxy@${lp}.service" <<EOF
+[Unit]
+Description=Relay IPv6 :${lp} to the decoder VM ${VM_IP}:${tp}
+Requires=sigmond-vm6proxy@${lp}.socket
+After=sigmond-vm6proxy@${lp}.socket
+
+[Service]
+ExecStart=${PROXY} ${VM_IP}:${tp}
+# The VM may be down or still booting; a dead relay must not mask that as a
+# failed unit the operator has to clear.
+Restart=no
+EOF
+    done
+    systemctl daemon-reload
+    for pair in $PORTS; do
+        lp="${pair%%:*}"
+        systemctl enable --now "sigmond-vm6proxy@${lp}.socket" >/dev/null 2>&1
+    done
+    cmd_status
+}
+
+cmd_status(){
+    local pair lp tp st
+    for pair in $PORTS; do
+        lp="${pair%%:*}"; tp="${pair##*:}"
+        st=$(systemctl is-active "sigmond-vm6proxy@${lp}.socket" 2>/dev/null)
+        # Report whether the VM is actually serving, not merely whether we listen.
+        if timeout 3 bash -c "exec 3<>/dev/tcp/${VM_IP}/${tp}" 2>/dev/null; then
+            printf '  :%-5s -> %s:%-5s  socket=%-8s VM=serving\n' "$lp" "$VM_IP" "$tp" "$st"
+        else
+            printf '  :%-5s -> %s:%-5s  socket=%-8s VM=NOT serving (nothing to reach yet)\n' \
+                   "$lp" "$VM_IP" "$tp" "$st"
+        fi
+    done
+}
+
+cmd_remove(){
+    local pair lp
+    for pair in $PORTS; do
+        lp="${pair%%:*}"
+        systemctl disable --now "sigmond-vm6proxy@${lp}.socket" >/dev/null 2>&1
+        rm -f "/etc/systemd/system/sigmond-vm6proxy@${lp}.socket" \
+              "/etc/systemd/system/sigmond-vm6proxy@${lp}.service"
+    done
+    systemctl daemon-reload
+    say "removed"
+}
+
+case "${1:-status}" in
+    install) shift; [ $# -gt 0 ] && VM_IP="$1"; cmd_install ;;
+    status)  cmd_status ;;
+    remove)  cmd_remove ;;
+    *) say "usage: sigmond-vm6proxy {install [vm-ip] | status | remove}"; exit 2 ;;
+esac

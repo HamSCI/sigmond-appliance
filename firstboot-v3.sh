@@ -635,6 +635,7 @@ say(){ printf '%s\n' "$*"; logger -t "$TAG" -- "$*" 2>/dev/null || true; }
 DEV="${SIGMOND_V6_DEV:-vmbr0}"
 MGMT_VM_NET="${SIGMOND_MGMT_NET:-10.99.0.0/30}"
 MGMT_PM_IP="${SIGMOND_MGMT_PM:-10.99.0.1}"
+MGMT_VM_IP="${SIGMOND_MGMT_VM:-10.99.0.2}"
 
 have4=$(ip -4 -o addr show dev "$DEV" scope global 2>/dev/null | wc -l)
 have6=$(ip -6 -o addr show dev "$DEV" scope global 2>/dev/null | grep -vc -e temporary -e deprecated)
@@ -767,6 +768,25 @@ fi
 #    matches nothing and this is the only one that carries the guest.
 iptables -t nat -C POSTROUTING -s "$MGMT_VM_NET" -o clat -j MASQUERADE 2>/dev/null \
   || iptables -t nat -A POSTROUTING -s "$MGMT_VM_NET" -o clat -j MASQUERADE
+
+# 5. INBOUND, which egress does not give us.  The host forwards the VM's
+#    operator-facing ports with `iptables -t nat ... DNAT --to 10.99.0.2:PORT`,
+#    and a NAT rule cannot change address family.  The VM is IPv4-only by
+#    design (plan-ipv6-support.md §3: the VM never learns IPv6, the host
+#    translates), so on a v6-only site an operator reaching this host over IPv6
+#    finds its own sshd answering and every forwarded port of the VM dead.
+#    rob hit exactly that on the v3.59 install, 2026-09-30: "vm web and station
+#    web are down on the dashboard", with station-web and ka9q-web both fine
+#    inside the VM and `ip6tables -t nat -S PREROUTING` empty.
+#    systemd-socket-proxyd relays v6 -> the host-only /30. Nothing to install.
+if [ -x /usr/local/sbin/sigmond-vm6proxy ]; then
+    say "IPv6 -> VM relay (DNAT cannot cross address families):"
+    SIGMOND_MGMT_VM="$MGMT_VM_IP" /usr/local/sbin/sigmond-vm6proxy install 2>&1 \
+        | while IFS= read -r _l; do say "  $_l"; done
+else
+    say "WARNING: sigmond-vm6proxy missing — the VM's web ports stay unreachable"
+    say "  over IPv6; only the host itself will answer."
+fi
 say "done"
 V6GWEOF
 chmod +x /usr/local/sbin/sigmond-v6-gateway
@@ -938,6 +958,16 @@ fi
 #
 # Anything the running system needs must be copied off the stick during
 # first-boot.  The media is not a runtime resource.
+# Same rule as the CLAT gate: copy it off the media NOW, while the media is
+# mounted.  The v6 gateway that invokes it runs later, when /mnt/sig-media is
+# gone.
+if [ -f /mnt/sig-media/sigmond-vm6proxy ]; then
+    install -m 755 /mnt/sig-media/sigmond-vm6proxy /usr/local/sbin/sigmond-vm6proxy
+    say "IPv6->VM relay installed: /usr/local/sbin/sigmond-vm6proxy"
+else
+    say "WARNING: sigmond-vm6proxy not on the media — on an IPv6-only site the"
+    say "  decoder VM's web ports will be unreachable (DNAT cannot cross families)"
+fi
 if [ -f /mnt/sig-media/sigmond-wait-nat64 ]; then
     install -m 755 /mnt/sig-media/sigmond-wait-nat64 /usr/local/sbin/sigmond-wait-nat64
     say "clat gate installed: /usr/local/sbin/sigmond-wait-nat64"
@@ -1267,7 +1297,7 @@ fi
 # the guest can reach anything.  Runs here because vmbr1 and the NAT rules now
 # exist and the site link has settled.  No-op on an IPv4 site.
 if [ -x /usr/local/sbin/sigmond-v6-gateway ]; then
-  SIGMOND_MGMT_NET="$MGMT_NET" SIGMOND_MGMT_PM="$MGMT_PM" \
+  SIGMOND_MGMT_NET="$MGMT_NET" SIGMOND_MGMT_PM="$MGMT_PM" SIGMOND_MGMT_VM="$MGMT_VM" \
     /usr/local/sbin/sigmond-v6-gateway 2>&1 | while IFS= read -r _l; do say "v6gw: $_l"; done
 fi
 
