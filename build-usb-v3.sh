@@ -617,9 +617,7 @@ if [ "$SHIP" = 1 ]; then
                 continue
             fi
             _up=1
-            for _f in "$IMG" "${IMG%.img}.sha256" "$MANIFEST"; do
-                rclone copy -q "$_f" "$_d/pending/" 2>>"$LOG" || _up=0
-            done
+            pub_put "$_d" pending "$IMG" "${IMG%.img}.sha256" "$MANIFEST" 2>>"$LOG" || _up=0
             if [ "$_up" = 1 ]; then
                 say "  [$_lab] uploaded to $_d/pending/ (UNTESTED)"
             else

@@ -755,7 +755,7 @@ if [ $RC -eq 0 ]; then
                 say "  [$_lab] blessed-only target — uploading $IMGBASE now"
                 for _f in "$IMGBASE" "${IMGBASE%.img}.sha256" "$(basename "$MANIFEST")"; do
                     [ -f "$_SRCDIR/$_f" ] || { say "  [$_lab] MISSING locally: $_f"; _ok=0; continue; }
-                    rclone copyto -q "$_SRCDIR/$_f" "$_d/$_f" 2>/dev/null || _ok=0
+                    pub_put "$_d" "" "$_SRCDIR/$_f" 2>/dev/null || _ok=0
                 done
                 # A blessed-only target must not carry a pending/ at all --
                 # its whole promise is that every file in the folder is
@@ -763,20 +763,18 @@ if [ $RC -eq 0 ]; then
                 # to blessed (mjh's did, holding an untested v3.52).  Remove
                 # it ONLY after this build's blessed copy has landed, so the
                 # folder is never left without an image.
-                if [ "$_ok" = 1 ] && rclone lsf "$_d/pending/" >/dev/null 2>&1; then
-                    if rclone purge "$_d/pending" 2>/dev/null; then
+                if [ "$_ok" = 1 ] && pub_has_pending "$_d"; then
+                    if pub_purge_pending "$_d"; then
                         say "  [$_lab] removed stale pending/ — a blessed-only folder holds no unblessed builds"
                     else
                         say "  [$_lab] NOTE: could not remove $_d/pending — remove it by hand"
                     fi
                 fi
             else
-            for _f in "$IMGBASE" "${IMGBASE%.img}.sha256" "$(basename "$MANIFEST")"; do
-                rclone moveto -q "$_d/pending/$_f" "$_d/$_f" 2>/dev/null || _ok=0
-            done
+            pub_promote "$_d" "$IMGBASE" "${IMGBASE%.img}.sha256" "$(basename "$MANIFEST")" 2>/dev/null || _ok=0
             fi
             if [ "$_ok" = 1 ]; then
-                _link="$(rclone link "$_d/$IMGBASE" 2>/dev/null)"
+                _link="$(pub_link "$_d" "$IMGBASE")"
                 say "  [$_lab] promoted: $_d/$IMGBASE"
                 [ -n "$_link" ] && say "  [$_lab] link: $_link"
             else
