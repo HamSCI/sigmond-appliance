@@ -64,6 +64,37 @@ cur_ip(){
 # A v6 literal needs brackets in a URL and in anything that appends :port.
 # `https://2001:db8::1:8006` is not a URL; `https://[2001:db8::1]:8006` is.
 ipurl(){ case "${1:-}" in *:*) printf '[%s]\n' "$1";; *) printf '%s\n' "${1:-}";; esac; }
+
+# ⛔ "HAS A DEFAULT ROUTE" IS NOT "HAS A GATEWAY THAT WORKS".
+# The PVE installer fossilises an unroutable 192.168.100.2/24 on vmbr0 when its
+# DHCP finds nothing, and the kernel installs `default via 192.168.100.1 dev
+# vmbr0 ... linkdown`.  Anything that takes `ip route show default | awk
+# '{print $3}'` therefore gets a gateway that answers nothing -- and on a host
+# with BOTH families, the first line may be an IPv6 link-local, which is not an
+# address an IPv4-only guest can use at all.
+#
+# That mistake cost us the CLAT gate on 2026-09-30 (see sigmond-wait-nat64), so
+# ask the question once, here, properly: the gateway of an IPv4 default route
+# that is not the installer's fallback and whose interface has CARRIER.
+# Prints nothing when there is no such gateway -- callers must handle that.
+usable_gw4(){
+    local _r _d
+    while read -r _r; do
+        [ -n "$_r" ] || continue
+        case "$_r" in
+            *linkdown*)           continue ;;
+            *"via 192.168.100."*) continue ;;
+        esac
+        _d=${_r#*" dev "}; _d=${_d%% *}
+        [ -n "$_d" ] || continue
+        [ "$(cat "/sys/class/net/$_d/carrier" 2>/dev/null)" = 1 ] || continue
+        printf '%s\n' "$_r" | awk '{print $3}'
+        return 0
+    done <<GWEOF
+$(ip -4 route show default 2>/dev/null)
+GWEOF
+    return 1
+}
 NETLIBEOF
 chmod 0644 /usr/local/lib/sigmond-net.sh
 
@@ -1132,7 +1163,11 @@ MGMT_NET=10.99.0.0/30
 # to a public one.
 PM_DNS=$(awk '/^nameserver/{print $2; exit}' /etc/resolv.conf 2>/dev/null)
 case "$PM_DNS" in
-  127.*|"") PM_DNS=$(ip route show default 2>/dev/null | awk '{print $3; exit}') ;;
+  # ⛔ Not `ip route show default | awk '{print $3}'`.  That takes the FIRST
+  # default route of either family, which on this appliance can be the PVE
+  # installer's dead 192.168.100.1, or an IPv6 link-local -- and the guest is
+  # IPv4-only, so neither is a resolver it can use.  usable_gw4() asks properly.
+  127.*|"") PM_DNS=$(. /usr/local/lib/sigmond-net.sh 2>/dev/null && usable_gw4) ;;
 esac
 [ -n "$PM_DNS" ] || PM_DNS=1.1.1.1
 
@@ -1864,10 +1899,14 @@ for _d in /sys/class/net/*; do
 done
 # A gateway that does not answer is the difference between "configured" and
 # "reachable", and only the second one matters to an operator.
-_gw=$(ip route show default 2>/dev/null | awk '{print $3; exit}')
+# usable_gw4() skips the installer's dead 192.168.100.1 and anything on a port
+# with no carrier, so a Wi-Fi-only station is not told its gateway is down.
+_gw=$(usable_gw4 2>/dev/null)
 if [ -n "$_gw" ]; then
     if ping -c1 -W2 "$_gw" >/dev/null 2>&1; then _gwl="gateway $_gw responds"
     else _gwl="gateway $_gw DOES NOT RESPOND  <- this host cannot reach the LAN"; fi
+elif ip -6 route show default 2>/dev/null | grep -q .; then
+    _gwl="no IPv4 gateway; this site is IPv6 -- normal here"
 else
     _gwl="NO DEFAULT ROUTE  <- this host cannot reach anything"
 fi

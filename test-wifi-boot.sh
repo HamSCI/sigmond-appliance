@@ -345,6 +345,57 @@ OUT="$WORK/out10"; gate_run "$FOSSIL" 0 no > "$OUT" 2>&1; rc=$?
 check "holds clatd back when nothing is discoverable" "$OUT" "not starting clatd yet"
 [ "$rc" = 1 ] && ok "and exits 1 so systemd retries" || bad "and exits 1 so systemd retries (got $rc)"
 
+# ═══════════════════════════════════════════════════════════════════════════
+echo
+echo "usable_gw4: the shared answer to 'is there a gateway that works?'"
+echo "──────────────────────────────────────────────────────────────────"
+# The CLAT gate got this wrong once; two more callers asked the same question
+# the same naive way (the decoder VM's resolver fallback, and the console
+# panel's gateway line). The helper now owns it, so it needs its own guards.
+
+gw_run(){ # gw_run <route-output> <carrier-of-eno1> [carrier-of-vmbr0]
+    local route="$1" carrier="$2" vcarrier="${3:-0}" root="$WORK/gw"
+    rm -rf "$root"; mkdir -p "$root/bin" "$root/lib" "$root/sys/vmbr0" "$root/sys/eno1"
+    printf '%s\n' "$vcarrier" > "$root/sys/vmbr0/carrier"
+    printf '%s\n' "$carrier"  > "$root/sys/eno1/carrier"
+    awk '/^cat > \/usr\/local\/lib\/sigmond-net.sh <<.NETLIBEOF.$/{f=1;next} /^NETLIBEOF$/{f=0} f' \
+        "$REPO/firstboot-v3.sh" > "$root/lib/sigmond-net.sh"
+    printf '#!/bin/bash\n[ "$*" = "-4 route show default" ] && printf "%%s\\n" "$ROUTE"\nexit 0\n' \
+        > "$root/bin/ip"; chmod +x "$root/bin/ip"
+    ROUTE="$route" unshare -rm bash -c '
+        root="$1"; shift
+        mount --bind "$root/sys" /sys/class/net
+        export PATH="$root/bin:$PATH"
+        . "$root/lib/sigmond-net.sh"
+        usable_gw4
+    ' _ "$root"
+}
+
+got=$(gw_run "$FOSSIL" 0); rc=$?
+[ -z "$got" ] && [ "$rc" != 0 ] && ok "fossil gateway yields nothing" \
+    || bad "fossil gateway yields nothing (got '$got' rc=$rc)"
+
+got=$(gw_run "$REAL" 1)
+[ "$got" = "10.0.0.1" ] && ok "a real gateway is returned" \
+    || bad "a real gateway is returned (got '$got')"
+
+got=$(gw_run "$REAL" 0)
+[ -z "$got" ] && ok "a gateway out a dark port yields nothing" \
+    || bad "a gateway out a dark port yields nothing (got '$got')"
+
+# The case that makes the fossil check load-bearing: the cable IS in the port
+# vmbr0 owns, so carrier is 1 and there is no `linkdown` flag -- the installer's
+# DHCP simply went unanswered. Carrier cannot catch this one; only knowing the
+# address is the fallback can.
+got=$(gw_run "default via 192.168.100.1 dev vmbr0 proto kernel onlink" 0 1)
+[ -z "$got" ] && ok "fossil on a LIVE port still yields nothing" \
+    || bad "fossil on a LIVE port still yields nothing (got '$got')"
+
+got=$(gw_run "$FOSSIL
+$REAL" 1)
+[ "$got" = "10.0.0.1" ] && ok "picks the real route past the fossil" \
+    || bad "picks the real route past the fossil (got '$got')"
+
 echo
 echo "─────────────────────────────────────────────────"
 printf '%d passed, %d failed\n' "$PASS" "$FAIL"
