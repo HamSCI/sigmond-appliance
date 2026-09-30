@@ -209,6 +209,42 @@ if [ -n "$_wl_bridged" ]; then
     say "  $_wl_bridged is now standalone with IPv6 enabled (backup: $IFACES.pre-unbridge)"
 fi
 
+# ── ⛔ A RADIO WITH AN ADDRESS IS NOT A DEAD INSTALL ────────────────────────
+# Everything below hunts for a NIC to put vmbr0 on, and it skips Wi-Fi for a
+# good reason (a managed-mode wlan cannot be bridged).  But "no NIC I can
+# bridge" is not the same question as "is this machine on the network", and
+# conflating them condemned a perfectly connected station.
+#
+# Measured on rob's AI6VN-PM, v3.57, 2026-09-30: the wizard's Wi-Fi step joined
+# an AP and took an IPv6 address, the finalizer power-cycled as designed, and
+# the next boot printed NO NETWORK CABLE DETECTED -- naming the two dark
+# Ethernet ports and never once looking at the radio that was the machine's
+# only uplink.  The operator is then sent to find a cable for a host that
+# needs none, which is the whole point of the Wi-Fi support.
+#
+# So: ask the radio first, and if it is merely unaddressed, ADDRESS IT.  At
+# this point in a boot sigmond-wifi-up.service has usually run already; this is
+# the backstop for when it has not (a slow association, or a station whose
+# profile predates that unit).
+wifi_uplink(){
+    local d n a
+    for d in /sys/class/net/*/wireless; do
+        [ -e "$d" ] || continue
+        n=$(basename "$(dirname "$d")")
+        a=$(cur_ip "$n")
+        [ -n "$a" ] && { printf '%s %s\n' "$n" "$a"; return 0; }
+    done
+    return 1
+}
+WIFI_UP="$(wifi_uplink || true)"
+if [ -z "$WIFI_UP" ] && [ -s /var/lib/sigmond/wifi-ssid ] \
+   && [ -x /usr/local/sbin/sigmond-wifi ]; then
+    say "a saved Wi-Fi profile exists but the radio has no address — bringing it up"
+    /usr/local/sbin/sigmond-wifi up >>"$LOG" 2>&1
+    WIFI_UP="$(wifi_uplink || true)"
+fi
+[ -n "$WIFI_UP" ] && say "Wi-Fi uplink is live: $WIFI_UP"
+
 # ── is there anything to do? ────────────────────────────────────────────────
 # Only act when vmbr0 has NO address or is sitting on the installer's
 # fallback.  A station with a real lease is never touched -- this must not
@@ -313,6 +349,38 @@ done
 say "link up:${LIVE:- none}${LIVE_ENSLAVED:+ ; link up but enslaved:$LIVE_ENSLAVED}${DEAD:+ ; no link:$DEAD}"
 
 if [ -z "$LIVE" ] && [ -z "$LIVE_ENSLAVED" ]; then
+    # No cable anywhere -- but the radio may BE the uplink, by design.
+    if [ -n "$WIFI_UP" ]; then
+        say "no Ethernet link on$ALLPHYS — but this station is on Wi-Fi ($WIFI_UP)"
+        say "  that is a supported configuration: a DASI station runs cable-free"
+        say "  on purpose (an Ethernet run into the shack is a conducted noise"
+        say "  path into the HF receiver). vmbr0 stays portless; the decoder VM"
+        say "  reaches the site through this host, not through a bridge."
+        # The installer's fallback address must not survive here.  Left in
+        # place it answers "yes" to every later "do we have IPv4?" test --
+        # including the one sigmond-v6-gateway keys off -- while routing
+        # nowhere.  Same reasoning as the v6-only branch below.
+        if ip -4 -o addr show vmbr0 2>/dev/null | grep -q "$FALLBACK_NET"; then
+            ip addr del 192.168.100.2/24 dev vmbr0 2>/dev/null \
+                && say "  removed the unroutable installer fallback 192.168.100.2 from vmbr0"
+            sed -i -e '/^iface vmbr0 inet static/,/^[[:space:]]*$/{/^[[:space:]]*address[[:space:]]/d;/^[[:space:]]*gateway[[:space:]]/d;}' \
+                "$IFACES" 2>/dev/null
+        fi
+        # ⛔ And masquerade the decoder VM out of the RADIO.  The vmbr1 stanza
+        # written by the importer masquerades `-o vmbr0` and `-o clat` only --
+        # both correct for the sites they were written for, and neither one is
+        # the uplink here.  Without this rule the VM is routed to a host that
+        # drops it: the station looks fine and decodes nothing.
+        # 10.99.0.0/30 is the host-only management net (MGMT_NET in the
+        # importer); netfix is a standalone script and cannot see that variable.
+        _wdev="${WIFI_UP%% *}"
+        if ! iptables -t nat -C POSTROUTING -s 10.99.0.0/30 -o "$_wdev" -j MASQUERADE 2>/dev/null; then
+            iptables -t nat -A POSTROUTING -s 10.99.0.0/30 -o "$_wdev" -j MASQUERADE 2>/dev/null \
+                && say "  decoder VM is now NATed out $_wdev"
+        fi
+        rm -f /etc/sigmond-appliance/.network-unreachable 2>/dev/null
+        exit 0
+    fi
     net_dead "NO NETWORK CABLE DETECTED" \
              "None of this machine's network ports has a link signal:" \
              "$ALLPHYS"
@@ -441,6 +509,13 @@ for n in $LIVE; do
     say "  $n has link but offered no address in either family"
 done
 if [ -z "$WINNER" ]; then
+    # Same distinction as the no-cable branch: a cable that offers nothing is
+    # not a dead machine when the radio is already carrying the station.
+    if [ -n "$WIFI_UP" ]; then
+        say "no port offered an address, but this station is on Wi-Fi ($WIFI_UP) — leaving it alone"
+        rm -f /etc/sigmond-appliance/.network-unreachable 2>/dev/null
+        exit 0
+    fi
     net_dead "NO ADDRESS OFFERED, IPv4 OR IPv6" \
              "These ports have a cable, but nothing answered on either family:" \
              "$LIVE"

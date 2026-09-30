@@ -3,6 +3,7 @@
 #
 #   sigmond-wifi scan              list access points, strongest first
 #   sigmond-wifi join <ssid>       passphrase on stdin; associate, address, persist
+#   sigmond-wifi up                re-address a saved profile (runs at boot)
 #   sigmond-wifi status
 #   sigmond-wifi forget            drop the association and its persistence
 #
@@ -146,6 +147,17 @@ cmd_join(){
     fi
     say "associated with $ssid ($(wpa_cli -i "$dev" status | sed -n 's/^freq=//p') MHz)"
 
+    printf '%s\n' "$ssid" > "$STATE_DIR/wifi-ssid"
+    install_boot_unit "$dev"
+    wifi_addr_up "$dev"
+}
+
+# ── address the radio, BOTH families ─────────────────────────────────────────
+# Split out of cmd_join so the BOOT path runs the identical code.  It used to
+# live inline in join, and that is precisely why a Wi-Fi-only station died on
+# its first reboot: see install_boot_unit().
+wifi_addr_up(){
+    local dev="$1"
     # ── address, BOTH families ───────────────────────────────────────────────
     # Start clean -- but SCOPE GLOBAL ONLY.
     #
@@ -188,12 +200,11 @@ cmd_join(){
                | grep -v -e temporary -e deprecated | awk '{print $4; exit}')
     fi
 
-    printf '%s\n' "$ssid" > "$STATE_DIR/wifi-ssid"
     say "  IPv4: ${got4:-none}"
     say "  IPv6: ${got6:-none}"
     if [ -z "$got4" ] && [ -z "$got6" ]; then
         say "  ⚠ associated but NO address in either family — the AP gave us nothing."
-        log "join $ssid: associated, no address"
+        log "addr $dev: associated, no address"
         return 1
     fi
     if [ -z "$got4" ] && [ -n "$got6" ]; then
@@ -205,7 +216,85 @@ cmd_join(){
             say "  ⚠ sigmond-v6-gateway missing — this host will have no resolver and no CLAT"
         fi
     fi
-    log "join $ssid: ok (v4=${got4:-none} v6=${got6:-none})"
+    log "addr $dev: ok (v4=${got4:-none} v6=${got6:-none})"
+}
+
+# ── ⛔ ADDRESSING MUST SURVIVE A REBOOT, AND IT DID NOT ───────────────────────
+# `join` persisted the ASSOCIATION -- wpa_supplicant@<dev>.service enabled, its
+# conf written -- and nothing else.  Every address the station had was acquired
+# imperatively, right here, by the operator's one interactive run: the dhclient
+# call, the RA wait, and above all the three sysctls.  None of that is state;
+# all of it is gone at the next boot.
+#
+# So a Wi-Fi-only station came up ASSOCIATED AND ADDRESSLESS.  ifupdown has no
+# stanza for the radio, so nothing asks for DHCP; and accept_ra reverts to the
+# kernel default of 1, which a FORWARDING host (this one routes for the decoder
+# VM) uses to ignore router advertisements outright -- so SLAAC does nothing
+# either.  Measured on rob's AI6VN-PM, v3.57, 2026-09-30: the wizard's Wi-Fi
+# step joined and got IPv6, the finalizer power-cycled as designed, and the
+# host came back with two dark Ethernet ports and a radio holding no address.
+#
+# A oneshot at boot rather than an /etc/network/interfaces stanza ON PURPOSE:
+# wpa_supplicant@<dev>.service already owns the association, and an `auto`
+# ifupdown stanza would race it -- dhclient firing before the radio has
+# associated, then never retrying.  This waits for the association first and
+# then runs the SAME addressing code the operator's join ran.
+install_boot_unit(){
+    local dev="$1"
+    cat > /etc/systemd/system/sigmond-wifi-up.service <<UNITEOF
+[Unit]
+Description=Sigmond: address the Wi-Fi radio once it associates
+# The association is wpa_supplicant's job; ours starts after it.
+After=wpa_supplicant@${dev}.service network-pre.target
+Wants=wpa_supplicant@${dev}.service
+Before=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+Environment=SIGMOND_WIFI_DEV=${dev}
+ExecStart=/usr/local/sbin/sigmond-wifi up
+# Never fail the boot over it: netfix runs later and reports the state, and a
+# host that will not finish booting is worse than one with no address.
+SuccessExitStatus=0 1
+TimeoutStartSec=3min
+
+[Install]
+WantedBy=multi-user.target
+UNITEOF
+    systemctl daemon-reload >/dev/null 2>&1
+    systemctl enable sigmond-wifi-up.service >/dev/null 2>&1
+    say "  addressing will be re-applied at every boot (sigmond-wifi-up.service)"
+}
+
+# ── re-address at boot ───────────────────────────────────────────────────────
+# wpa_supplicant is already running by the time systemd orders us here, but
+# "started" is not "associated": the 4-way handshake takes seconds, and asking
+# for an address before it completes gets nothing and does not retry.
+cmd_up(){
+    local dev; dev=$(wifi_dev)
+    [ -n "$dev" ] || { say "no wireless interface on this host"; return 1; }
+    [ -s "$STATE_DIR/wifi-ssid" ] || { say "no saved Wi-Fi profile — nothing to bring up"; return 0; }
+    local ssid; ssid=$(cat "$STATE_DIR/wifi-ssid")
+    # Self-heal a station whose profile predates the boot unit -- rob's
+    # AI6VN-PM joined under v3.57, which had no such unit to install.  Without
+    # this, netfix's backstop would address the radio on every boot forever and
+    # the real repair would never happen.
+    [ -f /etc/systemd/system/sigmond-wifi-up.service ] || install_boot_unit "$dev"
+    ip link set "$dev" up 2>/dev/null
+    local st=""
+    for _ in $(seq 1 "${SIGMOND_WIFI_ASSOC_WAIT:-30}"); do
+        st=$(wpa_cli -i "$dev" status 2>/dev/null | sed -n 's/^wpa_state=//p')
+        [ "$st" = COMPLETED ] && break
+        sleep 2
+    done
+    if [ "$st" != COMPLETED ]; then
+        say "$dev did not associate with $ssid (wpa_state=${st:-unknown})"
+        log "up $dev: no association with $ssid (state=${st:-unknown})"
+        return 1
+    fi
+    say "associated with $ssid — addressing $dev"
+    wifi_addr_up "$dev"
 }
 
 cmd_status(){
@@ -217,6 +306,9 @@ cmd_status(){
     say "signal      $(iw dev "$dev" link 2>/dev/null | sed -n 's/.*signal: //p' | head -1)"
     ip -br addr show "$dev" 2>/dev/null | sed 's/^/address     /'
     say "persistent  $(systemctl is-enabled "wpa_supplicant@${dev}.service" 2>/dev/null)"
+    # Both halves must be persistent.  An enabled association with no boot-time
+    # addressing is the exact state that stranded a station on 2026-09-30.
+    say "addr@boot   $(systemctl is-enabled sigmond-wifi-up.service 2>/dev/null || echo disabled)"
 }
 
 cmd_forget(){
@@ -224,6 +316,11 @@ cmd_forget(){
     local dev; dev=$(wifi_dev)
     [ -n "$dev" ] || return 1
     systemctl disable --now "wpa_supplicant@${dev}.service" >/dev/null 2>&1
+    # Take the boot-time addressing with it, or the next boot re-addresses a
+    # radio the operator just told us to forget.
+    systemctl disable --now sigmond-wifi-up.service >/dev/null 2>&1
+    rm -f /etc/systemd/system/sigmond-wifi-up.service
+    systemctl daemon-reload >/dev/null 2>&1
     rm -f "$CONF_DIR/wpa_supplicant-${dev}.conf" "$STATE_DIR/wifi-ssid"
     ip addr flush dev "$dev" 2>/dev/null
     say "forgotten; $dev is down and will not reconnect"
@@ -232,9 +329,11 @@ cmd_forget(){
 case "${1:-}" in
     scan)   cmd_scan ;;
     join)   shift; cmd_join "$@" ;;
+    up)     need_root; cmd_up ;;
     status) cmd_status ;;
     forget) cmd_forget ;;
-    *) say "usage: sigmond-wifi {scan | join <ssid> | status | forget}"
+    *) say "usage: sigmond-wifi {scan | join <ssid> | up | status | forget}"
        say "       passphrase is read from stdin:  echo -n 'secret' | sigmond-wifi join MyAP"
+       say "       'up' re-addresses a saved profile; it runs at every boot"
        exit 2 ;;
 esac
