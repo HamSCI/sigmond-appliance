@@ -96,6 +96,62 @@ pub_purge_pending() {
     fi
 }
 
+# ── pruning superseded pending builds (mjh 2026-09-30) ─────────────────────
+# pending/ accumulates one image per build, and a stale one is a live hazard:
+# rob installed v3.59 by accident on 2026-09-30 because it was the file on his
+# stick.  The bless therefore removes what the blessed image supersedes.
+
+# _pub_version <name> — "sigmond-appliance-v3.61-20260930-release.img" → "3.61"
+_pub_version() {
+    printf '%s\n' "$1" | sed -nE 's/^sigmond-appliance-v([0-9]+(\.[0-9]+)+)-.*/\1/p'
+}
+
+# pub_superseded <blessed-img-basename> <name>... — print the names to delete.
+# Deleted: any build of a LOWER version, and any other build of the SAME
+# version (the blessed one is now that version's only authority).  Kept: the
+# blessed build's own files, every HIGHER version (a newer candidate may be
+# waiting in pending/ while an older one is blessed), and anything whose name
+# carries no recognisable version.
+pub_superseded() {
+    local blessed="$1"; shift
+    local bv bstem n v
+    bv="$(_pub_version "$blessed")"; bstem="${blessed%.img}"
+    [ -n "$bv" ] || return 0
+    for n in "$@"; do
+        case "$n" in "$bstem".*) continue ;; esac
+        v="$(_pub_version "$n")"; [ -n "$v" ] || continue
+        # sort -V puts the lower (or equal) of the two first.
+        if [ "$(printf '%s\n%s\n' "$v" "$bv" | sort -V | head -1)" = "$v" ]; then
+            echo "$n"
+        fi
+    done
+}
+
+# pub_list_pending <dest> — one file name per line from dest/pending/
+pub_list_pending() {
+    local d="$1" dir
+    if _pub_is_ssh "$d"; then
+        dir="$(_pub_ssh_dir "$d")"
+        ssh -o BatchMode=yes "$(_pub_ssh_host "$d")" "ls -1 '${dir:-.}/pending' 2>/dev/null"
+    else
+        rclone lsf --files-only "$(_pub_join "$d" pending/)" 2>/dev/null
+    fi
+}
+
+# pub_delete_pending <dest> <name>... — remove named files from dest/pending/
+pub_delete_pending() {
+    local d="$1"; shift
+    [ "$#" -gt 0 ] || return 0
+    if _pub_is_ssh "$d"; then
+        local dir q="" n; dir="$(_pub_ssh_dir "$d")"
+        for n in "$@"; do q="$q '$n'"; done
+        ssh -o BatchMode=yes "$(_pub_ssh_host "$d")" "cd '${dir:-.}/pending' && rm -f $q"
+    else
+        local n
+        for n in "$@"; do rclone deletefile "$(_pub_join "$d" "pending/$n")" || return 1; done
+    fi
+}
+
 # pub_describe — print the resolved destinations. Call before any upload so
 # the log always answers "where did this go?" without reading the script.
 pub_describe() {

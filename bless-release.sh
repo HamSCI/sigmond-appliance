@@ -777,6 +777,19 @@ if [ $RC -eq 0 ]; then
                 _link="$(pub_link "$_d" "$IMGBASE")"
                 say "  [$_lab] promoted: $_d/$IMGBASE"
                 [ -n "$_link" ] && say "  [$_lab] link: $_link"
+                # Prune what this bless supersedes, only AFTER the promote
+                # landed, so a target is never left without the image.  Newer
+                # candidates stay; see pub_superseded.
+                if [ "${PUB_STAGES[$_i]}" != "blessed" ]; then
+                    mapfile -t _old < <(pub_superseded "$IMGBASE" $(pub_list_pending "$_d"))
+                    if [ "${#_old[@]}" -gt 0 ]; then
+                        if pub_delete_pending "$_d" "${_old[@]}" 2>/dev/null; then
+                            say "  [$_lab] pruned ${#_old[@]} superseded file(s) from pending/: ${_old[*]}"
+                        else
+                            say "  [$_lab] NOTE: could not prune pending/ — remove superseded builds by hand"
+                        fi
+                    fi
+                fi
             else
                 _allok=0
                 say "  [$_lab] WARNING: could not promote to $_d"
