@@ -162,6 +162,10 @@ in_fake(){
 # run) this suite takes minutes; the waits themselves are not what is under
 # test.  Shrink them through the same knobs an operator would use.
 export SIGMOND_CARRIER_WAIT=2 SIGMOND_RA_WAIT=1 SIGMOND_WIFI_ASSOC_WAIT=2
+# /run is not writable in the test namespace; put the serialisation lock
+# somewhere it is, so the locking path is actually exercised rather than
+# silently skipped.
+export SIGMOND_WIFI_LOCK="$WORK/wifi-up.lock"
 
 # ⛔ net_dead() writes its banner to /dev/console and the log -- NOT to stdout.
 # Reading only stdout made a test that could not see the very failure it exists
@@ -279,6 +283,66 @@ in_fake bash -c 'bash "$0" forget; [ -f /etc/systemd/system/sigmond-wifi-up.serv
     "$REPO/sigmond-wifi" > "$OUT" 2>&1
 check_not "forget removes the boot unit" "$OUT" "UNIT-SURVIVED"
 check     "forget disables it"           "$STUBLOG" "systemctl disable --now sigmond-wifi-up.service"
+
+# ═══════════════════════════════════════════════════════════════════════════
+echo
+echo "no unit may deadlock the target it helps bring up"
+echo "──────────────────────────────────────────────────"
+# AI6VN-PM, v3.61, 2026-09-30. sigmond-wifi-up.service was ordered
+# Before=network-online.target -- the obvious thing to want -- and it calls
+# sigmond-v6-gateway, which started dnsmasq, which is After=network-online.target.
+# The target could not be reached while the unit was activating, so dnsmasq's job
+# could never run, so the unit blocked until its own timeout:
+#
+#   16:33:48  sigmond-wifi-up starts
+#   16:33:49  netfix's backstop runs `sigmond-wifi up` TOO (second instance)
+#   16:34:49  both reach the gateway -> systemctl restart dnsmasq -> wedged
+#   16:38:49  netfix killed at 5min, having concluded nothing
+#   16:43:48  sigmond-wifi-up killed at 10min
+#
+# Everything came up correctly the moment systemd killed them both. The station
+# looked healthy and the console still showed a stale NO NETWORK CABLE DETECTED,
+# because netfix never reached the branch that clears it.
+
+V6GW="$WORK/v6gw-early.sh"
+awk '/^cat > \/usr\/local\/sbin\/sigmond-v6-gateway <<.V6GWEOF.$/{f=1;next} /^V6GWEOF$/{f=0} f' \
+    firstboot-v3.sh > "$V6GW"
+# Anchor to a real directive: the file also EXPLAINS this trap in a comment, and
+# matching that would make the test pass or fail on its own prose.
+if grep -qE '^[[:space:]]*Before=network-online' sigmond-wifi; then
+    bad "sigmond-wifi-up is not ordered before network-online.target"
+else
+    ok "sigmond-wifi-up is not ordered before network-online.target"
+fi
+
+# ⛔ The rule, not just the two lines that bit: nothing the gateway runs may
+# start or restart a unit synchronously.
+_blocking=$(grep -nE '^[[:space:]]*systemctl (restart|start) [^-]' "$V6GW" | grep -v -- '--no-block' || true)
+if [ -n "$_blocking" ]; then
+    bad "the v6 gateway starts a unit synchronously: $_blocking"
+else
+    ok "the v6 gateway never starts a unit synchronously"
+fi
+check "dnsmasq specifically is --no-block" "$V6GW" "systemctl restart --no-block dnsmasq"
+check "clatd specifically is --no-block"   "$V6GW" "systemctl restart --no-block clatd"
+
+# netfix's backstop must not be able to spend netfix's whole budget.
+NETFIX_SRC="$WORK/sigmond-netfix"
+check "netfix bounds its Wi-Fi backstop" "$NETFIX_SRC" \
+      'timeout "${SIGMOND_WIFI_BACKSTOP_WAIT:-90}" /usr/local/sbin/sigmond-wifi up'
+
+# ── two concurrent `up` runs must not both address the radio ────────────────
+# Each does `ip addr flush dev <radio> scope global`, so the second can strip
+# the address the first just obtained. Both were observed one second apart.
+build_fake v6 yes
+export SIGMOND_WIFI_DEV=wlp3s0 WIFI_ADDR=v6
+OUT="$WORK/out-lock"; export STUBLOG="$WORK/stub-lock"; : > "$STUBLOG"
+in_fake bash -c '
+    exec 9>"$SIGMOND_WIFI_LOCK"; flock 9      # hold the lock like a running unit
+    bash "$0" up 2>&1
+' "$REPO/sigmond-wifi" > "$OUT" 2>&1
+check "a second run defers instead of racing" "$OUT" "already running"
+check_not "and does not flush the radio"      "$OUT" "IPv6: 2001:db8::5/64"
 
 # ═══════════════════════════════════════════════════════════════════════════
 echo

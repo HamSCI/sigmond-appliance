@@ -271,7 +271,16 @@ WIFI_UP="$(wifi_uplink || true)"
 if [ -z "$WIFI_UP" ] && [ -s /var/lib/sigmond/wifi-ssid ] \
    && [ -x /usr/local/sbin/sigmond-wifi ]; then
     say "a saved Wi-Fi profile exists but the radio has no address — bringing it up"
-    /usr/local/sbin/sigmond-wifi up >>"$LOG" 2>&1
+    # ⛔ BOUNDED.  This is a backstop for when sigmond-wifi-up.service has not
+    # run; at boot it usually HAS, and is still working.  Unbounded, this call
+    # inherits everything that run is waiting on and spends netfix's whole
+    # TimeoutStartSec -- which is what happened on AI6VN-PM v3.61 2026-09-30:
+    # netfix was killed at 16:38:49 having reached no conclusion at all, so it
+    # never cleared the stale dead-install verdict, and the console kept showing
+    # NO NETWORK CABLE DETECTED on a working station.
+    # `sigmond-wifi up` takes a lock, so the usual outcome here is that it sees
+    # the unit's run and returns quickly.
+    timeout "${SIGMOND_WIFI_BACKSTOP_WAIT:-90}" /usr/local/sbin/sigmond-wifi up >>"$LOG" 2>&1
     WIFI_UP="$(wifi_uplink || true)"
 fi
 [ -n "$WIFI_UP" ] && say "Wi-Fi uplink is live: $WIFI_UP"
@@ -774,8 +783,19 @@ server=${up}
 filter-AAAA
 CONF
     systemctl enable dnsmasq >/dev/null 2>&1
-    systemctl restart dnsmasq >/dev/null 2>&1
-    say "VM resolver: dnsmasq on ${MGMT_PM_IP} re-pointed at ${up}"
+    # ⛔ --no-block, for the same reason as clatd above and then some: dnsmasq is
+    # `After=network-online.target`, and this script runs from units that are
+    # part of getting the network online.  A BLOCKING restart therefore waits on
+    # a target that cannot be reached until we return -- a straight deadlock,
+    # broken only by our caller's timeout.  Measured on AI6VN-PM v3.61,
+    # 2026-09-30: sigmond-wifi-up and sigmond-netfix both wedged here and were
+    # killed at 10 min and 5 min respectively; everything came up correctly the
+    # moment they died.
+    #
+    # ⚠ The rule, not just this line: NOTHING in this script may start or
+    # restart another unit synchronously.
+    systemctl restart --no-block dnsmasq >/dev/null 2>&1
+    say "VM resolver: dnsmasq on ${MGMT_PM_IP} re-pointed at ${up} (starting)"
     say "  (firstboot already stood this up; this only follows the resolver"
     say "   change that arriving on a v6-only site causes)"
 else

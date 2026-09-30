@@ -247,7 +247,16 @@ Description=Sigmond: address the Wi-Fi radio once it associates
 # The association is wpa_supplicant's job; ours starts after it.
 After=wpa_supplicant@${dev}.service network-pre.target
 Wants=wpa_supplicant@${dev}.service
-Before=network-online.target
+# ⛔ NO `Before=network-online.target`.  It reads as the obvious thing to want --
+# "the network is not really up until the radio has an address" -- and it is a
+# deadlock generator.  This script calls sigmond-v6-gateway, which starts
+# dnsmasq, and dnsmasq is After=network-online.target.  Ordering ourselves
+# BEFORE that target means the target cannot be reached while we are still
+# activating, so dnsmasq's job can never run, so we block until our own
+# timeout.  Measured on AI6VN-PM v3.61, 2026-09-30: this unit and
+# sigmond-netfix both wedged for their full timeouts (10 min and 5 min), and
+# the station only came right AFTER systemd killed them both.
+# We are opportunistic: nothing may be ordered against us.
 
 [Service]
 Type=oneshot
@@ -280,6 +289,35 @@ cmd_up(){
     local dev; dev=$(wifi_dev)
     [ -n "$dev" ] || { say "no wireless interface on this host"; return 1; }
     [ -s "$STATE_DIR/wifi-ssid" ] || { say "no saved Wi-Fi profile — nothing to bring up"; return 0; }
+    # ⛔ ONE AT A TIME.  sigmond-wifi-up.service runs this at boot, and netfix's
+    # backstop runs it too when it finds the radio unaddressed -- which at boot
+    # is exactly when the unit has not finished.  Both were observed running one
+    # second apart (AI6VN-PM 2026-09-30, gateway pids 1755 and 1876).  Two
+    # concurrent runs each do `ip addr flush dev <radio> scope global`, so each
+    # can strip the address the other just obtained, and each starts its own
+    # sigmond-v6-gateway.
+    local _lock="${SIGMOND_WIFI_LOCK:-/run/sigmond-wifi-up.lock}" _locked=0
+    # Probe writability first: a failed `exec` redirect is fatal to the shell,
+    # and losing the ability to address the radio because a lock file could not
+    # be created would be a far worse bug than the race it guards.
+    if ( : >"$_lock" ) 2>/dev/null; then
+        exec 9>"$_lock"
+        _locked=1
+    else
+        say "  no lock available at $_lock — proceeding unserialised"
+    fi
+    if [ "$_locked" = 1 ] && ! flock -n 9; then
+        say "another 'sigmond-wifi up' is already running — waiting for its result"
+        local _w=0
+        while [ "$_w" -lt "${SIGMOND_WIFI_WAIT_OTHER:-60}" ]; do
+            ip -6 -o addr show dev "$dev" scope global 2>/dev/null \
+                | grep -v -e temporary -e deprecated | grep -q . && break
+            ip -4 -o addr show dev "$dev" scope global 2>/dev/null | grep -q . && break
+            sleep 2; _w=$(( _w + 2 ))
+        done
+        say "  done waiting (${_w}s); leaving the addressing to that run"
+        return 0
+    fi
     local ssid; ssid=$(cat "$STATE_DIR/wifi-ssid")
     # Self-heal a station whose profile predates the boot unit -- rob's
     # AI6VN-PM joined under v3.57, which had no such unit to install.  Without
