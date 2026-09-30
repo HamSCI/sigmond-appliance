@@ -626,6 +626,27 @@ if [ "$SHIP" = 1 ]; then
             pub_put "$_d" pending "$IMG" "${IMG%.img}.sha256" "$MANIFEST" 2>>"$LOG" || _up=0
             if [ "$_up" = 1 ]; then
                 say "  [$_lab] uploaded to $_d/pending/ (UNTESTED)"
+                # Only now that THIS release is safely up: drop what it
+                # supersedes.  Order matters -- pruning first would risk
+                # deleting the only copies if the upload then failed.
+                #
+                # ⛔ AT EVERY BUILD, not only at the bless.  mjh added the same
+                # pruning to bless-release.sh (6b9b38f), and that is right, but
+                # a bless is rare: between two of them pending/ still grows one
+                # 5.2 GiB image per build.  That is exactly how rob's Drive came
+                # to hold v3.57-v3.61 on a quota he was running out of, with no
+                # bless in sight.  Same helpers, same semantics, earlier.
+                #
+                # pub_superseded keeps HIGHER versions on purpose -- a newer
+                # candidate may be sitting in pending/ while this one builds.
+                mapfile -t _old < <(pub_superseded "$(basename "$IMG")" $(pub_list_pending "$_d"))
+                if [ "${#_old[@]}" -gt 0 ]; then
+                    if pub_delete_pending "$_d" "${_old[@]}" 2>/dev/null; then
+                        say "  [$_lab] pruned ${#_old[@]} superseded file(s) from pending/"
+                    else
+                        say "  [$_lab] NOTE: could not prune pending/ — remove superseded builds by hand"
+                    fi
+                fi
             else
                 _allup=0
                 say "  [$_lab] WARNING: upload to $_d FAILED — check rclone and upload by hand"
