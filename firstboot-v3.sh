@@ -2045,30 +2045,36 @@ if [ -n "$RACN" ] && [ -r /etc/sigmond/frpc-host.toml ]; then
     #
     # Printing them as one undifferentiated list invites exactly the wrong
     # assumption -- that a port on a public hostname is a public service.
-    _racline(){   # _racline <suffix> <port>
+    # ⛔ ONE LINE PER CHANNEL DOES NOT FIT.  Each channel used to render its own
+    # full line with the gateway hostname repeated on every one, so a 6-channel
+    # station spent 10 of the console's 45 rows re-stating the same host.  The
+    # hostname is now said ONCE in the group header and each channel costs a
+    # `label :port` fragment, which is what an operator actually reads off the
+    # screen and types somewhere else (rob, 2026-10-01: the panel no longer fit
+    # on his monitor, so the version number had scrolled off the top).
+    _racfrag(){   # _racfrag <suffix> <port>  -> one short fragment, no newline
         case "$1" in
-          *-host-ssh) printf '   host ssh     ssh -p %s root@%s\n' "$2" "$RSRV" ;;
-          *-host-ui)  printf '   host UI      https://%s:%s\n' "$(ipurl "$RSRV")" "$2" ;;
-          *-vm-ssh)   printf '   VM ssh       ssh -p %s hamsci@%s\n' "$2" "$RSRV" ;;
-          *-vm-web)   printf '   ka9q-web     http://%s:%s\n' "$(ipurl "$RSRV")" "$2" ;;
-          *-vm-web2)  printf '   ka9q-web #2  http://%s:%s\n' "$(ipurl "$RSRV")" "$2" ;;
-          *-vm-web3)  printf '   ka9q-web #3  http://%s:%s\n' "$(ipurl "$RSRV")" "$2" ;;
-          *-vm-station) printf '   station-web  http://%s:%s\n' "$(ipurl "$RSRV")" "$2" ;;
-          *-vm-gmag)  printf '   magnetometer http://%s:%s\n' "$(ipurl "$RSRV")" "$2" ;;
-          *-vm-grape) printf '   GRAPE charts http://%s:%s\n' "$(ipurl "$RSRV")" "$2" ;;
-          *-ssh)      printf '   ssh          ssh -p %s hamsci@%s\n' "$2" "$RSRV" ;;
-          *-web)      printf '   web          http://%s:%s\n' "$(ipurl "$RSRV")" "$2" ;;
-          *)          printf '   %-12s port %s\n' "${1##*-}" "$2" ;;
+          *-host-ssh) printf 'host ssh :%s (root)' "$2" ;;
+          *-host-ui)  printf 'host UI :%s (https)' "$2" ;;
+          *-vm-ssh)   printf 'VM ssh :%s (hamsci)' "$2" ;;
+          *-vm-web)   printf 'ka9q-web :%s' "$2" ;;
+          *-vm-web2)  printf 'ka9q-web#2 :%s' "$2" ;;
+          *-vm-web3)  printf 'ka9q-web#3 :%s' "$2" ;;
+          *-vm-station) printf 'station-web :%s' "$2" ;;
+          *-vm-gmag)  printf 'magnetometer :%s' "$2" ;;
+          *-vm-grape) printf 'GRAPE charts :%s' "$2" ;;
+          *-ssh)      printf 'ssh :%s (hamsci)' "$2" ;;
+          *-web)      printf 'web :%s' "$2" ;;
+          *)          printf '%s :%s' "${1##*-}" "$2" ;;
         esac
     }
     RAC_ADMIN=""; RAC_USER=""
     while read -r _nm _pt; do
         [ -n "$_nm" ] && [ -n "$_pt" ] || continue
         case "$_nm" in
-            *-host-ssh|*-host-ui) RAC_ADMIN="$RAC_ADMIN$(_racline "$_nm" "$_pt")
-" ;;
-            *)                    RAC_USER="$RAC_USER$(_racline "$_nm" "$_pt")
-" ;;
+            *-host-ssh|*-host-ui)
+                RAC_ADMIN="${RAC_ADMIN:+$RAC_ADMIN  ·  }$(_racfrag "$_nm" "$_pt")" ;;
+            *)  RAC_USER="${RAC_USER:+$RAC_USER  ·  }$(_racfrag "$_nm" "$_pt")" ;;
         esac
     done <<RACEOF
 $(awk -F'"' '/^name *=/{n=$2}
@@ -2091,17 +2097,19 @@ RACEOF
         if [ "${_run:-0}" -gt 0 ]; then RSTAT="online — $_run/$_decl channels up"
         else RSTAT="service running, no channel accepted yet"; fi
     fi
-    RACBLOCK=" Remote access  RAC $RACN on ${RSRV:-<no server>}${RTIER:+  (tier: $RTIER)}
-   status     $RSTAT${RREG:+
-   registrar  $RREG}
-${RAC_ADMIN:+
-   -- ADMINISTRATORS ONLY -- full control of this machine, never published --
-$RAC_ADMIN}${RAC_USER:+
-   -- HamSCI users -- private by default, NOT public --
-$RAC_USER   These need a WireGuard config for ${RSRV:-the gateway}. A site
-   administrator can publish one of them individually; none is public
-   just because the hostname is.
-}"
+    # The audience split is the one thing here that MUST survive condensing:
+    # host ssh/UI are full control of the machine and are never published,
+    # while the VM channels are per-person grants.  Shorter wording, same wall.
+    RACBLOCK="
+ Remote access   RAC $RACN on ${RSRV:-<no server>}${RTIER:+  ($RTIER)}
+   status   $RSTAT${RREG:+ · registrar $RREG}${RAC_ADMIN:+
+
+   ADMINISTRATORS ONLY — full control of this machine, never publish:
+     $RAC_ADMIN}${RAC_USER:+
+
+   HamSCI users — on ${RSRV:-the gateway}, private NOT public, each needs a WireGuard config:
+     $RAC_USER}
+"
 elif [ -n "$RACN" ]; then
     RACBLOCK=" Remote access  RAC $RACN assigned, but /etc/sigmond/frpc-host.toml is missing
    ==> the tunnel is NOT configured; rerun: sigmond-setup --reconfigure
@@ -2117,11 +2125,9 @@ fi
 # an operator reading them has no way to tell (rob, 2026-09-21).
 NETWARN=""
 if [ -f /etc/sigmond-appliance/.network-unreachable ]; then
-    NETWARN=" !! THIS HOST HAS NO WORKING NETWORK ADDRESS
- !!   $(head -1 /etc/sigmond-appliance/.network-unreachable 2>/dev/null)
- !!   The addresses below are NOT reachable. Fix with either:
- !!     - plug the cable into a port with a link light, then reboot
- !!     - sigmond-setnet <addr>/<cidr> <gateway>    (verifies before keeping)
+    NETWARN=" !! THIS HOST HAS NO WORKING NETWORK ADDRESS — $(head -1 /etc/sigmond-appliance/.network-unreachable 2>/dev/null)
+ !!   The addresses below are NOT reachable.  Fix: plug the cable into a port with a link
+ !!   light and reboot, or run  sigmond-setnet <addr>/<cidr> <gateway>  (verifies first).
 "
 fi
 
@@ -2139,11 +2145,12 @@ for _d in /sys/class/net/*; do
     _n=$(basename "$_d")
     case "$_n" in lo|vmbr*|tap*|fwbr*|fwln*|fwpr*|veth*|bond*|dummy*|wg*|tun*) continue ;; esac
     [ -e "$_d/device" ] || continue
-    if [ "$(cat "$_d/carrier" 2>/dev/null)" = "1" ]; then _c="LINK UP  "; else _c="NO LINK  "; fi
+    if [ "$(cat "$_d/carrier" 2>/dev/null)" = "1" ]; then _c="LINK UP"; else _c="NO LINK"; fi
     _mark=""
-    [ "$_n" = "$_vmbr_port" ] && _mark="  <- vmbr0 uses this one"
-    NICLINES="$NICLINES   $(printf '%-9s %s' "$_n" "$_c")$_mark
-"
+    [ "$_n" = "$_vmbr_port" ] && _mark=" (vmbr0)"
+    # One line for ALL interfaces, not one line each: a 3-NIC host spent 3 of
+    # 45 rows saying almost nothing, in 20 of the 160 available columns.
+    NICLINES="${NICLINES:+$NICLINES  ·  }$_n $_c$_mark"
 done
 # A gateway that does not answer is the difference between "configured" and
 # "reachable", and only the second one matters to an operator.
@@ -2174,39 +2181,47 @@ for _d in /sys/class/net/*; do
     # machine that was working (AI6VN-PM v3.62, 2026-09-30).
     [ -e "$_d/wireless" ] && continue
     if [ "$(cat "$_d/carrier" 2>/dev/null)" = "1" ] && [ "$_n" != "$_vmbr_port" ]; then
-        _stray=" !! $_n has a cable but vmbr0 uses ${_vmbr_port:-?}. If the network
- !!   is not working, move the cable, or reboot: the host re-binds vmbr0 to
- !!   whichever port answers DHCP.
-"
+        # No trailing newline: the panel adds one only when this is non-empty,
+        # so a healthy host does not pay a blank row for a warning it never has.
+        _stray=" !! $_n has a cable but vmbr0 uses ${_vmbr_port:-?} — if the network is down, move the cable or reboot (vmbr0 re-binds to whichever port answers DHCP)."
     fi
 done
 
+# ⛔ IT MUST FIT ON THE SCREEN.  rob, 2026-10-01: the panel had grown past the
+# height of his monitor, so the header and the READ-ONLY warning scrolled off
+# and the first thing he could see was a mid-panel note.  A panel whose top is
+# missing is worse than a shorter one: the line that says the keyboard does not
+# work is the line most worth reading, and it was the first to go.
+#
+# It grew because every fix today added to it -- two more VM services, the live
+# feed, and the RAC audience split.  Condensed by SHARING THE LONG ADDRESS
+# instead of repeating it: a global IPv6 literal is 39 characters and appeared
+# six times, which is what forced one-item-per-line.  Stated once, the services
+# fit three to a line.  rob: "the lines on my monitor could be quite a bit
+# longer ... they only occupy about half of the monitor."
 PANEL=$(cat <<PEOF
 ════ Sigmond appliance $VERSION ${CONF:+— station ${CONF%% *}} ════
- THIS CONSOLE IS READ-ONLY — the keyboard does not work here.  Its USB
- controller was passed through to the decoder VM, so nothing you type on
- this machine registers.  Reach the station from another computer using
- the addresses below.
-
+ CONSOLE IS READ-ONLY — its USB controller belongs to the decoder VM, so
+ nothing typed here registers.  Reach the station using the addresses below.
 ${NETWARN}${BRINGUP}${RXWARN}
- Network
-${NICLINES}   ${_gwl}
-${_stray}
- Proxmox host ${HOSTIP:-<no-ip-yet>}
-   ssh        ssh root@${HOSTIP:-<no-ip-yet>}
-   web UI     https://$(ipurl "${HOSTIP:-<no-ip-yet>}"):8006
-   login      root / $PWLINE
+ Network   ${_gwl}
+   ${NICLINES}${_stray:+
+$_stray}
+
+ Proxmox host   ssh root@${HOSTIP:-<no-ip-yet>}
+                web UI  https://$(ipurl "${HOSTIP:-<no-ip-yet>}"):8006
 
  Decoder VM   ${VMIP:-<starting — this panel refreshes every 5 min>}${VMNOTE}${VMBEHIND}
-   ssh        ssh sigmond@${VMIP:-<starting>}      (also: hamsci@)
-   ka9q-web   ${KA9QURL}
-   login      sigmond / $PWLINE
+   from here      ssh sigmond@${VMIP:-<starting>}   (or: sigmond-vm;  also hamsci@)
+   via this host  ssh -p 2222 sigmond@${HOSTIP:-<no-ip-yet>}
+   via this host  http://$(ipurl "${HOSTIP:-<no-ip-yet>}"):PORT  where PORT =
+                  ka9q-web 8081 · station-web 8000 · magnetometer 8082 · mag feed ws 8765
 
+ Logins   host  root / $PWLINE
+          VM    sigmond / same password
 ${RACBLOCK}
- From the host over ssh:  sigmond-vm        (shell in the decoder VM)
-                          qm terminal $VMID  (its console)
-                          sigmond-setup --reconfigure   (rerun the wizard)
-════ end Sigmond panel ════
+ From the host:  sigmond-vm (VM shell) · qm terminal $VMID (VM console) · sigmond-setup --reconfigure
+════ end Sigmond panel ════  $VERSION ${CONF:+· station ${CONF%% *} }════
 PEOF
 )
 for f in /etc/issue /etc/motd; do
@@ -2214,7 +2229,13 @@ for f in /etc/issue /etc/motd; do
     # while deleting only the block leaked one blank line per refresh —
     # ~1000 lines in /etc/issue after 3 days (AI6VN 2026-09-09).  Two sed
     # passes: the N in the blank-collapse loop must not swallow a panel line.
-    sed -i '/^════ Sigmond appliance /,/^════ end Sigmond panel ════/d' "$f" 2>/dev/null
+    # ⛔ The end pattern is a PREFIX match, deliberately.  The footer now carries
+    # the version after the marker, and an exact-match pattern would stop
+    # matching the panel it had just written — the range would never close, the
+    # old block would never be deleted, and /etc/issue would grow a full panel
+    # per refresh.  That is the 1000-line failure below, re-armed by a cosmetic
+    # change.  Match the marker, never the whole line.
+    sed -i '/^════ Sigmond appliance /,/^════ end Sigmond panel/d' "$f" 2>/dev/null
     sed -i -e :a -e '/^\n*$/{$d;N;ba' -e '}' "$f" 2>/dev/null
     printf '\n%s\n' "$PANEL" >> "$f"
 done
