@@ -1,0 +1,66 @@
+#!/bin/bash
+# sigmond-console-bridge — the VM half of the split console.
+#
+# ⛔ THE KEYBOARD IS HERE, THE SCREEN IS NOT.  Both USB controllers are passed
+# through to this VM, so the physical keyboard types into THIS machine; the
+# monitor is wired to the Proxmox host.  Neither half is usable alone.  This
+# runs where the keystrokes land (the VM's tty1), opens a session on the host
+# over the private 10.99.0.0/30 link, and sends every byte of output to the
+# host's VT1 — the screen the operator is actually looking at.
+#
+# ⛔ THE /30 IS THE POINT.  It is a host-only bridge with no physical port, so
+# it is up whether or not the station has any uplink at all.  That is exactly
+# the case this exists for: the network is broken and there is no other way in.
+#
+# ⛔ ssh WILL NOT READ THE PASSWORD FROM stdin.  It opens /dev/tty for both the
+# prompt and the answer.  Here that sent the prompt to a screen nobody can see
+# and read nothing at all: AI6VN-PM 2026-10-01 03:53:58 logged two "Failed
+# password for root" in ONE second with a human present who had typed nothing.
+# SSH_ASKPASS_REQUIRE=force stops ssh touching /dev/tty; the prompt is printed
+# below where the operator can see it, and sigmond-console-askpass reads the
+# keyboard device explicitly.
+#
+# Authentication is unchanged: a normal ssh login with the host's own password.
+# The bridge carries pixels, not privilege.
+set -u
+HOST=10.99.0.1
+PORT=7790
+USER_=root
+KBD=/dev/tty1
+
+say(){ printf '%s\r\n' "$*"; }   # stdout is the relay; \r\n because VT1 is raw
+
+if ! timeout 5 socat /dev/null "TCP4:$HOST:$PORT" 2>/dev/null; then
+    # The relay is down.  Fall back to a local login so the keyboard is not
+    # simply dead -- unseen is still better than swallowed.
+    exec /sbin/agetty --noclear tty1 "${TERM:-linux}"
+fi
+
+export SSH_ASKPASS=/usr/local/sbin/sigmond-console-askpass
+export SSH_ASKPASS_REQUIRE=force
+export SIGMOND_CONSOLE_KBD="$KBD"
+export DISPLAY="${DISPLAY:-:0}"   # older ssh refuses askpass without it
+
+{
+    say ""
+    say "  ── Proxmox host console ────────────────────────────────────────"
+    say "  Keyboard: decoder VM.   Screen: this host.   Link: 10.99.0.0/30"
+    say ""
+    say "  Logging in as $USER_@$HOST"
+    say "  TYPE THE PROXMOX HOST ROOT PASSWORD, then Enter."
+    say "  ⚠ Nothing appears while you type — that is normal, it is not frozen."
+    say ""
+    # ⛔ stdin stays the KEYBOARD for the session itself; only the password is
+    # diverted through askpass.  -tt forces a pty even though stdout is a pipe.
+    ssh -tt \
+        -o StrictHostKeyChecking=no \
+        -o ConnectTimeout=10 \
+        -o NumberOfPasswordPrompts=3 \
+        -o PreferredAuthentications=password,keyboard-interactive \
+        "$USER_@$HOST" 2>&1 < "$KBD"
+    say ""
+    say "  session ended — restarting in 3s"
+} | socat - "TCP4:$HOST:$PORT" 2>/dev/null
+
+sleep 3
+exit 0
