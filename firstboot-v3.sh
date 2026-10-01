@@ -1703,7 +1703,31 @@ TTYVHangup=yes
 # no auto-restart: a crash-loop re-clears the tty every cycle (black
 # screen); on any exit hand the console back to a login prompt instead
 Restart=no
-ExecStopPost=/bin/systemctl --no-block start getty@tty1.service
+# ⛔ BEST-EFFORT, AND NEVER DURING SHUTDOWN.  Handing the console back is a
+# courtesy; it must not be able to report a successful install as a failure.
+#
+# The finalizer reboots the host the moment the wizard marks .configured, so
+# this ExecStopPost usually runs while the machine is ALREADY STOPPING.  Asking
+# systemd to START a getty then is refused as destructive, systemctl exits
+# 4/NOPERMISSION, and systemd marks the whole unit failed -- printing, in red,
+# at the end of a wizard that completed perfectly (AI6VN-PM, v3.64, 2026-10-01
+# 00:21:30 UTC):
+#
+#   Requested transaction contradicts existing jobs: Transaction for
+#     getty@tty1.service/start is destructive (local-fs-pre.target has 'stop'
+#     job queued, but 'start' is included in transaction).
+#   sigmond-wizard.service: Control process exited, code=exited,
+#     status=4/NOPERMISSION
+#   sigmond-wizard.service: Failed with result 'exit-code'
+#
+# rob: "a red line is alarming to the uninitiated."  He is right, and the cure
+# is not a different colour -- the install did not fail, so nothing red should
+# be printed.  Two changes: skip the call entirely when the system is stopping
+# (which also suppresses systemd's own "contradicts existing jobs" warning),
+# and prefix with `-` so that even an unforeseen failure here cannot mark a
+# finished wizard as failed.  A getty is pointless on a machine that is
+# rebooting: the next boot starts one anyway.
+ExecStopPost=-/bin/sh -c 'case "$(systemctl is-system-running 2>/dev/null)" in stopping|offline) exit 0 ;; esac; systemctl --no-block start getty@tty1.service
 [Install]
 WantedBy=multi-user.target
 WIZEOF

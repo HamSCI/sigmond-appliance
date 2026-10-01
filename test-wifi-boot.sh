@@ -637,6 +637,37 @@ fi
 check "a missing toprc is reported, not skipped" firstboot-v3.sh \
       'WARNING toprc not on the media'
 
+# ═══════════════════════════════════════════════════════════════════════════
+echo
+echo "a successful install must not print red"
+echo "────────────────────────────────────────"
+# ⛔ MEASURED, AI6VN-PM v3.64, 2026-10-01 00:21:30 UTC.  The finalizer reboots
+# the host the moment the wizard marks .configured, so the wizard's
+# ExecStopPost ran while the machine was ALREADY STOPPING.  Starting a getty
+# then is refused as destructive, systemctl exits 4/NOPERMISSION, and systemd
+# marked the whole unit failed:
+#
+#   Requested transaction contradicts existing jobs: Transaction for
+#     getty@tty1.service/start is destructive (local-fs-pre.target has 'stop'
+#     job queued...)
+#   sigmond-wizard.service: Failed with result 'exit-code'
+#
+# A red FAILED at the end of a wizard that completed perfectly.  rob: "a red
+# line is alarming to the uninitiated."  Third false alarm of the day, after
+# NO NETWORK CABLE DETECTED and gateway clat DOES NOT RESPOND, both on healthy
+# stations.  A console that cries wolf is worse than a quiet one.
+check "the getty handback is best-effort (- prefix)" firstboot-v3.sh \
+      'ExecStopPost=-/bin/sh -c'
+check "and is skipped while the system is stopping" firstboot-v3.sh \
+      'in stopping|offline) exit 0'
+# ⚠ Without the `-`, a non-zero ExecStopPost marks the unit failed even when
+# the wizard itself succeeded.
+if grep -qE '^ExecStopPost=/bin/systemctl' firstboot-v3.sh; then
+    bad "no bare ExecStopPost that can fail the unit"
+else
+    ok "no bare ExecStopPost that can fail the unit"
+fi
+
 echo
 echo "─────────────────────────────────────────────────"
 printf '%d passed, %d failed\n' "$PASS" "$FAIL"
