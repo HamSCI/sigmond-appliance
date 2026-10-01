@@ -1177,15 +1177,61 @@ phys(){ # every physical NIC, with carrier and kind
     done
 }
 
+# ⛔ ONE TABLE, NOT THREE LISTS THE READER HAS TO JOIN.  The first version
+# printed raw `ip route` lines, the bridge-port name, and a link-state list
+# separately -- so answering "which cable am I actually using, and what address
+# is on it?" meant correlating `dev vmbr0` against `bridge-ports enp1s0` by
+# hand, on a console, usually while something is broken.  rob, 2026-10-01:
+# "tell me which link is up, which is my default route, what the address is on
+# that link, and what the default route is."  An address on an enslaved port
+# lives on its BRIDGE, which is the join nobody should have to make.
 show(){
-    echo "uplink now:"
-    ip -4 route show default 2>/dev/null | sed 's/^/  IPv4  /' || true
-    ip -6 route show default 2>/dev/null | head -1 | sed 's/^/  IPv6  /' || true
-    [ -n "$(ip -4 route show default 2>/dev/null)" ] || echo "  IPv4  (none)"
-    echo "vmbr0 bridge-port: $(awk '/^iface vmbr0/,/^$/{if($1=="bridge-ports")print $2}' /etc/network/interfaces 2>/dev/null)"
-    echo "preference: $(head -1 "$PREF" 2>/dev/null || echo 'auto (none set)')"
-    echo "IPv6: $([ -f "$V6CONF" ] && echo 'DISABLED by sigmond-netsel' || echo enabled)"
-    echo "candidates:"; phys | sed 's/^/  /'
+    local v4gw v4dev v6gw v6dev n link kind master src a4 a6 mark note
+    read -r v4gw v4dev <<EOF
+$(ip -4 route show default 2>/dev/null | awk '/ via /{print $3, $5; exit}')
+EOF
+    read -r v6gw v6dev <<EOF
+$(ip -6 route show default 2>/dev/null | awk '/ via /{print $3, $5; exit}')
+EOF
+    # ⛔ Plain ASCII '-' for the empty cell and a column wide enough for a v6
+    # literal (39 chars).  printf pads by BYTES, so an em-dash silently eats
+    # two columns of padding and skews every row after it.
+    printf '  %-8s %-8s %-5s %-40s %s\n' INTERFACE LINK KIND ADDRESS 'DEFAULT ROUTE'
+    while read -r n link kind; do
+        master=""
+        [ -e "$SYSNET/$n/master" ] && master=$(basename "$(readlink -f "$SYSNET/$n/master")" 2>/dev/null)
+        src="${master:-$n}"
+        a4=$(ip -4 -o addr show "$src" 2>/dev/null | awk '{print $4; exit}')
+        a6=$(ip -6 -o addr show "$src" scope global 2>/dev/null | awk '{print $4; exit}')
+        mark="-"
+        [ -n "$v4dev" ] && [ "$src" = "$v4dev" ] && mark="★ IPv4 via $v4gw"
+        if [ -n "$v6dev" ] && { [ "$n" = "$v6dev" ] || [ "$src" = "$v6dev" ]; }; then
+            [ "$mark" = "-" ] && mark="★ IPv6 via $v6gw" || mark="$mark  + IPv6 via $v6gw"
+        fi
+        note=""; [ -n "$master" ] && note="  (via $master)"
+        printf '  %-8s %-8s %-5s %-40s %s%s\n' \
+            "$n" "$link" "$kind" "${a4:-${a6:--}}" "$mark" "$note"
+    done <<EOF
+$(phys)
+EOF
+    # The CLAT is not a NIC and has no carrier, but it IS where IPv4 goes on an
+    # IPv6-only site — omitting it makes "no IPv4 default" look like a fault.
+    if ip link show clat >/dev/null 2>&1; then
+        printf '  %-8s %-8s %-5s %-40s %s\n' clat up xlat \
+            "$(ip -4 -o addr show clat 2>/dev/null | awk '{print $4; exit}')" \
+            "$([ -z "$v4gw" ] && ip -4 route show default 2>/dev/null | grep -q 'dev clat' \
+               && echo '★ IPv4 (464XLAT, no gateway to ping)' || echo '- (idle: native IPv4 wins)')"
+    fi
+    echo
+    if [ -n "$v4gw" ]; then echo "  active IPv4 default : via $v4gw dev $v4dev"
+    elif ip -4 route show default 2>/dev/null | grep -q 'dev clat'; then
+        echo "  active IPv4 default : through the CLAT (464XLAT — no gateway to ping)"
+    else echo "  active IPv4 default : NONE"; fi
+    if [ -n "$v6gw" ]; then echo "  active IPv6 default : via $v6gw dev $v6dev"
+    else echo "  active IPv6 default : NONE"; fi
+    echo "  vmbr0 bridge-port   : $(awk '/^iface vmbr0/,/^$/{if($1=="bridge-ports")print $2}' /etc/network/interfaces 2>/dev/null)"
+    echo "  preference          : $(head -1 "$PREF" 2>/dev/null || echo 'auto (none set)')"
+    echo "  IPv6                : $([ -f "$V6CONF" ] && echo 'DISABLED by sigmond-netsel' || echo enabled)"
 }
 
 apply(){ # apply <nic-or-auto>
