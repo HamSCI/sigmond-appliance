@@ -72,7 +72,17 @@ chk "one session at a time (bytes would interleave)" \
 chk "the paint script holds the session flag" \
     "$(grep -c 'FLAG=/run/sigmond/console-session' "$SRC")" "1"
 chk "and the panel refuses to repaint over it" \
-    "$(grep -c '\[ ! -e /run/sigmond/console-session \]' "$SRC")" "1"
+    "$(grep -c '! _live_console_session' "$SRC")" "1"
+# ⛔ PRESENCE IS NOT LIVENESS.  The first version checked only that the flag
+# FILE existed, and a trap does not run on SIGKILL or when socat reaps the
+# child. Measured on AI6VN-PM 2026-10-01: the flag was held with no paint
+# process alive and the monitor froze for the rest of the boot while
+# /etc/issue kept regenerating perfectly. The flag now carries a PID and the
+# reader must verify that process is alive.
+chk "  ...by verifying the PID is ALIVE, not that a file exists" \
+    "$(grep -c 'kill -0 "\$_p" 2>/dev/null' "$SRC")" "1"
+chk "  ...and the paint script writes its PID for that check" \
+    "$(grep -c 'echo \$\$ > "\$FLAG"' "$SRC")" "1"
 
 echo
 printf '%d passed, %d failed\n' "$PASS" "$FAIL"

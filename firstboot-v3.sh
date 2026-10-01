@@ -1394,8 +1394,16 @@ mkdir -p /run/sigmond 2>/dev/null
 # ⛔ Tell sigmond-issue to stand off.  The panel repaints VT1 on a timer and on
 # every cable change; without this it would overwrite a live session mid-typing
 # and the operator would watch their shell get erased every two minutes.
-: > "$FLAG" 2>/dev/null
-trap 'rm -f "$FLAG" 2>/dev/null' EXIT INT TERM
+# ⛔ A FLAG FILE IS NOT A LIVE SESSION.  This used to be an empty file plus an
+# EXIT trap, and a trap does not run on SIGKILL or when socat reaps the child.
+# Measured on AI6VN-PM 2026-10-01: the flag was held from 21:39 with NO paint
+# process alive, so sigmond-issue stood off for the rest of the boot and the
+# monitor froze — /etc/issue kept regenerating correctly, the screen just never
+# got it. rob: "I don't see the Sigmond console getting refreshed."
+# Write the PID; the reader checks the process is actually alive. Same lesson
+# as everything else today: presence is not liveness.
+echo $$ > "$FLAG" 2>/dev/null
+trap 'rm -f "$FLAG" 2>/dev/null' EXIT INT TERM HUP PIPE
 
 {
     printf '\033[H\033[2J'
@@ -2892,8 +2900,8 @@ fi
 # longer ... they only occupy about half of the monitor."
 PANEL=$(cat <<PEOF
 ════ Sigmond appliance $VERSION ${CONF:+— station ${CONF%% *}} ════
- CONSOLE IS READ-ONLY — its USB controller belongs to the decoder VM, so
- nothing typed here registers.  Reach the station using the addresses below.
+ KEYBOARD WORKS HERE — press Enter for a login to THIS host.  Your typing does
+ NOT echo (not even the username); that is normal, the screen is not frozen.
 ${NETWARN}${BRINGUP}${RXWARN}
  Network   ${_gwl}
    ${NICLINES}${_stray:+
@@ -2939,6 +2947,14 @@ done
 # while the wizard or finalizer own the console (that would erase the
 # install transcript / the remove-the-stick instruction), and never over a
 # live console login (an untuned host still has a working keyboard).
+# True only if a console session is BOTH claimed and actually running. A stale
+# claim must never be able to silence the panel for the rest of the boot.
+_live_console_session(){
+    local _p
+    _p=$(head -1 /run/sigmond/console-session 2>/dev/null)
+    case "$_p" in ''|*[!0-9]*) return 1 ;; esac
+    kill -0 "$_p" 2>/dev/null
+}
 # ⛔ AND NOT OVER A LIVE SPLIT-CONSOLE SESSION.  The keyboard lives in the
 # decoder VM (both USB controllers are vfio-pci) and the monitor is on this
 # host, so a console session arrives over the /30 and is painted on VT1 by
@@ -2948,7 +2964,7 @@ done
 if [ -f /etc/sigmond-appliance/.finalized ] \
    && ! systemctl is-active --quiet sigmond-wizard.service 2>/dev/null \
    && ! systemctl is-active --quiet sigmond-finalize.service 2>/dev/null \
-   && [ ! -e /run/sigmond/console-session ] \
+   && ! _live_console_session \
    && ! who 2>/dev/null | grep -qw tty1; then
     { printf '\033[H\033[2J'; printf '%s\n' "$PANEL"; } > /dev/tty1 2>/dev/null
 fi
