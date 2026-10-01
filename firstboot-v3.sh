@@ -959,6 +959,149 @@ systemctl enable sigmond-netfix.service 2>/dev/null
 # Run it now, before anything else needs the network.
 /usr/local/sbin/sigmond-netfix
 
+# ── sigmond-netwatch: heal the uplink when it is BROKEN ───────────────────
+# ⛔ WHY THIS EXISTS.  sigmond-netfix runs ONCE, at boot, and nothing re-runs
+# it: no timer, no udev rule.  So every network fault is permanent until
+# somebody power-cycles the machine -- and the console keyboard is DEAD (its
+# USB controller belongs to the decoder VM), so there is no local recovery
+# either.  The appliance's answer to "I lost the network" was "drive to the
+# site".  rob, 2026-10-01: "I don't really understand how I could manually
+# execute this if I lost connection ... shouldn't there be some background
+# polling of the network interfaces."
+#
+# ⛔ IT HEALS, IT DOES NOT UPGRADE.  This never switches a WORKING uplink.
+# Tearing down a healthy link because a better one appeared risks a station
+# nobody can reach, to gain nothing the working link was not already giving;
+# and a marginal new link would flap between the two forever.  When a cable
+# turns up on a healthy Wi-Fi station it is ADVERTISED on the console panel
+# with the command to adopt it, and a human decides.  The only automatic
+# action is on a link that is ALREADY DEAD, where netfix cannot make it worse.
+# That asymmetry is the whole safety argument; do not "improve" it into an
+# auto-switcher.
+cat > /usr/local/sbin/sigmond-netwatch <<'NETWATCHEOF'
+#!/bin/bash
+# Periodic uplink health check.  Runs netfix only when there is no answering
+# next hop.  Safe to run on a healthy host: it does nothing.
+# Paths are overridable so the test can drive this without root or a mount
+# namespace; the defaults are what production uses and nothing else sets them.
+LOG="${SIGMOND_NETWATCH_LOG:-/var/log/sigmond-netwatch.log}"
+STATE="${SIGMOND_NETWATCH_STATE:-/run/sigmond}"
+NETLIB="${SIGMOND_NETLIB:-/usr/local/lib/sigmond-net.sh}"
+SYSNET="${SIGMOND_SYSNET:-/sys/class/net}"
+FAILS="$STATE/netwatch-fails"
+LASTFIX="$STATE/netwatch-lastfix"
+CABLE="$STATE/cable-available"
+THRESHOLD="${SIGMOND_NETWATCH_THRESHOLD:-3}"   # consecutive failures before acting
+COOLDOWN="${SIGMOND_NETWATCH_COOLDOWN:-900}"   # seconds between netfix runs
+
+mkdir -p "$STATE" 2>/dev/null
+# No shared lib means no opinion.  Guessing about the network with half the
+# helpers missing is how a watchdog becomes the outage.
+. "$NETLIB" 2>/dev/null || exit 0
+
+say(){ echo "[netwatch $(date -u '+%FT%TZ')] $*" >>"$LOG" 2>/dev/null; }
+
+# ⛔ "HAS A DEFAULT ROUTE" IS NOT "HAS A WORKING UPLINK" -- the same lesson
+# usable_gw4() already encodes.  Ask the next hop to answer.
+uplink_ok(){
+    local gw r dev
+    gw=$(usable_gw4 2>/dev/null)
+    [ -n "$gw" ] && ping -c1 -W2 "$gw" >/dev/null 2>&1 && return 0
+    # IPv6: the router that sent the RA.  Link-local needs its device scope,
+    # so -I is not optional here.
+    r=$(ip -6 route show default 2>/dev/null | head -1)
+    if [ -n "$r" ]; then
+        case "$r" in *" via "*) gw=${r#*" via "}; gw=${gw%% *} ;; *) gw="" ;; esac
+        dev=${r#*" dev "}; dev=${dev%% *}
+        [ -n "$gw" ] && [ -n "$dev" ] \
+            && ping -6 -c1 -W2 -I "$dev" "$gw" >/dev/null 2>&1 && return 0
+    fi
+    return 1
+}
+
+# A cable in a wired port while we are NOT on IPv4 means an uplink is sitting
+# there unused.  Advertise it; never adopt it.
+# ⛔ REPAINT THE PANEL ON CHANGE, don't just poll faster.  The panel's own
+# timer is the slow path; plugging a cable in and then watching an unchanged
+# screen for five minutes is how an operator concludes nothing happened.  So
+# the moment this state CHANGES we kick sigmond-issue, which repaints VT1.
+# ONLY on change -- an unconditional kick every tick would repaint the console
+# forever and bury anything else on it (rob, 2026-10-01: "since things could
+# change, especially network interfaces, the panel ought to refresh itself").
+scan_cable(){
+    local d n found="" prev=""
+    [ -s "$CABLE" ] && prev=$(head -1 "$CABLE" 2>/dev/null)
+    if [ -z "$(usable_gw4 2>/dev/null)" ]; then
+        for d in "$SYSNET"/*; do
+            n=${d##*/}
+            case "$n" in lo|vmbr*|tap*|fwbr*|fwln*|fwpr*|veth*|bond*|dummy*|wg*|tun*|clat*|nat64*) continue ;; esac
+            [ -e "$d/device" ] || continue
+            [ -e "$d/wireless" ] && continue          # a radio is not a cable
+            [ "$(cat "$d/carrier" 2>/dev/null)" = "1" ] && { found="$n"; break; }
+        done
+    fi
+    if [ -n "$found" ]; then printf '%s\n' "$found" > "$CABLE" 2>/dev/null
+    else rm -f "$CABLE" 2>/dev/null; fi
+    if [ "$found" != "$prev" ]; then
+        say "cable state changed: '${prev:-none}' -> '${found:-none}' — repainting panel"
+        systemctl start --no-block sigmond-issue.service 2>/dev/null
+    fi
+}
+
+scan_cable
+
+if uplink_ok; then
+    [ -s "$FAILS" ] && say "uplink answers again — clearing $(cat "$FAILS" 2>/dev/null) failure(s)"
+    : > "$FAILS" 2>/dev/null
+    exit 0
+fi
+
+n=$(( $(cat "$FAILS" 2>/dev/null || echo 0) + 1 ))
+echo "$n" > "$FAILS" 2>/dev/null
+say "no answering next hop ($n/$THRESHOLD)"
+[ "$n" -ge "$THRESHOLD" ] || exit 0
+
+now=$(date +%s); last=$(cat "$LASTFIX" 2>/dev/null || echo 0)
+if [ $(( now - last )) -lt "$COOLDOWN" ]; then
+    say "netfix ran $(( now - last ))s ago; cooldown ${COOLDOWN}s — holding off"
+    exit 0
+fi
+echo "$now" > "$LASTFIX" 2>/dev/null
+: > "$FAILS" 2>/dev/null
+# ⛔ --no-block.  netfix does ifdown/ifup and can take minutes; a timer-driven
+# oneshot that waits on it would stack up tick after tick.
+say "uplink dead ${n} checks running — starting sigmond-netfix"
+systemctl start --no-block sigmond-netfix.service 2>/dev/null
+exit 0
+NETWATCHEOF
+chmod +x /usr/local/sbin/sigmond-netwatch
+
+cat > /etc/systemd/system/sigmond-netwatch.service <<'NWSVCEOF'
+[Unit]
+Description=Sigmond: re-run netfix when the uplink stops answering
+# ⛔ NOT Before=network-online.target.  A unit ordered there may not start
+# another unit, and this one exists to do exactly that.  See the v3.61 wedge.
+After=network.target
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/sigmond-netwatch
+# Never let the watchdog itself become the fault.
+TimeoutStartSec=90
+NWSVCEOF
+
+cat > /etc/systemd/system/sigmond-netwatch.timer <<'NWTMREOF'
+[Unit]
+Description=Check the uplink every 2 minutes (heals a dead one; never switches a live one)
+[Timer]
+OnBootSec=3min
+OnUnitActiveSec=2min
+AccuracySec=20s
+Unit=sigmond-netwatch.service
+[Install]
+WantedBy=timers.target
+NWTMREOF
+systemctl enable sigmond-netwatch.timer 2>/dev/null
+
 # ── importer ──────────────────────────────────────────────────────────────
 cat > /usr/local/sbin/sigmond-import.sh <<'IMPEOF'
 #!/bin/bash
@@ -2187,6 +2330,26 @@ for _d in /sys/class/net/*; do
     fi
 done
 
+# ── a cable is plugged in but unused (we are on Wi-Fi / IPv6) ──────────────
+# sigmond-netwatch finds this and writes the port name here.  It deliberately
+# does NOT adopt the cable on its own: switching a WORKING uplink risks a
+# station nobody can reach, and a marginal link would flap.  So the panel
+# tells the operator it is there and exactly how to take it, and the decision
+# stays human (rob, 2026-10-01).  Distinct from _stray above, which is the
+# cable-in-the-WRONG-port case; this one is the right port, simply not adopted.
+_cable=""
+if [ -s /run/sigmond/cable-available ]; then
+    _cbl=$(head -1 /run/sigmond/cable-available 2>/dev/null)
+    # ⛔ ADDRESS SOMEONE AT ANOTHER COMPUTER.  There is no keyboard here: BOTH
+    # USB controllers are bound to vfio-pci for the decoder VM and `lsusb` on
+    # this host returns nothing, so the person reading this screen cannot type
+    # anything into it -- not a command, not even a recovery stick.  A panel
+    # that prints a bare shell command is telling them to do something they
+    # physically cannot (rob, 2026-10-01).  Print the whole reach instead.
+    [ -n "$_cbl" ] && _cable=" ++ $_cbl has a cable, UNUSED (this host is not on IPv4).  To adopt it, from another computer:
+ ++   ssh root@${HOSTIP:-<no-ip-yet>} 'systemctl start sigmond-netfix'"
+fi
+
 # ⛔ IT MUST FIT ON THE SCREEN.  rob, 2026-10-01: the panel had grown past the
 # height of his monitor, so the header and the READ-ONLY warning scrolled off
 # and the first thing he could see was a mid-panel note.  A panel whose top is
@@ -2206,7 +2369,8 @@ PANEL=$(cat <<PEOF
 ${NETWARN}${BRINGUP}${RXWARN}
  Network   ${_gwl}
    ${NICLINES}${_stray:+
-$_stray}
+$_stray}${_cable:+
+$_cable}
 
  Proxmox host   ssh root@${HOSTIP:-<no-ip-yet>}
                 web UI  https://$(ipurl "${HOSTIP:-<no-ip-yet>}"):8006
