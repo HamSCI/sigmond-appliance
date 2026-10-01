@@ -2,17 +2,20 @@
 
 > **Audience:** operator
 > **Status:** current
-> **Verified against:** sigmond-appliance 4934001 on 2026-09-02 — wording + cross-checked referenced scripts/links (`sigmond-setup`, operator README/troubleshooting); install flow last exercised by the v3.36 build (2026-09-02) and the nested rig
+> **Verified against:** sigmond-appliance v3.65 (cbee2b7, blessed 2026-10-01) and its wizard, sigmond e8fbce8 — the questions, console messages and logins below were read from that code; install exercised on AC0G-B4 hardware and the nested rig the same day
 > **Canonical for:** burning, booting and first-boot wizard of the appliance image
 
 Day-2 operation, troubleshooting beyond §11, remote access and what-not-to-touch live in the [Operator guide](https://github.com/HamSCI/sigmond/blob/main/docs/operator/README.md).
 
 This walks you through turning a small computer into a complete
 HamSCI/WsprDaemon receiving station. **No Linux experience needed.** You
-answer about six questions with a keyboard, plug and unplug one USB
-stick when told, and the machine does everything else itself.
+answer a handful of questions with a keyboard, plug and unplug one USB
+stick when told, and switch the machine back on twice. It does everything
+else itself.
 
-Total hands-on time: about 20 minutes. Written for the current appliance image line (v3.36 at the time of this revision; the image version is printed on the stick's QUICKSTART and in `/etc/sigmond-appliance/version` after install, and it's the first line of the login screen).
+About an hour end to end, most of it waiting. The image version is printed
+on the stick's QUICKSTART, in `/etc/sigmond-appliance/version` after
+install, and on the first line of the console panel.
 
 ---
 
@@ -20,96 +23,108 @@ Total hands-on time: about 20 minutes. Written for the current appliance image l
 
 **Hardware**
 - The station computer: a modern x86-64 mini-PC or small server with
-  **16 GB RAM or more** and an internal NVMe/SSD drive.
+  **16 GB RAM or more** and an internal **NVMe** drive. The installer writes
+  only to an NVMe drive.
   ⚠ **Everything on that internal drive will be erased.**
-- Wired Ethernet from the computer to your home/site router (the normal
-  kind of network with automatic addresses and internet — if other
-  devices "just work" when plugged in, you're fine).
-- An **RX888 Mk2** SDR receiver and your antenna feed. *(You can install
-  without it and add it later — see step 6 — but nothing decodes until it
-  arrives.)*
-- A **Leo Bodnar LBE-1421 GPSDO** (GPS-disciplined oscillator) and its GPS
-  antenna. This is required, not a nicety: it supplies the receiver's
-  sampling clock and it is what the station's timing tiers are measured
-  against.
-- A **USB stick, 8 GB or larger** (16–32 GB ideal).
-  ⚠ Everything on the stick will be erased too.
-- A monitor and USB keyboard plugged into the station computer — you
-  need them once, for the setup questions.
+- A network: wired Ethernet to your site router (automatic addresses), or a
+  Wi-Fi network you join during setup. IPv6-only sites work too.
+- An **RX888 Mk2** SDR receiver and your antenna feed.
+- A **Leo Bodnar LBE-1421 GPSDO** and its GPS antenna. It supplies the
+  receiver's sampling clock and the station's timing reference.
+- A **USB stick of 16 GB or more**. ⚠ Everything on it will be erased too.
+- A monitor and USB keyboard on the station computer, until the wizard
+  finishes.
 - Any other computer (Mac, Windows, or Linux) to prepare the stick.
-- Optional extras the station finds by itself if present: RM3100
-  magnetometer, a local GPS-disciplined time server.
+- Optional: an RM3100 magnetometer, a TS-1 time injector, a local
+  GPS-disciplined time server. The station finds them by itself.
 
-**Facts — write these down before you start**
+Plug the receiver and GPS clock in **before the first boot**. Anything
+missing does not stop the install; you add it later (§7).
+
+**Facts — write these down. The wizard asks in this order.**
 | Question you'll be asked | Example |
 |---|---|
-| Reporter ID (callsign, optional /suffix) | `AC0G/B4` |
-| Grid square (6 characters) | `EM38ww` |
-| Antenna description (free text, optional) | `80m dipole @ 40ft` |
-| Enable remote support access? | `Y` (recommended) |
-| PSWS station ID (optional, skip with Enter) | `S000170` |
-| — its GRAPE instrument number | `171` |
-| — magnetometer instrument number (if any) | `84` |
-| — magnetometer's own PSWS station (if different) | `S000082` |
-| Station name (Enter accepts the suggestion) | `AC0G-B4` |
+| Reporter ID (callsign, optional /suffix) — required | `AC0G/B4` |
+| Grid square — required; not asked if the GPS clock has a fix | `EM38ww` |
+| Antenna description (optional) | `80m dipole @ 40ft` |
+| Wi-Fi network and passphrase (only if no cable; asked only on a machine with Wi-Fi) | `ShackNet` |
+| Is this a DASI station? Its unit number | `Y`, `3` (for DASI-003) |
+| Enable remote access? | `Y` (default, recommended) |
+| PSWS station ID (optional, Enter to skip) | `S000170` |
+| — its GRAPE instrument ID | `171` |
+| — magnetometer instrument number (if any; same station ID) | `84` |
+| Send status heartbeats? | `Y` (default) |
+| Station designator (Enter accepts the suggestion) | `AC0G-B4` |
 
 ⚠ **Names beginning `DASI` followed by three digits are reserved** for the
 NSF-funded DASI2 fleet, and are checked against a roster shipped with the
 software. If you were issued one — `DASI007`, say — use exactly that: your PSWS
-station and instrument IDs come from the roster, and you can skip those
-questions. A `DASI`-numbered name that is *not* in the roster is **refused**
-rather than guessed at, because guessing is wrong in both directions. If that
-happens, either the name has a typo or your machine is newer than the roster —
-ask your fleet admin. Any other name is an ordinary station and nothing here
-applies.
+station and instrument IDs come from the roster. A `DASI`-numbered name that is
+*not* in the roster is **refused** rather than guessed at. If that happens,
+either the name has a typo or your machine is newer than the roster — ask your
+fleet admin. Any other name is an ordinary station and nothing here applies.
 
 ---
 
 ## 2. Get the image
 
-Ask your fleet admin for the current release — two files:
+Ask your fleet admin for the current release — or download links for it:
 
-- `sigmond-appliance-v3.36-20260902-release.img`  (about 5 GB)
-- `sigmond-appliance-v3.36-20260902-release.sha256`  (its checksum)
+- `sigmond-appliance-v3.65-20261001-release.img`  (about 5.5 GB)
+- `sigmond-appliance-v3.65-20261001-release.sha256`  (its checksum)
 
-Every release carries its own version and date in the filename, so the two
-files you receive may well read differently from the two above. Use the names
-you were actually given wherever this guide shows a filename.
+Each release carries its own version and date in the filename; use the names
+you were given wherever this guide shows one.
 
 The image is published **uncompressed** (`.img`) — there is nothing to
-decompress. (Images before v3.24 shipped as `.img.xz`; if you were handed
-one of those, ask for a current image instead.) Check the checksum if you
-like: `sha256sum -c sigmond-appliance-<version>.sha256`.
+decompress. With both files in one folder, check it:
+
+```
+sha256sum -c sigmond-appliance-v3.65-20261001-release.sha256
+```
 
 ---
 
 ## 3. Write the image to the USB stick
 
-Easiest reliable way on any OS: **balenaEtcher** (free,
-balena.io/etcher). Select the **`.img`** file, select your stick, Flash.
-Etcher verifies the write for you. **Raspberry Pi Imager** also works —
-choose "Use custom" and select the `.img` file.
+**Best:** the flasher from this repo. It finds the stick by its removable and
+USB attributes instead of a letter you type, refuses the disk your computer
+runs from, and reads the stick back to compare every byte:
 
-Command-line alternative (Mac):
+```
+./flash-usb.sh sigmond-appliance-v3.65-20261001-release.img
+```
+
+**Any OS, graphical:** balenaEtcher (balena.io/etcher) or Raspberry Pi Imager
+("Use custom"). Both verify the write.
+
+**Command line (Linux):**
+```
+lsblk -dno NAME,SIZE,TRAN,RM,MODEL     # find the stick: check size, removable
+sudo dd if=sigmond-appliance-v3.65-20261001-release.img of=/dev/sdX bs=4M \
+        oflag=direct conv=fsync status=progress
+sync
+```
+⚠ Getting `/dev/sdX` wrong overwrites that machine's own disk without asking.
+
+**Command line (Mac):**
 ```
 diskutil list                      # find your stick, e.g. /dev/disk4
 diskutil unmountDisk /dev/disk4
-sudo dd if=sigmond-appliance-v3.36-20260902-release.img of=/dev/rdisk4 bs=4m
+sudo dd if=sigmond-appliance-v3.65-20261001-release.img of=/dev/rdisk4 bs=4m
 ```
 
-Command-line alternative (Linux):
+**Verify a hand-written stick** by reading back exactly the image's size:
 ```
-lsblk                              # find your stick, e.g. /dev/sdX
-sudo dd if=sigmond-appliance-v3.36-20260902-release.img of=/dev/sdX bs=4M \
-        oflag=direct conv=fsync status=progress
+IMG=sigmond-appliance-v3.65-20261001-release.img
+sudo head -c "$(stat -c %s $IMG)" /dev/sdX | sha256sum
+sha256sum $IMG                     # the two hashes must match
 ```
+⚠ Don't verify with `file -s` — it reads only the boot sector, so it passes a
+stick that took one megabyte and fell off the bus.
 
-**Before you boot from it, check the stick really took the image:**
-`sudo file -s /dev/sdX` must say `DOS/MBR boot sector`. If it doesn't,
-re-write the image — booting a bad stick fails silently, with no error.
-
-After writing, your computer may pop up one small drive (often called
-"EFI" or "NO NAME") — that's normal, ignore it (or see step 4).
+After writing, your computer may show one small drive from the stick (often
+"EFI" or "NO NAME"). That's normal; ignore it, or see §4.
 
 ---
 
@@ -117,127 +132,143 @@ After writing, your computer may pop up one small drive (often called
 
 Skip this for a brand-new station.
 
-If this machine **replaces** an existing Sigmond station and you saved
-its keys (`tar czf site-keys.tar.gz -C / etc/hs-uploader/keys
-home/timestd/.ssh` on the old station), copy `site-keys.tar.gz` onto
-that small "EFI" drive the stick shows after burning, then eject. The
-installer will restore them automatically and your PSWS portal
-registration carries over.
+If this machine **replaces** an existing Sigmond station, save its keys on the
+old station:
+
+```
+tar czf site-keys.tar.gz -C / etc/hs-uploader/keys home/timestd/.ssh
+```
+
+Copy `site-keys.tar.gz` onto that small "EFI" drive the stick shows, then eject.
+The wizard restores the keys and, if you give PSWS IDs, checks the PSWS login
+for you — your portal registration carries over.
 
 ---
 
-## 5. First boot — the automatic install (~10 minutes)
+## 5. First boot — the automatic install
 
 1. Plug the stick into the station computer. Connect monitor, keyboard,
-   and Ethernet.
+   receiver, GPS clock, and Ethernet.
 2. Power on and **boot from the stick** — press the boot-menu key as it
-   starts (usually F7, F11, F12, or Del, it varies by machine) and pick
-   the USB entry. If no menu appears, enter BIOS setup and turn **Fast
-   Boot OFF**, then try again.
-3. **What you'll see:** an installer runs entirely by itself — no
-   questions. After roughly 10 minutes **the machine turns itself
-   off**. That shutdown is your signal:
-4. **REMOVE THE STICK.** (Booting with it still inserted can restart
-   the installer.)
+   starts (usually F7, F11, F12, or Del) and pick the USB entry. If no menu
+   appears, enter BIOS setup and turn **Fast Boot OFF**.
+3. **What you'll see:** an installer runs by itself, asking nothing. After a
+   few minutes **the machine turns itself off**. That is your signal.
+4. **REMOVE THE STICK, then power the machine back on.** (Some machines
+   always boot USB first and would install again in a loop.)
 
 ---
 
-## 6. Second boot — plug things back in
+## 6. Second boot — put the stick back
 
-1. Power the machine on (stick out). After a minute the screen shows
-   the system is running and its network address.
-2. Make sure the **RX888 is plugged into a blue USB-3 port** now.
-3. **Plug the USB stick back in** (any port, machine stays on).
-4. **What you'll see:** the screen announces
-   `Sigmond USB detected — importing the decoder VM (~3 min). LEAVE THE STICK IN.`
-   Do what it says: leave it in.
+The machine starts from its own disk. The console shows that Proxmox is
+running, its address and login, and:
+
+```
+ NEXT STEP: plug in the Sigmond install USB stick.
+ The decoder VM then installs itself automatically.
+```
+
+Plug **the same stick** back in, into any port. The console answers:
+
+```
+ Sigmond USB detected (...).
+ Importing the decoder VM (~3 min). LEAVE THE STICK IN.
+```
+
+Leave it in.
 
 ---
 
 ## 7. Answer the setup questions
 
-The setup wizard appears on the monitor and asks the questions from
-your list in step 1. Type answers and press Enter; press just Enter to
-accept a suggestion or skip an optional item.
+The setup wizard appears on the monitor. It first lists the equipment it found
+— RX888, GPSDO, TS-1, magnetometer — and says plainly that anything missing does
+not stop the install. Then it asks the questions from §1, in that order. Type
+answers and press Enter; press just Enter to accept a suggestion or skip an
+optional item.
 
-At the end you get a **review screen** showing everything you typed —
-type a line number to fix any answer, then `Y` to apply.
+At the end a **review screen** shows everything you typed — type a line number
+to fix any answer, then `Y` to apply.
 
-The wizard then configures everything itself (a few minutes). Watch for
-this line:
+The wizard then configures everything itself (a few minutes).
 
-```
-SDR/radiod: radiod ACTIVE ✓
-```
-
-If it instead says no RX888 was found, that is not a failure. The station
-installs anyway and waits, dormant — nothing is lost. Re-seat the RX888 in a
-**blue** USB-3 port (straight into the machine, no hub), then bring it up
-yourself:
+If the receiver or another device was missing, the station installs anyway and
+waits, dormant — nothing is lost. Plug it in (the RX888 in a **blue** USB-3 port,
+straight into the machine, no hub), then bring it up:
 
 ```
-sigmond-vm smd status          # the RX888 appears under "adoptable:"
+sigmond-vm smd status          # the device appears under "adoptable:"
 sigmond-vm smd adopt <name>    # use the name smd status printed; it asks first
 ```
 
-The same two commands are how you add *any* hardware later — a GPSDO, a
-magnetometer, a radio you did not have on install day. The station reports what
-it finds and starts nothing until you ask it to.
+The same two commands add *any* hardware later. The station reports what it
+finds and starts nothing until you ask.
 
-(If the remote-access line says FAILED, don't worry — the support
-server may be busy; the station works fine and you can enable it later
-with one command: `sigmond-setup --reconfigure`.)
+(If the remote-access line says FAILED, don't worry — the support server may be
+busy. Turn it on later with `sigmond-setup --reconfigure`.)
 
 ---
 
-## 8. Remove the stick when told — done
+## 8. Remove the stick — it powers off — switch it back on
 
-The console prints:
+The host tunes itself (CPU isolation, USB passthrough to the decoder VM), then
+the console prints:
 
 ```
->>> REMOVE THE USB STICK NOW <<<
+ >>> INSTALL COMPLETE — REMOVE THE USB STICK NOW <<<
+ As soon as the stick is removed this machine POWERS OFF.
 ```
 
-Pull it. The machine reboots itself into full production.
+Pull the stick. The machine **switches off** — it does not reboot. **Switch it
+back on.** That full power-off also resets the RX888, which it needs.
 
-⚠ **After this reboot the keyboard on the station computer may go
-dead. That is normal and correct** — the USB ports now belong to the
-radio. From here on you use the station from another computer over the
-network. The monitor shows a login panel with both addresses and
-logins; you can disconnect monitor and keyboard whenever you like.
+While the console panel says **STATION IS STILL BUILDING**, leave it alone; on a
+fresh machine that can take tens of minutes.
+
+⚠ **After this the keyboard on the station computer may go dead. That is normal
+and correct** — the USB ports now belong to the radio, and the panel says the
+console is read-only. From here on you use the station from another computer.
+The panel lists every address and login; disconnect the monitor and keyboard
+whenever you like.
 
 ---
 
 ## 9. Fifteen minutes later — check it's alive
 
-From any computer on the same network (addresses are on the station's
-monitor panel):
+From any computer on the same network (addresses are on the console panel):
 
-- **Live receiver:** `http://<VM address>:8081` — you should see a
-  waterfall with signals.
-- **Your spots:** search your reporter ID at wsprnet.org (Database) and
-  your callsign at pskreporter.info.
-- **Timing dashboard:** `http://<VM address>:8000`
+- **Live receiver:** `http://<host address>:8081` — a waterfall with signals.
+- **Station pages:** `http://<host address>:8000`
+- **Magnetometer:** `http://<host address>:8082` (if you have one)
+- **Your spots:** search your reporter ID at wsprnet.org (Database) and your
+  callsign at pskreporter.info.
+
+The decoder VM sits on a private link behind the host, so the host relays these
+pages for it.
 
 ---
 
 ## 10. Logins — and change the password
 
-One password unlocks everything on the appliance. Factory default:
-**`hamsci-sigmond`** — change it once you're up.
+**One password unlocks the whole station.** It starts as **`hamsci-sigmond`**.
+The wizard copies the host's root password to the decoder VM's `sigmond`,
+`hamsci` and `root` accounts, so they all take the same one. Root login over
+SSH stays off on the VM.
 
 | Where | How |
 |---|---|
 | Proxmox host (the machine itself) | `ssh root@<host address>` or browse `https://<host address>:8006` |
-| Decoder VM (the radio) | `ssh hamsci@<VM address>` (or `sigmond@`) |
+| Decoder VM (the radio) | `ssh -p 2222 sigmond@<host address>` (relayed by the host), or `ssh sigmond@<VM address>` (also `hamsci@`) |
 
-To change the password, run `passwd` in each place you log in (host
-root, and hamsci/sigmond in the VM).
+Change it: run `passwd` on the host, and in the VM.
 
-**PSWS stations:** the VM's login banner shows the upload key to paste
-at https://pswsnetwork.eng.ua.edu/ — then run `smd psws verify`. Until
-then data records locally, nothing is lost. (If you restored keys in
-step 4, this is already done.)
+**PSWS stations:** the VM's login banner shows this machine's public upload key.
+Paste it into the PSWS portal for your station
+(https://pswsnetwork.eng.ua.edu/), then run `smd psws verify`. Until then data
+records locally; nothing is lost. **One key serves the whole machine:** if it
+uploads for more than one station, register the same key on each. (If you
+restored keys in §4, this is already done.)
 
 ---
 
@@ -245,22 +276,24 @@ step 4, this is already done.)
 
 | Symptom | Fix |
 |---|---|
-| Machine ignores the stick / boots its old OS | Re-burn and verify with `file -s` (step 3); try another USB port; turn off Fast Boot in BIOS; use the boot-menu key |
-| Installer finished but screen is stuck, stick still in | Remove the stick, power-cycle |
-| `no Sigmond USB present` on screen | Plug the stick back in — any port, machine running |
+| Machine ignores the stick / boots its old OS | Re-write and verify the stick (§3); try another USB port; turn off Fast Boot in BIOS; use the boot-menu key |
+| `INSTALL CANNOT CONTINUE NORMALLY: …` on the console | No working network. Its title says which case (no cable / connected but nothing answered / no address offered). Move the cable to a port with a link light and reboot; or set a fixed address, `sigmond-setnet 10.0.0.50/24 10.0.0.1`; or use Wi-Fi, `sigmond-wifi scan` then `sigmond-wifi join <network>` |
+| `import: no Sigmond USB present` | Plug the stick back in — any port, machine running |
 | Wizard: no RX888 found | Not a failure — the station installs dormant. Re-seat the cable in a **blue** port, then `sigmond-vm smd status` and `sigmond-vm smd adopt <name>` |
+| Stick still in an hour after "REMOVE THE USB STICK NOW" | Remove it, run `poweroff`, then power the machine back on |
 | Typed a wrong answer | From the host: `sigmond-setup --reconfigure` |
 | Remote access shows FAILED | Later, from the host: `sigmond-setup --reconfigure` |
-| No spots after 30 minutes | Antenna actually connected? Then `ssh hamsci@<VM>` and run `smd status` — send its output to your fleet admin |
+| No spots after 30 minutes | Antenna actually connected? Then log in to the VM and run `smd status` — send its output to your fleet admin |
 | Anything else | If you enabled remote access, your fleet admin can log in and fix it — just ask |
 
 More symptoms and the decision tree: [operator troubleshooting](https://github.com/HamSCI/sigmond/blob/main/docs/operator/troubleshooting.md).
 
 ---
 
-*Fleet-internal: images live on wd30 (`~/sigmond-appliance-*.img` +
-`.sha256`). This document lives in the HamSCI/sigmond-appliance repo as
-`INSTALL.md` — keep it updated as the wizard changes.*
+*Fleet-internal: blessed images live in the download folder on wd30 and on the
+release Drive folders (untested builds sit in `pending/` until blessed). This
+document lives in the HamSCI/sigmond-appliance repo as `INSTALL.md` — keep it
+updated as the wizard changes.*
 
 ---
 

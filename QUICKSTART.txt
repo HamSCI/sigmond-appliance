@@ -3,7 +3,7 @@ SIGMOND APPLIANCE @@VERSION@@ — QUICK START
 You have a USB stick and a small computer with a radio receiver attached.
 About an hour from now the machine will be recording HF time signals on its
 own.  Read section 0 before you touch anything — it is the only part that
-needs preparation.
+needs preparation.  (Everything here was read from this image's own code.)
 
 ⚠ INSTALLING ERASES THE MACHINE'S INTERNAL DISK, with no further warning
   once you boot from the stick.  Use a machine you mean to dedicate to this.
@@ -11,16 +11,22 @@ needs preparation.
 
 0. COLLECT THESE FIRST
 ----------------------
-The wizard (step 5) asks for all of it.  Written down, that step takes two
-minutes instead of twenty.  Only the first two are required.
+The wizard (step 5) asks for these, in this order.  Written down, that step
+takes two minutes instead of twenty.  Only the first two are required.
 
-  Callsign / reporter ID  REQUIRED   e.g. AC0G/B4
-        A suffix after the slash distinguishes several stations you run.
+  Reporter ID             REQUIRED   e.g. AC0G/B4
+        Your callsign.  A suffix after the slash distinguishes several
+        stations you run.
   Grid square             REQUIRED   e.g. EM38ww
-        Filled in for you if a GPS clock is connected.
-  Station designator                 e.g. AC0G-B4
-        Offered automatically from your callsign; press Enter to accept.
+        NOT ASKED AT ALL if the GPS clock already has a fix.
   Antenna description                e.g. 40 m dipole at 10 m
+  Wi-Fi network + passphrase
+        Only if you will run without a network cable.  Asked only when
+        the machine has a Wi-Fi radio.
+  DASI unit number                   e.g. 3  (for DASI-003)
+        HamSCI DASI stations only; the wizard first asks whether this is one.
+  Remote access                      Y (the default)
+        Lets your fleet admin reach the station for support.
   PSWS station ID                    e.g. S000123   (S + six digits)
         From your account at https://pswsnetwork.eng.ua.edu/
   GRAPE instrument ID                e.g. 172
@@ -28,8 +34,9 @@ minutes instead of twenty.  Only the first two are required.
   Magnetometer instrument no.        e.g. 84
         Only if you have one.  It reports under the SAME station ID as the
         receiver — there is no separate magnetometer station ID.
-  DASI unit number                   e.g. 3  (for DASI-003)
-        HamSCI DASI deployments only.
+  Status heartbeats                  Y (press Enter to accept the collector)
+  Station designator                 e.g. AC0G-B4
+        Offered from your reporter ID; press Enter to accept.
 
   No PSWS account yet?  Press Enter past those and carry on — the station
   records and works.  Add them later with:  sigmond-setup --reconfigure
@@ -37,16 +44,23 @@ minutes instead of twenty.  Only the first two are required.
   login banner walks you through it.
 
 Physically, before you begin:
-  - The receiver and GPS clock PLUGGED IN AND POWERED — before first boot,
-    not after.  The installer looks for them.
+  - A machine with an internal NVMe drive.  The installer writes ONLY to
+    an NVMe drive.
+  - The receiver (RX888) and GPS clock (LBE-1421) PLUGGED IN AND POWERED,
+    before first boot.  A magnetometer or a TS-1 time injector plugs in now
+    too.  Anything missing does NOT stop the install; add it later.
   - A USB stick of 16 GB or more.  It gets overwritten.
-  - A screen and keyboard on the machine, at least until the last step.
-  - A network cable.  The machine gets its address automatically.
+  - A screen and keyboard on the machine, until the wizard finishes.
+  - A network: a cable to your router (the machine gets its address
+    automatically), or a Wi-Fi network you join in the wizard.  IPv6-only
+    sites work too.
 
 
 1. WRITE THE STICK
 ------------------
 The image is published UNCOMPRESSED — nothing to decompress, just write it.
+Check the download first, with the image and its .sha256 in one folder:
+    sha256sum -c sigmond-appliance-@@VERSION@@-*.sha256
 
   BEST: the flasher from the sigmond-appliance repo.  It finds the stick by
   its removable+USB attributes instead of a letter you type, REFUSES the
@@ -96,25 +110,32 @@ otherwise install again in a loop.
 
 4. PUT THE STICK BACK WHEN ASKED
 --------------------------------
-The machine now starts from its own disk.  When the console says "plug in
-the Sigmond install USB", insert the SAME stick again and leave it in.
+The machine now starts from its own disk.  When the console says
+    NEXT STEP: plug in the Sigmond install USB stick.
+insert the SAME stick again, in any port, and leave it in.  The console
+answers "Importing the decoder VM (~3 min). LEAVE THE STICK IN."
 The decoder VM (VMID 100) imports automatically (~3 min), sized to this
 machine (all CPUs minus one pair, RAM minus 2 GB).
 
 
 5. ANSWER THE WIZARD  (LEAVE THE STICK IN)
 ------------------------------------------
-The setup questions appear on the console, in this order.  This is where
-your sheet from section 0 gets used.
+First the wizard lists the equipment it found (RX888, GPSDO, TS-1, RM3100).
+Missing items do not stop it.  Then it asks the questions from section 0,
+in that order:
 
    1) Reporter ID — your callsign
-   2) Grid square
+   2) Grid square (skipped when the GPS clock has a fix)
    3) Antenna description (or Enter to skip)
-   4) Is this a DASI station, and its unit number
-   5) Remote access (RAC) — offered as a list; pick one or skip
-   6) PSWS station ID, then the GRAPE and magnetometer numbers
-   7) Status heartbeats — press Enter to accept
-   8) Station designator — press Enter to accept the suggestion
+   4) Wi-Fi — only on a machine with a Wi-Fi radio; Enter skips
+   5) Is this a DASI station, and its unit number
+   6) Enable remote access?  [Y/n]
+   7) PSWS station ID, then the GRAPE and magnetometer numbers
+   8) Send status heartbeats?  [Y/n] — press Enter to accept
+   9) Station designator — press Enter to accept the suggestion
+
+A REVIEW SCREEN then shows every answer: type a line number to change one,
+or Y to apply.
 
 The heartbeat question needs nothing from your sheet.  Saying yes lets a
 dashboard show that your station is alive and healthy: a small report every
@@ -124,34 +145,68 @@ collector it names can be changed later without reinstalling.
 Got something wrong?  Rerun any time:  sigmond-setup --reconfigure
 
 
-6. REMOVE THE STICK, AND LET IT REBOOT
---------------------------------------
+6. REMOVE THE STICK — IT POWERS OFF — POWER IT BACK ON
+------------------------------------------------------
 The host now tunes itself: CPU isolation + pinning (grub), USB controller
-passthrough to the VM.  The console then says REMOVE THE USB STICK.  Do it.
-The machine reboots itself into production (decoder VM autostarts, pinned,
-with the RX888 passed through).
+passthrough to the VM.  The console then says:
+    >>> INSTALL COMPLETE — REMOVE THE USB STICK NOW <<<
+    As soon as the stick is removed this machine POWERS OFF.
+Pull the stick.  The machine switches OFF (it does not reboot).  Switch it
+back on.  The full power-off also resets the RX888, which it needs.
+
+While the console panel says STATION IS STILL BUILDING, leave it alone:
+on a fresh machine that can take tens of minutes.
 
 
 7. THINGS THAT LOOK WRONG AND ARE NOT
 -------------------------------------
-  The machine switches itself off during install
-        The expected cue.  Remove the stick and power it on (step 3).
+  The machine switches itself off — TWICE
+        Both expected: after the first install (step 3) and after you
+        remove the stick at the end (step 6).  Power it on each time.
   It asks for the stick a SECOND time
         Expected — the first boot installs the system, the second loads
         the recorder.
-  The keyboard stops working after the final reboot
-        Normal.  The USB controllers now belong to the VM.  Use ssh or the
-        web page from another computer.
+  The keyboard stops working at the end
+        Normal.  The USB controllers now belong to the VM; the panel says
+        the console is read-only.  Use ssh or a web page from another
+        computer.
+  "no RX888" or other missing equipment
+        The station installs and waits.  Plug the device in, then on the
+        VM:  smd status   and   smd adopt <name>.  Nothing starts until
+        you ask.
+  Remote access says FAILED
+        The support server may be busy.  Turn it on later with
+        sigmond-setup --reconfigure
+  "INSTALL CANNOT CONTINUE NORMALLY: ..."
+        No working network.  The title says which case (no cable detected /
+        port connected but nothing answered / no address offered), and the
+        block lists three ways out: move the cable to a port with a link
+        light and reboot; set a fixed address with
+            sigmond-setnet 10.0.0.50/24 10.0.0.1
+        or use Wi-Fi:  sigmond-wifi scan   then   sigmond-wifi join <network>
 
 
 8. AFTERWARDS
 -------------
-  Proxmox web GUI   https://<machine-ip>:8006
-  Host login        root / hamsci-sigmond          (CHANGE IT)
-  Decoder VM login  hamsci / hamsci-sigmond        (CHANGE IT TOO)
+The console panel lists every address and login with your real values.
 
-Log in over ssh and the banner tells you what remains — chiefly registering
-the PSWS upload key, if you gave PSWS IDs.
+  Proxmox web GUI   https://<host-ip>:8006
+  Host login        ssh root@<host-ip>
+  Decoder VM login  ssh sigmond@<vm-ip>   (also hamsci@)
+                    or, through the host:  ssh -p 2222 sigmond@<host-ip>
+  Live receiver     http://<host-ip>:8081
+  Station pages     http://<host-ip>:8000
+  Magnetometer      http://<host-ip>:8082
+
+ONE PASSWORD for the whole station, starting as  hamsci-sigmond.  The
+wizard copies the host's root password to the VM's sigmond, hamsci and root
+accounts (root login over ssh stays off on the VM).  CHANGE IT: run
+passwd on the host and in the VM.
+
+PSWS: log in to the VM; its banner shows this machine's public upload key.
+Paste it into the PSWS portal for your station, then run:  smd psws verify
+ONE KEY SERVES THE WHOLE MACHINE: if it uploads for more than one station,
+register the same key on each.
 
 This stick is appliance version @@VERSION@@.  Before the wizard runs, the
 Proxmox host is named sigmond-appliance-@@VTAG@@ and the VM
