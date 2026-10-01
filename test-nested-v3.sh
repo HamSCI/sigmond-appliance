@@ -17,6 +17,42 @@ cd "$HOME/appliance/v3"
 LOG="$PWD/test-v3.log"
 exec >> "$LOG" 2>&1
 say(){ echo "[test $(date '+%T')] $*"; }
+
+# >>> phase_d_verdict (test-phase-d-verdict.sh loads exactly this block)
+# Phase D's metrology verdict over the guest probe's KEY:N lines.  Prints
+#   METROLOGY_OK        metrology units are running
+#   NO_SDR_EXPECTED     zero units, and the guest has NO SDR on its bus, and
+#                       bring-up stopped at 'radiod configured' for exactly that
+#                       reason and no other -- the nest's normal case
+#   FATAL_NO_METROLOGY  anything else with zero units (ad154d3's defect)
+# and returns 1 only for the FATAL.  A missing key reads as the unsafe value,
+# so a garbled reply can never pass.
+#
+# Why the exception exists: this nest has no RX888 (passthrough is real-
+# hardware scope), so `smd config init radiod` finds no card, the hard
+# checkpoint aborts bring-up, and no metrology can exist.  Without it the
+# assertion could only ever FATAL here -- v3.64 was the first real nest run
+# after ad154d3 and failed on exactly that.  The metrology claim itself is
+# then proven on hardware (B4), never here.
+phase_d_verdict() {
+    local r="$1" k
+    # Not anchored to ^: qm guest exec returns JSON, whose "out-data" joins the
+    # lines with a literal \n.  (No key is a suffix of another, so an
+    # unanchored match cannot confuse them -- keep it that way.)
+    _pdv() { echo "$r" | grep -oE "$1:[0-9]+" | head -1 | cut -d: -f2; }
+    local count sdr rstep rchk ochk ostep
+    count=$(_pdv COUNT);  sdr=$(_pdv SDRDEV)
+    rstep=$(_pdv RADIODSTEP); rchk=$(_pdv RADIODCHK)
+    ochk=$(_pdv OTHERCHK);  ostep=$(_pdv OTHERSTEP)
+    [ -n "$count" ] || { echo FATAL_NO_METROLOGY; return 1; }
+    if [ "$count" -gt 0 ]; then echo METROLOGY_OK; return 0; fi
+    if [ "${sdr:-1}" = 0 ] && [ "${rstep:-0}" -gt 0 ] && [ "${rchk:-0}" -gt 0 ] \
+       && [ "${ochk:-1}" = 0 ] && [ "${ostep:-1}" = 0 ]; then
+        echo NO_SDR_EXPECTED; return 0
+    fi
+    echo FATAL_NO_METROLOGY; return 1
+}
+# <<< phase_d_verdict
 KEY="$HOME/appliance/build/applkey"
 # --release builds strip root-ssh-keys from answer-v3.toml on purpose
 # (build-usb-v3.sh RELEASE branch) so the test key never lands on a
@@ -753,6 +789,12 @@ else
         echo WIRED:\$(grep -c \"re-running site wiring\" \$L 2>/dev/null)
         echo COUNT:\$(systemctl list-units \"timestd-metrology@*\" --no-legend --plain 2>/dev/null | wc -l)
         echo ENVS:\$(ls -1 /etc/hf-timestd/metrology-channels/ 2>/dev/null | wc -l)
+        echo SDRDEV:\$(grep -l 04b4 /sys/bus/usb/devices/*/idVendor 2>/dev/null | wc -l)
+        echo RADIODSTEP:\$(grep -c \"step exited [1-9]: .*config init radiod\" \$L 2>/dev/null)
+        echo RADIODCHK:\$(grep -c \"checkpoint: radiod configured FAILED\" \$L 2>/dev/null)
+        echo OTHERCHK:\$(grep \"checkpoint: .* FAILED\" \$L 2>/dev/null | grep -vc \"radiod configured\")
+        echo OTHERSTEP:\$(grep \"step exited [1-9]\" \$L 2>/dev/null | grep -v \"config init radiod\" | grep -vc sigmond-sdr-recover)
+        echo NOSDRMSG:\$(grep -c \"no recognised SDRs detected\" \$L 2>/dev/null)
     '" 2>&1)
     _w=$(echo "$MET" | grep -oE 'WIRED:[0-9]+' | head -1 | cut -d: -f2)
     _c=$(echo "$MET" | grep -oE 'COUNT:[0-9]+' | head -1 | cut -d: -f2)
@@ -760,8 +802,14 @@ else
     [ "${_w:-0}" -gt 0 ] \
         && say "site wiring re-ran after bring-up ✓" \
         || say "WARN: no 're-running site wiring' line — is this image older than sigmond af5aba3?"
-    if [ "${_c:-0}" -gt 0 ]; then
+    _v=$(phase_d_verdict "$MET")
+    if [ "$_v" = METROLOGY_OK ]; then
         say "metrology channels running: ${_c} (channel envs: ${_e:-?}) ✓"
+    elif [ "$_v" = NO_SDR_EXPECTED ]; then
+        say "no SDR on the guest's USB bus; bring-up stopped at 'radiod configured'"
+        say "  for exactly that reason, and no other step or checkpoint failed ✓"
+        say "  ⚠ THE METROLOGY ASSERTION WAS NOT EVALUATED — this nest has no RX888."
+        say "    Prove metrology on hardware (B4) before rolling this image."
     else
         say "FATAL: ZERO timestd-metrology@ units after a completed bring-up."
         say "  The station installed cleanly and measures nothing — the exact"
