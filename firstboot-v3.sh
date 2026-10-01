@@ -1384,6 +1384,162 @@ exit 0
 CPAINTEOF
 chmod +x /usr/local/sbin/sigmond-console-paint
 
+# ── the VM half of the split console, staged for `qm guest exec` ───────────
+# ⛔ THE HOST HALF ALONE IS A RELAY WITH NOTHING ON THE OTHER END.  The
+# keyboard is in the decoder VM; until these land there, a greenfield station
+# has a listener on 10.99.0.1:7790 and no way for a human to use it.  It was a
+# manual `install-in-vm.sh` for one day and that is one day too long: the whole
+# point is recovery on a machine nobody can type into, and an affordance that
+# needs a working network to install is not a recovery path.
+# rob, 2026-10-01: "I want the console that installed the VM thing to be part
+# of a standard build."
+#
+# Staged HERE on the host, pushed into the guest at import (see the guest-exec
+# block). Kept on disk so it can be re-pushed by hand after a VM rebuild
+# without finding the image again.
+# ⚠ These are byte-for-byte copies of sigmond-appliance/vm-console/ — a test
+# asserts that, because two copies of a thing is how they drift.
+install -d -m 755 /usr/local/share/sigmond/vm-console
+
+cat > /usr/local/share/sigmond/vm-console/sigmond-console-bridge <<'VMBRIDGEEOF'
+#!/bin/bash
+# sigmond-console-bridge — the VM half of the split console.
+#
+# ⛔ THE KEYBOARD IS HERE, THE SCREEN IS NOT.  Both USB controllers are passed
+# through to this VM, so the physical keyboard types into THIS machine; the
+# monitor is wired to the Proxmox host.  Neither half is usable alone.  This
+# runs where the keystrokes land (the VM's tty1), opens a session on the host
+# over the private 10.99.0.0/30 link, and sends every byte of output to the
+# host's VT1 — the screen the operator is actually looking at.
+#
+# ⛔ THE /30 IS THE POINT.  It is a host-only bridge with no physical port, so
+# it is up whether or not the station has any uplink at all.  That is exactly
+# the case this exists for: the network is broken and there is no other way in.
+#
+# ⛔ ssh WILL NOT READ THE PASSWORD FROM stdin.  It opens /dev/tty for both the
+# prompt and the answer.  Here that sent the prompt to a screen nobody can see
+# and read nothing at all: AI6VN-PM 2026-10-01 03:53:58 logged two "Failed
+# password for root" in ONE second with a human present who had typed nothing.
+# SSH_ASKPASS_REQUIRE=force stops ssh touching /dev/tty; the prompt is printed
+# below where the operator can see it, and sigmond-console-askpass reads the
+# keyboard device explicitly.
+#
+# Authentication is unchanged: a normal ssh login with the host's own password.
+# The bridge carries pixels, not privilege.
+set -u
+HOST=10.99.0.1
+PORT=7790
+USER_=root
+KBD=/dev/tty1
+
+say(){ printf '%s\r\n' "$*"; }   # stdout is the relay; \r\n because VT1 is raw
+
+if ! timeout 5 socat /dev/null "TCP4:$HOST:$PORT" 2>/dev/null; then
+    # The relay is down.  Fall back to a local login so the keyboard is not
+    # simply dead -- unseen is still better than swallowed.
+    exec /sbin/agetty --noclear tty1 "${TERM:-linux}"
+fi
+
+export SSH_ASKPASS=/usr/local/sbin/sigmond-console-askpass
+export SSH_ASKPASS_REQUIRE=force
+export SIGMOND_CONSOLE_KBD="$KBD"
+export DISPLAY="${DISPLAY:-:0}"   # older ssh refuses askpass without it
+
+{
+    say ""
+    say "  ── Proxmox host console ────────────────────────────────────────"
+    say "  Keyboard: decoder VM.   Screen: this host.   Link: 10.99.0.0/30"
+    say ""
+    say "  Logging in as $USER_@$HOST"
+    say "  TYPE THE PROXMOX HOST ROOT PASSWORD, then Enter."
+    say "  ⚠ Nothing appears while you type — that is normal, it is not frozen."
+    say ""
+    # ⛔ stdin stays the KEYBOARD for the session itself; only the password is
+    # diverted through askpass.  -tt forces a pty even though stdout is a pipe.
+    ssh -tt \
+        -o StrictHostKeyChecking=no \
+        -o ConnectTimeout=10 \
+        -o NumberOfPasswordPrompts=3 \
+        -o PreferredAuthentications=password,keyboard-interactive \
+        "$USER_@$HOST" 2>&1 < "$KBD"
+    say ""
+    say "  session ended — restarting in 3s"
+} | socat - "TCP4:$HOST:$PORT" 2>/dev/null
+
+sleep 3
+exit 0
+VMBRIDGEEOF
+
+cat > /usr/local/share/sigmond/vm-console/sigmond-console-askpass <<'VMASKPASSEOF'
+#!/bin/bash
+# sigmond-console-askpass — hand ssh a password read from the VM's keyboard.
+#
+# ⛔ WHY.  ssh does NOT read the password from stdin: it opens /dev/tty, writes
+# the prompt there and reads the answer there.  In the split console that is
+# fatal twice over -- the prompt goes to the VM's invisible screen instead of
+# the operator's monitor, AND the read did not land on the keyboard at all.
+# Measured on AI6VN-PM 2026-10-01 03:53:58: two "Failed password for root"
+# inside ONE second, with a human present who had typed nothing.  That is ssh
+# getting an empty read and burning its retries, not a wrong password.
+#
+# SSH_ASKPASS_REQUIRE=force makes ssh call this instead of ever opening
+# /dev/tty, so we control both halves: the prompt is printed by the bridge
+# through the relay (visible on the monitor) and the answer is read HERE, from
+# the keyboard device explicitly, with echo off.
+set -u
+KBD="${SIGMOND_CONSOLE_KBD:-/dev/tty1}"
+
+# Explicit device, not /dev/tty: this process has no controlling terminal
+# worth trusting, which is the whole reason ssh's own read failed.
+exec < "$KBD" || exit 1
+
+# -s: no echo.  Nothing appears on the monitor while typing, which is correct
+# and must be SAID by the bridge beforehand or the operator thinks it is dead.
+IFS= read -rs pw || exit 1
+printf '%s\n' "$pw"
+exit 0
+VMASKPASSEOF
+
+cat > /usr/local/share/sigmond/vm-console/getty-override.conf <<'VMGETTYEOF'
+# The physical keyboard is passed through to this VM, but the monitor is on
+# the Proxmox host. Replace the (invisible) local login with a bridge that
+# opens a session on the host and paints it where the operator can see it.
+[Service]
+ExecStart=
+ExecStart=-/usr/local/sbin/sigmond-console-bridge
+Restart=always
+RestartSec=3
+TTYPath=/dev/tty1
+StandardInput=tty
+StandardOutput=journal
+StandardError=journal
+VMGETTYEOF
+chmod 755 /usr/local/share/sigmond/vm-console/sigmond-console-bridge \
+          /usr/local/share/sigmond/vm-console/sigmond-console-askpass
+
+# Re-push by hand after a VM rebuild, or when the import-time push failed.
+cat > /usr/local/sbin/sigmond-vm-console-push <<'VMPUSHEOF'
+#!/bin/bash
+# sigmond-vm-console-push — (re)install the split console inside the decoder VM.
+# The import does this automatically; this is for a rebuilt VM, or a retry.
+set -u
+VMID="${SIGMOND_VMID:-100}"
+D=/usr/local/share/sigmond/vm-console
+[ -s "$D/sigmond-console-bridge" ] || { echo "no staged bridge at $D" >&2; exit 1; }
+qm agent "$VMID" ping >/dev/null 2>&1 || { echo "guest agent not answering for VM $VMID" >&2; exit 1; }
+qm guest exec "$VMID" --timeout 120 -- /bin/bash -c \
+  "set -e
+   printf %s '$(base64 -w0 "$D/sigmond-console-bridge")'  | base64 -d > /usr/local/sbin/sigmond-console-bridge
+   printf %s '$(base64 -w0 "$D/sigmond-console-askpass")' | base64 -d > /usr/local/sbin/sigmond-console-askpass
+   chmod 755 /usr/local/sbin/sigmond-console-bridge /usr/local/sbin/sigmond-console-askpass
+   mkdir -p /etc/systemd/system/getty@tty1.service.d
+   printf %s '$(base64 -w0 "$D/getty-override.conf")' | base64 -d > /etc/systemd/system/getty@tty1.service.d/sigmond-console-bridge.conf
+   systemctl daemon-reload
+   systemctl restart getty@tty1.service" \
+  && echo "split console installed in VM $VMID — type on the keyboard, watch this host's monitor"
+VMPUSHEOF
+chmod +x /usr/local/sbin/sigmond-vm-console-push
+
 cat > /etc/systemd/system/sigmond-console-relay.service <<'CRELAYEOF'
 [Unit]
 Description=Paint a decoder-VM console session onto this host's VT1 (no keyboard here)
@@ -1963,6 +2119,38 @@ if qm start "$VMID"; then
        chmod 644 /etc/systemd/network/10-sigmond-mgmt.network
        networkctl reload 2>/dev/null; sleep 2; networkctl reconfigure en0 ens18 eth0 2>/dev/null
        systemctl restart systemd-networkd 2>/dev/null; true" >>"$LOG" 2>&1
+
+    # ── push the split console into the guest ──────────────────────────────
+    # ⛔ THIS IS THE RECOVERY PATH, so it installs on every station, not on
+    # request.  The Proxmox host has no keyboard and no USB at all (both
+    # controllers are vfio-pci for this VM), so when the network is the thing
+    # that is broken the ONLY way in is: type in the VM, read on the host's
+    # monitor, over 10.99.0.0/30 which has no physical port.  A recovery path
+    # you have to install over the network is not a recovery path.
+    #
+    # Failure here is a WARNING, never fatal: a station with no console bridge
+    # is diminished, not broken, and refusing to finish the import over it
+    # would trade a missing convenience for a dead install.
+    if [ -s /usr/local/share/sigmond/vm-console/sigmond-console-bridge ]; then
+      _cb=$(base64 -w0 /usr/local/share/sigmond/vm-console/sigmond-console-bridge)
+      _ca=$(base64 -w0 /usr/local/share/sigmond/vm-console/sigmond-console-askpass)
+      _cg=$(base64 -w0 /usr/local/share/sigmond/vm-console/getty-override.conf)
+      if qm guest exec "$VMID" --timeout 120 -- /bin/bash -c \
+          "set -e
+           printf %s '$_cb' | base64 -d > /usr/local/sbin/sigmond-console-bridge
+           printf %s '$_ca' | base64 -d > /usr/local/sbin/sigmond-console-askpass
+           chmod 755 /usr/local/sbin/sigmond-console-bridge /usr/local/sbin/sigmond-console-askpass
+           mkdir -p /etc/systemd/system/getty@tty1.service.d
+           printf %s '$_cg' | base64 -d > /etc/systemd/system/getty@tty1.service.d/sigmond-console-bridge.conf
+           systemctl daemon-reload
+           systemctl restart getty@tty1.service" >>"$LOG" 2>&1; then
+        say "import: split console installed in the VM — the keyboard now reaches this host's screen ✓"
+      else
+        say "import: WARNING — could not install the VM console bridge; the host's"
+        say "import:   monitor will show the panel but the keyboard will do nothing."
+        say "import:   retry: /usr/local/sbin/sigmond-vm-console-push"
+      fi
+    fi
     # Verify from HERE, which is the only opinion that matters: the host must
     # be able to reach the VM's address.  Saying "configured" without
     # checking is how the Scranton channels looked healthy while being dead.
