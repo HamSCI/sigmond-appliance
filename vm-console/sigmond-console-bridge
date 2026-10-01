@@ -41,6 +41,19 @@ export SSH_ASKPASS_REQUIRE=force
 export SIGMOND_CONSOLE_KBD="$KBD"
 export DISPLAY="${DISPLAY:-:0}"   # older ssh refuses askpass without it
 
+# ⛔ DO NOT TAKE THE SCREEN UNTIL SOMEBODY ASKS FOR IT.
+# The first version connected at boot and held the relay forever. That is
+# legitimately a "live session", so sigmond-console-paint held its flag from
+# second one and the access panel — the thing an operator needs to READ — never
+# got the screen at all. rob, after a cold boot on v3.66: "I have the login
+# prompt but no Sigmond panel."
+#
+# The panel itself says "press Enter for a login to THIS host", so honour that:
+# block on one keystroke FIRST and open nothing until it arrives. While we
+# wait there is no connection, hence no flag, so the panel refreshes normally
+# and owns the display — the correct resting state for an unattended station.
+read -rsn1 _ < "$KBD" 2>/dev/null || true
+
 {
     say ""
     say "  ── Proxmox host console ────────────────────────────────────────"
@@ -59,8 +72,11 @@ export DISPLAY="${DISPLAY:-:0}"   # older ssh refuses askpass without it
         -o PreferredAuthentications=password,keyboard-interactive \
         "$USER_@$HOST" 2>&1 < "$KBD"
     say ""
-    say "  session ended — restarting in 3s"
+    say "  session ended — the access panel returns in a moment"
 } | socat - "TCP4:$HOST:$PORT" 2>/dev/null
 
-sleep 3
+# Exit so systemd restarts us straight back into the keystroke wait above. The
+# relay connection closes with us, releasing the flag, and the panel takes the
+# screen back.
+sleep 2
 exit 0
