@@ -378,6 +378,31 @@ for d in /sys/class/net/*; do
 done
 [ -n "$ALLPHYS" ] || { say "no physical NICs found — cannot fix networking"; exit 1; }
 
+# ── an operator's choice outranks carrier order ────────────────────────────
+# netfix picks carrier-first, which is right when nobody has an opinion and
+# wrong the moment somebody does: with two live sockets it always takes the
+# same one, and there was no way to say otherwise short of unplugging a cable.
+# sigmond-netsel writes a NIC name here and it goes to the FRONT of the probe
+# list (rob, 2026-10-01: "I want to be able to switch back and forth").
+#
+# ⛔ A PREFERENCE, NOT A COMMAND.  If the named port has no carrier or no DHCP
+# answer, the ordinary search still runs and still wins.  A stale preference —
+# a NIC that was renamed, removed, or simply unplugged — must never be able to
+# strand a host that has a perfectly good second socket, because the operator
+# who set it is usually not the person standing in front of the machine later.
+UPLINK_PREF_FILE="${SIGMOND_UPLINK_PREF:-/etc/sigmond-appliance/uplink-preference}"
+_pref=$(head -1 "$UPLINK_PREF_FILE" 2>/dev/null | tr -d '[:space:]')
+case "$_pref" in auto|"") _pref="" ;; esac
+if [ -n "$_pref" ]; then
+    case " $PROBE " in
+        *" $_pref "*)
+            PROBE="$_pref$(printf '%s' " $PROBE " | sed "s/ $_pref / /")"
+            PROBE=${PROBE% }
+            say "operator preference: trying $_pref first (from $UPLINK_PREF_FILE)" ;;
+        *)  say "operator preference '$_pref' is not a probeable NIC here — ignoring it" ;;
+    esac
+fi
+
 # Autonegotiation is not instant.  A fixed 4 s sleep was ROUTINELY too short
 # on gigabit copper (and far too short behind a switch running STP), so a
 # perfectly good port could read carrier=0 and be written off.  Poll instead:
@@ -1089,6 +1114,127 @@ systemctl start --no-block sigmond-netfix.service 2>/dev/null
 exit 0
 NETWATCHEOF
 chmod +x /usr/local/sbin/sigmond-netwatch
+
+cat > /usr/local/sbin/sigmond-netsel <<'NETSELEOF'
+#!/bin/bash
+# sigmond-netsel — choose which interface this host uses to reach the world.
+#
+# ⛔ WHY IT CAN EXIST NOW.  Changing the uplink from a session that runs OVER
+# that uplink is how you strand a machine, and this host has no keyboard — both
+# USB controllers belong to the decoder VM.  What makes this safe is the split
+# console: keystrokes land in the VM, the screen is here, and the two are
+# joined over 10.99.0.0/30, a host-only bridge with no physical port.  That
+# path does not care which uplink you pick, or whether you pick a broken one.
+#
+#   sigmond-netsel                 show the current uplink and the candidates
+#   sigmond-netsel auto            clear the preference; carrier-first (default)
+#   sigmond-netsel <nic>           prefer that NIC (DHCP), verify, keep or revert
+#   sigmond-netsel wifi            prefer the radio even with a cable plugged in
+#   sigmond-netsel ipv6 off|on     disable/enable IPv6 on this host
+#
+# The preference PERSISTS across reboots and is a preference, not a command:
+# netfix still falls back to its ordinary search if the named port has no
+# carrier or no DHCP answer. A stale choice must never strand the machine.
+set -u
+PREF="${SIGMOND_UPLINK_PREF:-/etc/sigmond-appliance/uplink-preference}"
+SYSNET="${SIGMOND_SYSNET:-/sys/class/net}"
+V6CONF=/etc/sysctl.d/99-sigmond-disable-ipv6.conf
+
+die(){ echo "sigmond-netsel: $*" >&2; exit 1; }
+[ "$(id -u)" = 0 ] || die "must run as root"
+
+phys(){ # every physical NIC, with carrier and kind
+    local d n
+    for d in "$SYSNET"/*; do
+        n=${d##*/}
+        case "$n" in lo|vmbr*|tap*|fwbr*|fwln*|fwpr*|veth*|bond*|dummy*|wg*|tun*|clat*|nat64*) continue ;; esac
+        [ -e "$d/device" ] || continue
+        printf '%s %s %s\n' "$n" \
+            "$([ "$(cat "$d/carrier" 2>/dev/null)" = 1 ] && echo LINK-UP || echo no-link)" \
+            "$([ -e "$d/wireless" ] && echo wifi || echo wired)"
+    done
+}
+
+show(){
+    echo "uplink now:"
+    ip -4 route show default 2>/dev/null | sed 's/^/  IPv4  /' || true
+    ip -6 route show default 2>/dev/null | head -1 | sed 's/^/  IPv6  /' || true
+    [ -n "$(ip -4 route show default 2>/dev/null)" ] || echo "  IPv4  (none)"
+    echo "vmbr0 bridge-port: $(awk '/^iface vmbr0/,/^$/{if($1=="bridge-ports")print $2}' /etc/network/interfaces 2>/dev/null)"
+    echo "preference: $(head -1 "$PREF" 2>/dev/null || echo 'auto (none set)')"
+    echo "IPv6: $([ -f "$V6CONF" ] && echo 'DISABLED by sigmond-netsel' || echo enabled)"
+    echo "candidates:"; phys | sed 's/^/  /'
+}
+
+apply(){ # apply <nic-or-auto>
+    local want="$1"
+    if [ "$want" = auto ]; then rm -f "$PREF"; echo "preference cleared — carrier-first"
+    else
+        phys | awk '{print $1}' | grep -qx "$want" || die "no such interface: $want"
+        mkdir -p "$(dirname "$PREF")"; printf '%s\n' "$want" > "$PREF"
+        echo "preference set: $want"
+    fi
+    # ⛔ --no-block would return before we could verify, and the whole point is
+    # to CHECK the result while the operator is still watching.
+    echo "re-running sigmond-netfix ..."
+    systemctl start sigmond-netfix.service 2>/dev/null || true
+    sleep 2
+    local gw; gw=$(ip -4 route show default 2>/dev/null | awk '/ via /{print $3; exit}')
+    if [ -n "$gw" ] && ping -c1 -W3 "$gw" >/dev/null 2>&1; then
+        echo "OK — IPv4 via $gw"
+    elif ip -6 route show default 2>/dev/null | grep -q .; then
+        echo "no IPv4, but IPv6 has a default route — host is still reachable over v6"
+    else
+        echo "⚠ NO WORKING UPLINK after that change."
+        echo "  netwatch will re-run netfix within ~6 min; or: sigmond-netsel auto"
+    fi
+    show
+}
+
+case "${1:-show}" in
+  show|status|"") show ;;
+  auto)           apply auto ;;
+  ipv6)
+      case "${2:-}" in
+        off)
+            # ⛔ Refuse on a host that has no IPv4 — that is a one-way trip.
+            # On an IPv6-only site (464XLAT) this takes clatd's NAT64 with it,
+            # and IPv4 "working" through the CLAT is NOT independent of v6.
+            if [ -z "$(ip -4 route show default 2>/dev/null | awk '/ via /{print $3}')" ]; then
+                die "refusing: this host has no NATIVE IPv4 default route. Disabling IPv6 would remove its only path (the CLAT runs over IPv6). Get a wired IPv4 uplink first."
+            fi
+            printf 'net.ipv6.conf.all.disable_ipv6=1\nnet.ipv6.conf.default.disable_ipv6=1\n' > "$V6CONF"
+            sysctl -q -p "$V6CONF" 2>/dev/null
+            echo "IPv6 disabled (persists across reboot; undo: sigmond-netsel ipv6 on)"
+            echo "⚠ clatd and the IPv6→VM relays are now inert. VM services stay reachable"
+            echo "  on this host's IPv4 via the vmbr1 DNAT rules."
+            show ;;
+        on)
+            rm -f "$V6CONF"
+            sysctl -q -w net.ipv6.conf.all.disable_ipv6=0 2>/dev/null
+            sysctl -q -w net.ipv6.conf.default.disable_ipv6=0 2>/dev/null
+            echo "IPv6 re-enabled. A reboot restores SLAAC/RA cleanly if it does not return."
+            show ;;
+        *) die "usage: sigmond-netsel ipv6 off|on" ;;
+      esac ;;
+  wifi)
+      w=$(phys | awk '$3=="wifi"{print $1; exit}')
+      [ -n "$w" ] || die "no Wi-Fi interface on this host"
+      # ⛔ A wlan in managed mode CANNOT be a bridge port, so this is not the
+      # same operation as choosing a wired NIC: netfix leaves vmbr0 alone and
+      # the radio carries the host. Say so, or the next reader assumes vmbr0
+      # moved and debugs the wrong thing.
+      mkdir -p "$(dirname "$PREF")"; printf 'wifi\n' > "$PREF"
+      echo "preference set: wifi ($w) — vmbr0 is NOT re-bridged; managed mode cannot be bridged"
+      sigmond-wifi up 2>/dev/null || true
+      show ;;
+  -h|--help|help)
+      sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//' ;;
+  *)  apply "$1" ;;
+esac
+exit 0
+NETSELEOF
+chmod +x /usr/local/sbin/sigmond-netsel
 
 cat > /etc/systemd/system/sigmond-netwatch.service <<'NWSVCEOF'
 [Unit]
