@@ -947,6 +947,20 @@ After=network.target
 Type=oneshot
 RemainAfterExit=no
 ExecStart=/usr/local/sbin/sigmond-netfix
+# ⛔ KillMode=process, OR THE LEASE DIES 20 MINUTES LATER.
+# `ifup vmbr0` starts dhclient as a CHILD of this unit. With systemd's default
+# KillMode=control-group the whole cgroup is reaped the instant ExecStart
+# returns, so the dhclient daemon that holds the lease is killed one second
+# after it binds. Nothing renews; at lease expiry the host silently loses IPv4
+# and falls back to whatever else it has (CLAT/IPv6) or goes dark.
+# Measured on AI6VN-PM 2026-10-01, and it is SILENT for the full lease:
+#     03:37:40  dhclient bound 10.22.23.31, lease expires 03:57:40
+#     03:37:41  sigmond-netfix.service finished  -> dhclient reaped
+#     04:21     no IPv4 on vmbr0; default route back on clat
+# The console panel reported it correctly ("cable UNUSED, this host is not on
+# IPv4") — that is what surfaced it. netwatch did NOT act, also correctly: IPv6
+# still answered, so the uplink was not dead, only downgraded.
+KillMode=process
 # Never fail the boot over it: a host that will not finish booting is worse
 # than one on the wrong address, and this runs again next boot.
 SuccessExitStatus=0 1
@@ -2267,20 +2281,31 @@ if [ -n "$RACN" ] && [ -r /etc/sigmond/frpc-host.toml ]; then
     # `label :port` fragment, which is what an operator actually reads off the
     # screen and types somewhere else (rob, 2026-10-01: the panel no longer fit
     # on his monitor, so the version number had scrolled off the top).
-    _racfrag(){   # _racfrag <suffix> <port>  -> one short fragment, no newline
+    # ⛔ THE ssh LINES KEEP THEIR WHOLE COMMAND.  Compressing them to
+    # "host ssh :51029 (root)" saved two columns and cost the only thing the
+    # panel is for: this host has NO KEYBOARD, so every line here is read off
+    # the screen and typed on a DIFFERENT computer.  A port and a parenthesised
+    # username is something the reader has to reassemble; `ssh -p 51029
+    # root@host` is something they can just type.  The web ports stay as
+    # `label :port` because the host is named once on the line above and a URL
+    # is reassembled from far less.
+    # The account names are literals here on purpose: the frp CLIENT IDENTITY
+    # was once used as the ssh username, which put `DASI-009@` in front of
+    # every reach (rob caught it on the panel).  Never ${RUSR}.
+    _racfrag(){   # _racfrag <suffix> <port>  -> one fragment, no newline
         case "$1" in
-          *-host-ssh) printf 'host ssh :%s (root)' "$2" ;;
-          *-host-ui)  printf 'host UI :%s (https)' "$2" ;;
-          *-vm-ssh)   printf 'VM ssh :%s (hamsci)' "$2" ;;
+          *-host-ssh) printf 'ssh -p %s root@%s' "$2" "$RSRV" ;;
+          *-host-ui)  printf 'https://%s:%s' "$(ipurl "$RSRV")" "$2" ;;
+          *-vm-ssh)   printf 'ssh -p %s hamsci@%s' "$2" "$RSRV" ;;
           *-vm-web)   printf 'ka9q-web :%s' "$2" ;;
           *-vm-web2)  printf 'ka9q-web#2 :%s' "$2" ;;
           *-vm-web3)  printf 'ka9q-web#3 :%s' "$2" ;;
           *-vm-station) printf 'station-web :%s' "$2" ;;
           *-vm-gmag)  printf 'magnetometer :%s' "$2" ;;
           *-vm-grape) printf 'GRAPE charts :%s' "$2" ;;
-          *-ssh)      printf 'ssh :%s (hamsci)' "$2" ;;
+          *-ssh)      printf 'ssh -p %s hamsci@%s' "$2" "$RSRV" ;;
           *-web)      printf 'web :%s' "$2" ;;
-          *)          printf '%s :%s' "${1##*-}" "$2" ;;
+          *)          printf '%s port %s' "${1##*-}" "$2" ;;
         esac
     }
     RAC_ADMIN=""; RAC_USER=""
@@ -2322,7 +2347,8 @@ RACEOF
    ADMINISTRATORS ONLY — full control of this machine, never publish:
      $RAC_ADMIN}${RAC_USER:+
 
-   HamSCI users — on ${RSRV:-the gateway}, private NOT public, each needs a WireGuard config:
+   HamSCI users — private by default, NOT public; none is public just because the hostname is.
+   Each needs a WireGuard config for ${RSRV:-the gateway}:
      $RAC_USER}
 "
 elif [ -n "$RACN" ]; then
