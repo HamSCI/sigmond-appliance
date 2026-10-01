@@ -232,6 +232,23 @@ $SSHN "grep -q '^iface vmbr0 inet dhcp' /etc/network/interfaces" \
     || { say "FATAL: vmbr0 not on DHCP (static-fossilization bug)"; $SSHN "cat /etc/network/interfaces"; exit 1; }
 HIP=$($SSHN "hostname -I | awk '{print \$1}'" 2>/dev/null)
 $SSHN "grep -q \"^$HIP[[:space:]]\" /etc/hosts" && say "/etc/hosts pinned to live lease ($HIP) ✓" || say "WARN: /etc/hosts not on live lease"
+# ⛔ A LEASE NOBODY IS RENEWING IS NOT AN UPLINK — and every check above passes
+# anyway.  `ifup` starts dhclient as a CHILD of sigmond-netfix.service, and
+# with RemainAfterExit=no systemd reaped that cgroup the instant ExecStart
+# returned: the daemon holding the lease died one second after binding.  The
+# address, the route, the stanza and /etc/hosts were all still correct, so this
+# phase passed — and the host silently lost IPv4 at lease expiry, twenty
+# minutes later, long after the test had moved on.  Measured on AI6VN-PM
+# 2026-10-01: bound 03:37:40, reaped 03:37:41, gone by 04:21.
+# Assert the RENEWER, not just the lease. This is the only check here that
+# would have caught it, and it costs one ssh.
+if $SSHN "pgrep -x dhclient >/dev/null"; then
+    say "dhclient is running — the lease will be renewed ✓"
+else
+    say "FATAL: no dhclient process; the lease at $HIP will expire and never renew"
+    $SSHN "systemctl show sigmond-netfix -p RemainAfterExit -p KillMode; ip -4 -o addr show vmbr0"
+    exit 1
+fi
 $SSHN "poweroff" 2>/dev/null; sleep 15; vm_kill
 say "PHASE B PASS"
 [ "${1:-all}" = "B" ] && exit 0
