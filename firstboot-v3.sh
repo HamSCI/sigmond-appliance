@@ -484,6 +484,34 @@ if [ -z "$LIVE" ] && [ -z "$LIVE_ENSLAVED" ]; then
             iptables -t nat -A POSTROUTING -s 10.99.0.0/30 -o "$_wdev" -j MASQUERADE 2>/dev/null \
                 && say "  decoder VM is now NATed out $_wdev"
         fi
+
+        # ⛔ AN ADDRESS ON THE RADIO IS NOT AN UPLINK.  This branch used to exit
+        # 0 and clear the unreachable flag on the strength of `WIFI_UP` alone,
+        # which is an ADDRESS test.  On AI6VN-PM 2026-10-01 (v3.66, Wi-Fi + an
+        # IPv4 AP) the radio held 10.22.23.47 and pinged its gateway while
+        # `ip -4 route show default` was EMPTY -- dhclient's route add had lost
+        # an EEXIST collision with a stale default on vmbr0 and been discarded
+        # to /dev/null.
+        #
+        # ⚠ THIS IS ALSO WHAT MADE netwatch USELESS HERE.  netwatch detected the
+        # dead uplink correctly and called netfix five times (21:22-21:37Z) and
+        # netfix changed NOTHING: the radio re-bind above is gated on the radio
+        # having no address, which was false. Healing that cannot reach the
+        # fault it detects is not healing. Repair it here, where we know the
+        # radio is the uplink.
+        if ! ip -4 route show default 2>/dev/null | grep -q .; then
+            _wgw=$(awk '/option routers/{r=$3} END{gsub(/;/,"",r); print r}' \
+                     /var/lib/dhcp/dhclient.leases 2>/dev/null)
+            if [ -n "$_wgw" ] && ip -4 route add default via "$_wgw" dev "$_wdev" 2>/dev/null; then
+                say "  NO DEFAULT ROUTE on a radio that has an address — installed via $_wgw dev $_wdev"
+            elif ip -6 route show default 2>/dev/null | grep -q .; then
+                say "  no IPv4 default route, but IPv6 has one — IPv6-only AP, this is normal"
+            else
+                say "  ⚠ the radio has an address but NO DEFAULT ROUTE, and no gateway could be found"
+                say "     this host can reach its own subnet and nothing else"
+            fi
+        fi
+
         rm -f /etc/sigmond-appliance/.network-unreachable 2>/dev/null
         exit 0
     fi

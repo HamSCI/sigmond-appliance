@@ -271,6 +271,43 @@ check     "reloads the network so the route follows"      "$STUBLOG" "ifreload -
 # ═══════════════════════════════════════════════════════════════════════════
 echo
 echo "sigmond-wifi: addressing must survive the reboot"
+echo "───────────────────────────────────────────────────────"
+# ⛔ THE 0.0.0.0/0 COLLISION — measured on AI6VN-PM 2026-10-01, v3.66.
+# A Wi-Fi station on an IPv4 AP held 10.22.23.47, pinged its gateway, and had
+# NO default route. dhclient-script adds at metric 0; a stale default on vmbr0
+# already owned that slot, so the add returned EEXIST and was discarded to
+# /dev/null. The address add had already succeeded -- hence an address, a
+# reachable on-link gateway, and no route, with nothing logged anywhere.
+#
+# Until this fix NOTHING in the repo ever installed a default route: a
+# repo-wide search for `ip route add` returned ZERO hits and the only two
+# route mutations were deletions. The product relied entirely on
+# dhclient-script silently working.
+PANEL_SRC="${SRC:-firstboot-v3.sh}"
+WIFI="$WORK/sigmond-wifi"
+cp "$(dirname "$0")/sigmond-wifi" "$WIFI" 2>/dev/null || cp ./sigmond-wifi "$WIFI"
+
+check "a dead 0.0.0.0/0 is cleared BEFORE dhclient runs" "$WIFI" \
+      'removed a dead default route on'
+# ⛔ Only CARRIER-LESS devices. A live default elsewhere is somebody's working
+# uplink; deleting it would turn this repair into an outage.
+check "  ...and only on a device with NO CARRIER" "$WIFI" \
+      '/carrier" 2>/dev/null)" != 1 ]'
+check "  ...never the radio's own route" "$WIFI" \
+      '[ "$_dv" = "$dev" ] && continue'
+check "an address without a route is REPAIRED, not reported as success" "$WIFI" \
+      'installed the default route dhclient could not'
+check "  ...using the gateway the lease actually offered" "$WIFI" \
+      'option routers'
+
+# ⛔ netwatch detected this fault FIVE times and netfix changed nothing: its
+# radio re-bind is gated on the radio having no address, which was false.
+# Healing that cannot reach the fault it detects is not healing.
+check "netfix's Wi-Fi exit asserts a default route too" "$PANEL_SRC" \
+      'NO DEFAULT ROUTE on a radio that has an address'
+check "  ...and does not mistake an IPv6-only AP for the fault" "$PANEL_SRC" \
+      'IPv6-only AP, this is normal'
+
 echo "─────────────────────────────────────────────────"
 
 # ── 4. join installs AND enables the boot unit ──────────────────────────────
