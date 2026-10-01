@@ -309,6 +309,28 @@ fi
 # fallback.  A station with a real lease is never touched -- this must not
 # renumber a working site.
 IP="$(cur_ip)"
+# ⛔ AN ADDRESS ON A DEAD BRIDGE IS NOT AN UPLINK.  The case below used to ask
+# only "does vmbr0 have an IPv4?" and exit 0 if so.  Move the cable to the
+# other socket and that is catastrophically wrong: the lease vmbr0 already
+# holds survives in the kernel, the stanza is already `inet dhcp` so the
+# de-fossilize branch does not fire either, and netfix declares victory on a
+# bridge whose port has no carrier.  Measured on AI6VN-PM 2026-10-01 after rob
+# moved the cable enp2s0 -> enp1s0 and asked for enp1s0:
+#     vmbr0 bridge-port: enp2s0      (no-link)
+#     enp1s0 LINK-UP                 (the cable)
+#     default via 10.22.23.1 dev vmbr0 linkdown
+#     ping 1.1.1.1 -> "From 10.22.23.31 Destination Host Unreachable"
+# This is the same lesson usable_gw4() already carries one level up: HAVING an
+# address is not REACHING anything.  Carrier is the cheapest possible check and
+# it was the one not being made.
+_vmbr_port_now=$(awk '/^iface vmbr0/,/^$/{if($1=="bridge-ports")print $2}' "$IFACES" 2>/dev/null)
+if [ -n "$IP" ] && [ -n "$_vmbr_port_now" ] && [ "$_vmbr_port_now" != none ] \
+   && [ "$(cat "/sys/class/net/$_vmbr_port_now/carrier" 2>/dev/null)" != 1 ]; then
+    say "vmbr0 holds $IP but its port $_vmbr_port_now has NO CARRIER — that address is stale; searching for the live port"
+    ip addr flush dev vmbr0 scope global 2>/dev/null
+    ip route del default dev vmbr0 2>/dev/null
+    IP=""
+fi
 case "$IP" in
     "")          say "vmbr0 has no IPv4 — looking for a NIC that does" ;;
     192.168.100.*) say "vmbr0 is on the PVE installer fallback $IP — that address is not routable here" ;;
