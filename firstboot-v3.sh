@@ -1102,6 +1102,78 @@ WantedBy=timers.target
 NWTMREOF
 systemctl enable sigmond-netwatch.timer 2>/dev/null
 
+# ── split console: keyboard is in the VM, the MONITOR is here ─────────────
+# ⛔ This host has no keyboard and no USB at all -- both controllers are
+# vfio-pci for the decoder VM and `lsusb` returns nothing.  The operator
+# standing at the screen cannot type into this machine, so "check the
+# console" was never advice they could act on.  The two halves of a usable
+# console live on different machines: keystrokes land in the VM, pixels
+# land here.  The relay joins them over the private 10.99.0.0/30, which is
+# up whether or not the station has any uplink -- the case that matters.
+# It carries OUTPUT ONLY; the operator still authenticates to this host
+# with this host's own credentials (rob, 2026-10-01).
+# The VM half (sigmond-console-bridge on its tty1) is installed in the VM.
+cat > /usr/local/sbin/sigmond-console-paint <<'CPAINTEOF'
+#!/bin/bash
+# sigmond-console-paint — write one console session onto the PM's VT1.
+#
+# ⛔ WHY THIS EXISTS.  This host has NO KEYBOARD: both USB controllers are
+# bound to vfio-pci for the decoder VM, and `lsusb` here returns nothing.  The
+# keyboard is in the VM; the MONITOR is on this host.  The two halves of a
+# console live on different machines, so neither one alone is usable.  This is
+# the display half: bytes arriving from the VM over the private 10.99.0.0/30
+# link get painted on VT1, which is what the operator is looking at.
+#
+# ⛔ IT CARRIES OUTPUT, NOT AUTHORITY.  Nothing here grants access.  The VM
+# could already ssh to this host; what it could not do was show the result to
+# the person standing in front of the screen.  Authentication stays exactly
+# where it was -- the operator still logs in to this host with this host's own
+# credentials, and now they can see the prompt while doing it.
+#
+# Invoked per-connection by socat (EXEC:), so stdin IS the session stream.
+set -u
+FLAG=/run/sigmond/console-session
+mkdir -p /run/sigmond 2>/dev/null
+
+# ⛔ Tell sigmond-issue to stand off.  The panel repaints VT1 on a timer and on
+# every cable change; without this it would overwrite a live session mid-typing
+# and the operator would watch their shell get erased every two minutes.
+: > "$FLAG" 2>/dev/null
+trap 'rm -f "$FLAG" 2>/dev/null' EXIT INT TERM
+
+{
+    printf '\033[H\033[2J'
+    printf '  console session from the decoder VM — keyboard is on the VM, this screen is the PM\n'
+    printf '  %s\n\n' "$(date -u '+%Y-%m-%d %H:%M:%SZ')"
+} > /dev/tty1 2>/dev/null
+
+cat > /dev/tty1 2>/dev/null
+
+# Session over: hand the screen back to the panel rather than leaving a husk.
+rm -f "$FLAG" 2>/dev/null
+/usr/local/sbin/sigmond-issue >/dev/null 2>&1 &
+exit 0
+CPAINTEOF
+chmod +x /usr/local/sbin/sigmond-console-paint
+
+cat > /etc/systemd/system/sigmond-console-relay.service <<'CRELAYEOF'
+[Unit]
+Description=Paint a decoder-VM console session onto this host's VT1 (no keyboard here)
+After=network.target
+
+[Service]
+# bind=10.99.0.1 — the private host-only /30 ONLY. Never the LAN: this writes
+# straight to the physical console and must not be reachable from the site.
+# max-children=1 — one screen, one session; a second would interleave bytes.
+ExecStart=/usr/bin/socat TCP4-LISTEN:7790,bind=10.99.0.1,reuseaddr,fork,max-children=1 EXEC:/usr/local/sbin/sigmond-console-paint
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+CRELAYEOF
+systemctl enable sigmond-console-relay.service 2>/dev/null
+
 # ── importer ──────────────────────────────────────────────────────────────
 cat > /usr/local/sbin/sigmond-import.sh <<'IMPEOF'
 #!/bin/bash
@@ -2411,9 +2483,16 @@ done
 # while the wizard or finalizer own the console (that would erase the
 # install transcript / the remove-the-stick instruction), and never over a
 # live console login (an untuned host still has a working keyboard).
+# ⛔ AND NOT OVER A LIVE SPLIT-CONSOLE SESSION.  The keyboard lives in the
+# decoder VM (both USB controllers are vfio-pci) and the monitor is on this
+# host, so a console session arrives over the /30 and is painted on VT1 by
+# sigmond-console-paint, which holds this flag for its duration.  Without the
+# check the panel would overwrite the operator's shell every refresh -- and
+# they cannot see the VM side to know why their screen keeps clearing.
 if [ -f /etc/sigmond-appliance/.finalized ] \
    && ! systemctl is-active --quiet sigmond-wizard.service 2>/dev/null \
    && ! systemctl is-active --quiet sigmond-finalize.service 2>/dev/null \
+   && [ ! -e /run/sigmond/console-session ] \
    && ! who 2>/dev/null | grep -qw tty1; then
     { printf '\033[H\033[2J'; printf '%s\n' "$PANEL"; } > /dev/tty1 2>/dev/null
 fi
