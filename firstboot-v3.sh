@@ -52,13 +52,24 @@ cat > /usr/local/lib/sigmond-net.sh <<'NETLIBEOF'
 # Link-local (fe80::) is deliberately excluded: without a scope id it is not
 # an address anyone can connect to, and reporting one as "the station's
 # address" is worse than reporting none.
+#
+# ⛔ The installer's fossil 192.168.100.2 is the LAST resort, never the first
+# answer.  A DHCP lease bound later sits on vmbr0 BESIDE the fossil, listed
+# second, and `head -1` returned the fossil: on AC0G-B4 (v3.64, 2026-10-01)
+# netfix then judged a bound 192.168.1.244 as "no usable IPv4", never rewrote
+# vmbr0, and left the default route on the dead 192.168.100.1.  Order:
+# a real IPv4, then a global IPv6, then the fossil (so the panel still has
+# something to print; netfix's own 192.168.100.* filter refuses to trust it).
 cur_ip(){
-    local _dev="${1:-vmbr0}" _a
-    _a=$(ip -4 -o addr show "$_dev" 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -1)
+    local _dev="${1:-vmbr0}" _v4 _a
+    _v4=$(ip -4 -o addr show "$_dev" 2>/dev/null | awk '{print $4}' | cut -d/ -f1)
+    _a=$(printf '%s\n' "$_v4" | grep -v '^192\.168\.100\.' | grep -m1 .)
     [ -n "$_a" ] && { printf '%s\n' "$_a"; return 0; }
-    ip -6 -o addr show "$_dev" scope global 2>/dev/null \
+    _a=$(ip -6 -o addr show "$_dev" scope global 2>/dev/null \
         | grep -v -e temporary -e deprecated \
-        | awk '{print $4}' | cut -d/ -f1 | head -1
+        | awk '{print $4}' | cut -d/ -f1 | head -1)
+    [ -n "$_a" ] && { printf '%s\n' "$_a"; return 0; }
+    printf '%s\n' "$_v4" | grep -m1 .
 }
 
 # A v6 literal needs brackets in a URL and in anything that appends :port.
@@ -454,7 +465,23 @@ if [ -z "$LIVE" ]; then
         ""|192.168.100.*) _got="" ;;
     esac
     if [ -n "$_got" ]; then
-        say "vmbr0 now has $_got — nothing further to do"
+        say "vmbr0 now has $_got"
+        # ⛔ A lease bound HERE sits beside the installer's fossil, and the
+        # static stanza still names it.  Exiting with "nothing further to do"
+        # left AC0G-B4 (v3.64, 2026-10-01) on `default via 192.168.100.1`:
+        # a LAN address, no internet, and the same again every boot.  Retire
+        # the fossil and put vmbr0 on DHCP, exactly as the real-address
+        # branch above does, so the route follows the lease.
+        ip addr del 192.168.100.2/24 dev vmbr0 2>/dev/null \
+            && say "  removed the unroutable installer fallback 192.168.100.2"
+        if grep -q '^iface vmbr0 inet static' "$IFACES" 2>/dev/null; then
+            cp -a "$IFACES" "$IFACES.netfix-static-bak"
+            sed -i -e '/^iface vmbr0 inet static/,/^[[:space:]]*$/{/^[[:space:]]*address[[:space:]]/d;/^[[:space:]]*gateway[[:space:]]/d;}' \
+                   -e 's/^iface vmbr0 inet static/iface vmbr0 inet dhcp/' "$IFACES"
+            say "  vmbr0 converted to DHCP so the default route follows the lease"
+            reload_net
+        fi
+        rm -f /etc/sigmond-appliance/.network-unreachable 2>/dev/null
         exit 0
     fi
     # No usable IPv4.  Before declaring the port dead, ask the OTHER family:

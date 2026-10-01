@@ -122,6 +122,11 @@ esac
     && echo "2: eno1    inet $ENO1_V4/24 scope global"
 [ "$dev" = vmbr0 ] && [ "$fam" = 4 ] && [ -n "${VMBR0_V4:-}" ] \
     && echo "4: vmbr0    inet $VMBR0_V4/24 scope global"
+# A lease dhclient bound LATER sits BESIDE the fossil, listed after it -- the
+# shape AC0G-B4 really had (v3.64, 2026-10-01).
+[ "$dev" = vmbr0 ] && [ "$fam" = 4 ] && [ -n "${VMBR0_LEASE_FILE:-}" ] \
+    && [ -s "$VMBR0_LEASE_FILE" ] \
+    && echo "4: vmbr0    inet $(cat "$VMBR0_LEASE_FILE")/24 scope global dynamic vmbr0"
 exit 0
 STUBEOF
     for n in iptables sysctl dhclient ifreload ifup ifdown logger wpa_cli wpa_supplicant wpa_passphrase iw pkill systemctl hostname; do
@@ -231,6 +236,37 @@ unset ENO1_V4
 check_not "does not short-circuit while a cable works" "$OUT" "this station is on Wi-Fi"
 check     "probes the live wired port"                 "$OUT" "trying IPv4 DHCP on eno1"
 check     "and rebinds vmbr0 to it"                    "$OUT" "selected eno1"
+
+# ── 3c. AC0G-B4: the cable is in vmbr0's own port and DHCP answers LATE ─────
+# v3.64, 2026-10-01 01:23:30Z: the installer's DHCP went unanswered, so vmbr0
+# came up on the fossil only. netfix's retry dhclient then BOUND 192.168.1.244
+# -- beside the fossil, listed second. netfix read the fossil, said "no usable
+# IPv4", tried IPv6 (none there), declared the install dead, and never rewrote
+# the static stanza: the default route stayed via the dead 192.168.100.1.
+build_fake none no
+echo 1 > "$WORK/root/sys/eno1/carrier"
+mkdir -p "$WORK/root/sys/vmbr0"; ln -s ../vmbr0 "$WORK/root/sys/eno1/master"
+export VMBR0_LEASE_FILE="$WORK/b4-lease"; : > "$VMBR0_LEASE_FILE"
+cat > "$WORK/root/bin/dhclient" <<'STUBEOF'
+#!/bin/bash
+echo "dhclient $*" >> "$STUBLOG"
+case " $* " in *" -6 "*) ;; *" vmbr0 "*) echo 192.168.1.244 > "$VMBR0_LEASE_FILE" ;; esac
+exit 0
+STUBEOF
+chmod +x "$WORK/root/bin/dhclient"
+OUT="$WORK/out3c"; export STUBLOG="$WORK/stub3c"; : > "$STUBLOG"
+export WIFI_ADDR=none VMBR0_V4=192.168.100.2 WIFI_UP_SUCCEEDS=no
+run_netfix "$OUT"
+rc=$?
+unset VMBR0_LEASE_FILE
+check_not "a late DHCP lease is not a dead install"       "$OUT" "NOTHING ANSWERED"
+check_not "and IPv6 is not tried when IPv4 answered"      "$OUT" "trying IPv6"
+check     "names the lease it got"                        "$OUT" "vmbr0 now has 192.168.1.244"
+[ "$rc" = 0 ] && ok "exits 0" || bad "exits 0 (got $rc)"
+check     "drops the fossil address"                      "$STUBLOG" "addr del 192.168.100.2/24 dev vmbr0"
+check     "puts vmbr0 on DHCP for the next boot"          "$WORK/root/etc/network/interfaces" "iface vmbr0 inet dhcp"
+check_not "and the dead fossil gateway is gone"           "$WORK/root/etc/network/interfaces" "192.168.100.1"
+check     "reloads the network so the route follows"      "$STUBLOG" "ifreload -a"
 
 # ═══════════════════════════════════════════════════════════════════════════
 echo
@@ -480,6 +516,68 @@ got=$(gw_run "$FOSSIL
 $REAL" 1)
 [ "$got" = "10.0.0.1" ] && ok "picks the real route past the fossil" \
     || bad "picks the real route past the fossil (got '$got')"
+
+# ═══════════════════════════════════════════════════════════════════════════
+echo
+echo "cur_ip: the station's address, past the installer's fossil"
+echo "───────────────────────────────────────────────────────────"
+# AC0G-B4, v3.64 greenfield, 2026-10-01 01:23:30Z. netfix's dhclient BOUND
+# 192.168.1.244 from 192.168.1.1 -- and in the same second netfix said "no
+# usable IPv4 on vmbr0", went to IPv6 (none on that LAN), and declared the
+# install dead. vmbr0 carried BOTH addresses with the fossil listed first;
+# cur_ip took `head -1`, netfix rightly rejected 192.168.100.*, and never looked
+# at the second line. The vmbr0 stanza was never rewritten, so the default
+# route stayed via the dead 192.168.100.1 and the station had no internet.
+# The console panel printed `ssh root@192.168.100.2` from the same function.
+
+ip_run(){ # ip_run <ip -4 -o addr output> [ip -6 -o addr output]
+    local a4="$1" a6="${2:-}" root="$WORK/ipc"
+    rm -rf "$root"; mkdir -p "$root/bin" "$root/lib"
+    awk '/^cat > \/usr\/local\/lib\/sigmond-net.sh <<.NETLIBEOF.$/{f=1;next} /^NETLIBEOF$/{f=0} f' \
+        "$REPO/firstboot-v3.sh" > "$root/lib/sigmond-net.sh"
+    cat > "$root/bin/ip" <<'IPEOF'
+#!/bin/bash
+case "$*" in
+    "-4 -o addr show vmbr0")              printf '%s\n' "$A4" ;;
+    "-6 -o addr show vmbr0 scope global") printf '%s\n' "$A6" ;;
+esac
+exit 0
+IPEOF
+    chmod +x "$root/bin/ip"
+    A4="$a4" A6="$a6" PATH="$root/bin:$PATH" bash -c '. "$1"; cur_ip vmbr0' _ "$root/lib/sigmond-net.sh"
+}
+
+V4_FOSSIL='6: vmbr0    inet 192.168.100.2/24 scope global vmbr0\       valid_lft forever preferred_lft forever'
+V4_LEASE='6: vmbr0    inet 192.168.1.244/24 brd 192.168.1.255 scope global dynamic vmbr0\       valid_lft 39159sec preferred_lft 39159sec'
+V6_GLOBAL='6: vmbr0    inet6 2001:db8::5/64 scope global dynamic mngtmpaddr \       valid_lft 86400sec preferred_lft 14400sec'
+
+got=$(ip_run "$V4_FOSSIL
+$V4_LEASE")
+[ "$got" = "192.168.1.244" ] && ok "the DHCP lease wins when the fossil is listed FIRST (B4)" \
+    || bad "the DHCP lease wins when the fossil is listed FIRST (B4) (got '$got')"
+
+got=$(ip_run "$V4_LEASE
+$V4_FOSSIL")
+[ "$got" = "192.168.1.244" ] && ok "and when it is listed second" \
+    || bad "and when it is listed second (got '$got')"
+
+got=$(ip_run "$V4_LEASE")
+[ "$got" = "192.168.1.244" ] && ok "a lone lease is returned" \
+    || bad "a lone lease is returned (got '$got')"
+
+# The fossil alone is still REPORTED (the panel must show something to ssh to),
+# and netfix's own 192.168.100.* filter is what refuses to call it usable.
+got=$(ip_run "$V4_FOSSIL")
+[ "$got" = "192.168.100.2" ] && ok "the fossil alone is still reported" \
+    || bad "the fossil alone is still reported (got '$got')"
+
+got=$(ip_run "$V4_FOSSIL" "$V6_GLOBAL")
+[ "$got" = "2001:db8::5" ] && ok "fossil + global v6: the v6 address, not the fossil" \
+    || bad "fossil + global v6: the v6 address, not the fossil (got '$got')"
+
+got=$(ip_run "" "$V6_GLOBAL")
+[ "$got" = "2001:db8::5" ] && ok "v6-only: the global v6 address" \
+    || bad "v6-only: the global v6 address (got '$got')"
 
 # ═══════════════════════════════════════════════════════════════════════════
 echo
