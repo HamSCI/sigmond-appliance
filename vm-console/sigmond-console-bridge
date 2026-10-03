@@ -28,6 +28,37 @@ PORT=7790
 USER_=root
 KBD=/dev/tty1
 
+# ⛔ A PER-BOOT known_hosts, NOT root's.  This is what OOM-killed AC0G-B4 on
+# 2026-10-01: the VM installed while the PM held its fresh v3.66 host key, an
+# identity restore later put the PM's genuine key back, and root's known_hosts
+# still pinned the old one.  On a CHANGED key OpenSSH prints REMOTE HOST
+# IDENTIFICATION HAS CHANGED and DISABLES password auth -- even with
+# StrictHostKeyChecking=no -- so ssh failed instantly, getty respawned the
+# bridge every couple of seconds, and every pass fired another panel repaint
+# until 225 of them took the host global-OOM and the kernel killed this VM.
+#
+# /run is tmpfs: the file cannot survive a boot, so the bridge re-learns the
+# PM's key every time and a key change can never wedge it again.  That is the
+# right trust model here and not a weakening of one -- this is a host-only /30
+# with exactly two ends, the PM and its own guest, no router and no third
+# party.  The bridge carries pixels, not privilege: the operator still types
+# the host's real password into the host's own sshd.
+KNOWN=/run/sigmond-console-known_hosts
+
+# Escalating back-off, so a bridge that cannot connect FOR ANY REASON costs a
+# few attempts rather than a respawn storm.  The counter lives in /run and is
+# cleared by a session that actually ran, so a working console never waits.
+FAILS=/run/sigmond-console-fails
+_backoff(){
+    local n; n=$(cat "$FAILS" 2>/dev/null); n=${n//[!0-9]/}; n=$((${n:-0} + 1))
+    printf '%s' "$n" > "$FAILS" 2>/dev/null
+    local s=$(( n < 6 ? (1 << n) : 60 ))      # 2,4,8,16,32,60,60...
+    [ "$s" -gt 60 ] && s=60
+    say "  (attempt $n failed — retrying in ${s}s)"
+    sleep "$s"
+}
+_backoff_clear(){ rm -f "$FAILS" 2>/dev/null; }
+
 say(){ printf '%s\r\n' "$*"; }   # stdout is the relay; \r\n because VT1 is raw
 
 if ! timeout 5 socat /dev/null "TCP4:$HOST:$PORT" 2>/dev/null; then
@@ -67,16 +98,26 @@ read -rsn1 _ < "$KBD" 2>/dev/null || true
     # diverted through askpass.  -tt forces a pty even though stdout is a pipe.
     ssh -tt \
         -o StrictHostKeyChecking=no \
+        -o UserKnownHostsFile="$KNOWN" \
         -o ConnectTimeout=10 \
         -o NumberOfPasswordPrompts=3 \
         -o PreferredAuthentications=password,keyboard-interactive \
         "$USER_@$HOST" 2>&1 < "$KBD"
+    echo "$?" > /run/sigmond-console-rc 2>/dev/null
     say ""
     say "  session ended — the access panel returns in a moment"
 } | socat - "TCP4:$HOST:$PORT" 2>/dev/null
 
-# Exit so systemd restarts us straight back into the keystroke wait above. The
-# relay connection closes with us, releasing the flag, and the panel takes the
-# screen back.
-sleep 2
+# ⛔ DISTINGUISH "the operator logged out" FROM "ssh could not connect".
+# Both used to end in a flat `sleep 2`, so a bridge that could never connect
+# respawned every two seconds forever -- which is the storm.  ssh exits 255
+# only when IT failed (auth, host key, connect); any other status means a
+# session really ran and ended, and that must stay instant.
+_rc=$(cat /run/sigmond-console-rc 2>/dev/null); _rc=${_rc//[!0-9]/}
+if [ "${_rc:-255}" = 255 ]; then
+    _backoff
+else
+    _backoff_clear
+    sleep 2
+fi
 exit 0

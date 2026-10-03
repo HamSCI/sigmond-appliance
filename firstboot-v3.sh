@@ -1415,7 +1415,20 @@ cat > /dev/tty1 2>/dev/null
 
 # Session over: hand the screen back to the panel rather than leaving a husk.
 rm -f "$FLAG" 2>/dev/null
-/usr/local/sbin/sigmond-issue >/dev/null 2>&1 &
+# ⛔ ASK SYSTEMD, DO NOT FORK.  This was:
+#     /usr/local/sbin/sigmond-issue >/dev/null 2>&1 &
+# fire-and-forget, with no lock, no wait, and its output discarded.  Every
+# console session -- including the socat probe that merely opens :7790 --
+# spawned one more.  When the VM's console bridge went into a respawn loop on
+# B4 (stale PM host key, 2026-10-01) that became 225 live copies and a global
+# OOM that killed the decoder VM.
+#
+# `systemctl start --no-block` hands the job to systemd, which already
+# de-duplicates a Type=oneshot: a start requested while the unit is activating
+# is coalesced into the running job instead of becoming a second process.
+# netwatch has always done it this way; console-paint simply never did.
+systemctl start --no-block sigmond-issue.service 2>/dev/null \
+    || /usr/local/sbin/sigmond-issue 2>&1 | logger -t sigmond-console-paint &
 exit 0
 CPAINTEOF
 chmod +x /usr/local/sbin/sigmond-console-paint
@@ -1468,6 +1481,37 @@ PORT=7790
 USER_=root
 KBD=/dev/tty1
 
+# ⛔ A PER-BOOT known_hosts, NOT root's.  This is what OOM-killed AC0G-B4 on
+# 2026-10-01: the VM installed while the PM held its fresh v3.66 host key, an
+# identity restore later put the PM's genuine key back, and root's known_hosts
+# still pinned the old one.  On a CHANGED key OpenSSH prints REMOTE HOST
+# IDENTIFICATION HAS CHANGED and DISABLES password auth -- even with
+# StrictHostKeyChecking=no -- so ssh failed instantly, getty respawned the
+# bridge every couple of seconds, and every pass fired another panel repaint
+# until 225 of them took the host global-OOM and the kernel killed this VM.
+#
+# /run is tmpfs: the file cannot survive a boot, so the bridge re-learns the
+# PM's key every time and a key change can never wedge it again.  That is the
+# right trust model here and not a weakening of one -- this is a host-only /30
+# with exactly two ends, the PM and its own guest, no router and no third
+# party.  The bridge carries pixels, not privilege: the operator still types
+# the host's real password into the host's own sshd.
+KNOWN=/run/sigmond-console-known_hosts
+
+# Escalating back-off, so a bridge that cannot connect FOR ANY REASON costs a
+# few attempts rather than a respawn storm.  The counter lives in /run and is
+# cleared by a session that actually ran, so a working console never waits.
+FAILS=/run/sigmond-console-fails
+_backoff(){
+    local n; n=$(cat "$FAILS" 2>/dev/null); n=${n//[!0-9]/}; n=$((${n:-0} + 1))
+    printf '%s' "$n" > "$FAILS" 2>/dev/null
+    local s=$(( n < 6 ? (1 << n) : 60 ))      # 2,4,8,16,32,60,60...
+    [ "$s" -gt 60 ] && s=60
+    say "  (attempt $n failed — retrying in ${s}s)"
+    sleep "$s"
+}
+_backoff_clear(){ rm -f "$FAILS" 2>/dev/null; }
+
 say(){ printf '%s\r\n' "$*"; }   # stdout is the relay; \r\n because VT1 is raw
 
 if ! timeout 5 socat /dev/null "TCP4:$HOST:$PORT" 2>/dev/null; then
@@ -1507,18 +1551,28 @@ read -rsn1 _ < "$KBD" 2>/dev/null || true
     # diverted through askpass.  -tt forces a pty even though stdout is a pipe.
     ssh -tt \
         -o StrictHostKeyChecking=no \
+        -o UserKnownHostsFile="$KNOWN" \
         -o ConnectTimeout=10 \
         -o NumberOfPasswordPrompts=3 \
         -o PreferredAuthentications=password,keyboard-interactive \
         "$USER_@$HOST" 2>&1 < "$KBD"
+    echo "$?" > /run/sigmond-console-rc 2>/dev/null
     say ""
     say "  session ended — the access panel returns in a moment"
 } | socat - "TCP4:$HOST:$PORT" 2>/dev/null
 
-# Exit so systemd restarts us straight back into the keystroke wait above. The
-# relay connection closes with us, releasing the flag, and the panel takes the
-# screen back.
-sleep 2
+# ⛔ DISTINGUISH "the operator logged out" FROM "ssh could not connect".
+# Both used to end in a flat `sleep 2`, so a bridge that could never connect
+# respawned every two seconds forever -- which is the storm.  ssh exits 255
+# only when IT failed (auth, host key, connect); any other status means a
+# session really ran and ended, and that must stay instant.
+_rc=$(cat /run/sigmond-console-rc 2>/dev/null); _rc=${_rc//[!0-9]/}
+if [ "${_rc:-255}" = 255 ]; then
+    _backoff
+else
+    _backoff_clear
+    sleep 2
+fi
 exit 0
 VMBRIDGEEOF
 
@@ -2473,6 +2527,28 @@ cat > /usr/local/sbin/sigmond-issue <<'ISSEOF'
 #     line 313: ipurl: command not found
 # and the panel showed no host address and a broken Proxmox URL.  If this
 # source line ever goes away, that failure comes straight back.
+# ⛔ ONE AT A TIME.  This script is fired from several places -- its timer
+# every 5 min, netwatch on an uplink change, and sigmond-console-paint at the
+# end of every console session -- and nothing used to stop them overlapping.
+#
+# On AC0G-B4, 2026-10-01 21:00:29Z, that killed the station: a stale PM host
+# key made the VM's console bridge fail instantly, getty respawned it every
+# few seconds, every relay session ended by firing one more sigmond-issue, and
+# each of those sat for MINUTES in the guest-agent query below.  225 copies
+# were alive at once, 102 of them in `qm agent network-get-interfaces` at
+# ~57 MB each, load average 117.  The PM went global-OOM and the kernel killed
+# the decoder VM's 10 GB kvm process.
+#
+# A repaint is idempotent and the next timer tick is 5 minutes away, so a
+# second concurrent run has nothing to contribute: take the lock or leave.
+# The fd stays open for the life of the process; the kernel drops the lock
+# when it exits, including when it is killed.
+exec 9>/run/sigmond-issue.lock 2>/dev/null
+flock -n 9 2>/dev/null || {
+    logger -t sigmond-issue "another refresh is already running — skipping this one" 2>/dev/null
+    exit 0
+}
+
 . /usr/local/lib/sigmond-net.sh 2>/dev/null || {
     # Never leave the panel blank: a console with no address on it is how an
     # operator concludes the machine is dead.  Degrade to IPv4-only rather
@@ -2516,7 +2592,15 @@ for i in 1 2 3 4 5 6; do
   # way to tell it apart from a working one (DASI-019 Scranton, 2026-09-19).
   # Addresses on a network this host is directly attached to sort first;
   # where everything is equally reachable the choice is unchanged.
-  VMIP=$(qm agent "$VMID" network-get-interfaces 2>/dev/null | python3 -c '
+  # ⛔ BOUND EVERY GUEST-AGENT CALL.  `qm agent` has no timeout of its own, and
+  # when qga is alive-but-deaf it does not fail -- it HANGS.  Six unbounded
+  # attempts turned one panel refresh into a process that lived minutes, which
+  # is what let 225 of them pile up on B4 (2026-10-01).  10 s is generous: a
+  # healthy agent answers this in well under a second.  Worst case is now
+  # 6 x (10 s + 10 s sleep) = ~2 min, bounded.  Keep this even though the flock
+  # above exists -- they fix different halves: the lock stops the pile-up, the
+  # timeout stops the hang that made each one long-lived in the first place.
+  VMIP=$(timeout 10 qm agent "$VMID" network-get-interfaces 2>/dev/null | python3 -c '
 import json, re, socket, struct, subprocess, sys
 
 def local_nets():
