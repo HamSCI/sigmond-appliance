@@ -693,7 +693,13 @@ fi
 # Collect the parallel stick write.  Reported at the END so a long verify
 # cannot be lost above the upload chatter.
 if [ -n "${_RIGFLASH_LOG:-}" ]; then
-    wait "${_RIGFLASH_PID:-0}" 2>/dev/null; _rf=$?
+    # ⛔ Never `wait ...; _rf=$?` here: under `set -eu` a non-zero wait ends
+    # the script on that line, before `_rf=$?` runs.  rig-flash exits 2 when
+    # no stick is attached -- an expected outcome this case statement names --
+    # and the bare form turned it into "build rc=2" after a complete, uploaded
+    # image (v3.67, 2026-10-04: the stick was in Fargo), stopping the ladder
+    # before its nested test.
+    _rf=0; wait "${_RIGFLASH_PID:-0}" 2>/dev/null || _rf=$?
     case "$_rf" in
         0) say "rig stick: $(grep -E 'VERIFIED' "$_RIGFLASH_LOG" | tail -1)" ;;
         2) say "rig stick: none attached — nothing written (plug one in, then run rig-flash.sh)" ;;
