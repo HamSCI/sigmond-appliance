@@ -11,7 +11,13 @@
 set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"
 SRC="$HERE/firstboot-v3.sh"
+command -v systemd-analyze >/dev/null || { echo "FAIL: systemd-analyze not found — cannot verify"; exit 1; }
 T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
+# Positive control: a deliberately broken unit MUST be flagged, or every
+# 'ok' below means nothing (a tool that errors out matches no complaint).
+printf "[Service]\nExecStart=/bin/sh -c 'echo broken\n" > "$T/control.service"
+systemd-analyze verify "$T/control.service" 2>&1 | grep -qi "unbalanced quot" \
+    || { echo "FAIL: positive control not flagged — this systemd-analyze cannot detect the defect"; exit 1; }
 fail=0; n=0
 # cat > /etc/systemd/system/<unit> <<'TAG'  ...  TAG
 while IFS=$'\t' read -r unit tag; do

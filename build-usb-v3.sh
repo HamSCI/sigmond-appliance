@@ -172,7 +172,12 @@ say "wizard sourced from sigmond $_wiz_head ($(wc -l < sigmond-wizard.sh) lines)
 # payload came from somewhere else entirely.  The build already refuses to
 # ship a sigmond wizard that is not at origin/main; it has to hold its own
 # files to the same standard.
-for _f in firstboot-v3.sh QUICKSTART.txt; do
+# ...and so must every helper the stick carries into the host and the VM.
+# sigmond-site-timing (T4/VTEC discovery) shipped from the loose rig copy with
+# nothing comparing it to the tag (v3.68 pre-build review, 2026-10-05).
+for _f in firstboot-v3.sh QUICKSTART.txt \
+          sigmond-site-timing sigmond-operator.sh sigmond-location-check \
+          sigmond-net-probe sigmond-wifi sigmond-wait-nat64 sigmond-vm6proxy; do
     [ -f "$REPO/$_f" ] || { say "FATAL: $_f missing from $REPO"; exit 1; }
     if [ -e "$_f" ] && ! cmp -s "$REPO/$_f" "$_f"; then
         say "rig copy of $_f differs from the checkout -- taking the checkout's"

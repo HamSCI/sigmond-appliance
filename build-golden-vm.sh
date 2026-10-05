@@ -206,7 +206,11 @@ fi
 say "capture gate READY"
 
 say "recording repo revisions for the build manifest"
-$SSH "for d in /opt/git/sigmond/*/; do printf '%s %s\n' \"\$(basename \$d)\" \"\$(git -C \$d rev-parse --short HEAD 2>/dev/null)\"; done" | tee golden-v3-revs.txt
+$SSH "for d in /opt/git/sigmond/*/; do printf '%s %s\n' \"\$(basename \$d)\" \"\$(git -C \$d rev-parse --short HEAD 2>/dev/null)\"; done" | tee golden-v3-revs.txt.new
+# ⛔ .new until the template is actually written: build-usb-v3.sh trusts this
+# file to describe sigmond-decoder-template-v3.qcow2, and a rebuild that FAILS
+# a gate below used to leave fresh revs beside the OLD template, so the stale
+# template passed the USB build's sigmond gate (v3.68 pre-build review).
 
 # ── is every component actually at the LATEST commit? ───────────────────────
 # The whole point of cloning at build time is that the template carries the
@@ -293,6 +297,9 @@ for i in $(seq 1 24); do pgrep -f "name goldenv3" >/dev/null || break; sleep 5; 
 pgrep -f "name goldenv3" >/dev/null && { say "force stop"; sudo pkill -f "name goldenv3"; sleep 3; }
 
 say "compacting template"
-qemu-img convert -O qcow2 -c golden-v3.qcow2 sigmond-decoder-template-v3.qcow2
+qemu-img convert -O qcow2 -c golden-v3.qcow2 sigmond-decoder-template-v3.qcow2.new \
+    || { say "FATAL: qemu-img convert failed — template NOT replaced"; rm -f sigmond-decoder-template-v3.qcow2.new golden-v3-revs.txt.new; exit 1; }
+mv -f sigmond-decoder-template-v3.qcow2.new sigmond-decoder-template-v3.qcow2
+mv -f golden-v3-revs.txt.new golden-v3-revs.txt
 ls -la sigmond-decoder-template-v3.qcow2
 say "GOLDEN VM BUILD COMPLETE"
