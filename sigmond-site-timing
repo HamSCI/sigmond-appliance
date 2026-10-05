@@ -23,6 +23,13 @@ SUBNET=$(ip -4 route | awk '/proto kernel/{print $1; exit}')
 if [ -s /etc/sigmond/site-lan ] && [[ "$SUBNET" == 10.99.0.* || -z "$SUBNET" ]]; then
     SUBNET=$(head -1 /etc/sigmond/site-lan | tr -d '[:space:]')
 fi
+# Discovery scans at most 1024 addresses.  Say so ONCE, here, through the
+# journal: otherwise both scans below report "none found" for a network
+# they never looked at.
+if [ -n "$SUBNET" ]; then
+    _nsub=$(python3 -c 'import ipaddress,sys; print(ipaddress.ip_network(sys.argv[1], strict=False).num_addresses)' "$SUBNET" 2>/dev/null)
+    [ "${_nsub:-0}" -gt 1024 ] && say "site LAN $SUBNET too large to scan ($_nsub addresses) - LAN stratum-1 and GNSS discovery SKIPPED, not empty"
+fi
 
 # ── 1. chrony refclocks (FUSE/HPPS) ─────────────────────────────────────────
 #
@@ -98,17 +105,39 @@ fi
 # servers from local-timeservers.conf -- whether step 2 wrote it just now or a
 # site-restore replayed it -- and ADD any missing one; never remove an
 # operator's peer.  The authority runner lives in timestd-fusion.
+# ⛔ Declare only a server chrony ITSELF vouches for.  Step 2 accepts any
+# host whose reply carries stratum 1; T4 outranks T3, so an unvetted
+# responder (a router claiming stratum 1, an unsynchronised box) would
+# become the authority (v3.68 review round 2).  Required, per server:
+# chrony shows it selected or combined (^* / ^+) at stratum 1, leap Normal,
+# and a real reference id (not LOCL/INIT).  A server that fails is logged
+# and left for a later run -- chrony needs minutes to select a new source.
+# Opt-out: [timing.authority_manager.t4] auto_declare = false, or an
+# explicit peers = [] (both mean "the operator decides T4 here").
 if [ -f "$CFG" ] && [ -f /etc/chrony/conf.d/local-timeservers.conf ]; then
-    T4ADD=$(python3 - "$CFG" /etc/chrony/conf.d/local-timeservers.conf <<'PYEOF'
+    T4OK=""
+    for ip in $(awk '$1 ~ /^(server|pool|peer)$/ {print $2}' /etc/chrony/conf.d/local-timeservers.conf); do
+        read -r st stratum <<<"$(chronyc -n sources 2>/dev/null | awk -v ip="$ip" '$2 == ip {print $1, $3; exit}')"
+        nd=$(chronyc -n ntpdata "$ip" 2>/dev/null)
+        leap=$(printf '%s\n' "$nd" | sed -n 's/^Leap status *: *//p' | head -1)
+        refid=$(printf '%s\n' "$nd" | sed -n 's/^Reference ID *: *[0-9A-Fa-f]* *(\(.*\)).*/\1/p' | head -1)
+        if [[ "${st:-}" == "^*" || "${st:-}" == "^+" ]] && [ "${stratum:-}" = 1 ] \
+           && [ "$leap" = Normal ] && [ -n "$refid" ] && [ "$refid" != LOCL ] && [ "$refid" != INIT ]; then
+            T4OK="$T4OK $ip"
+        else
+            say "LAN server $ip NOT declared as T4 (chrony ${st:-absent}, stratum ${stratum:-?}, leap ${leap:-?}, refid ${refid:-?}) - will retry on a later run"
+        fi
+    done
+    if [ -n "$T4OK" ]; then
+        T4ADD=$(python3 - "$CFG" $T4OK 2>&1 <<'PYEOF'
 import re, sys, tomllib
-cfg, lts = sys.argv[1], sys.argv[2]
-servers = [l.split()[1] for l in open(lts)
-           if l.split() and l.split()[0] in ('server', 'pool', 'peer') and len(l.split()) > 1]
-if not servers:
-    sys.exit(0)
+cfg, servers = sys.argv[1], sys.argv[2:]
 text = open(cfg).read()
-have = (tomllib.loads(text).get('timing', {}).get('authority_manager', {})
-        .get('t4', {}).get('peers', [])) or []
+t4 = tomllib.loads(text).get('timing', {}).get('authority_manager', {}).get('t4')
+if t4 is not None and (t4.get('auto_declare') is False
+                       or ('peers' in t4 and t4['peers'] == [])):
+    sys.exit(0)                           # operator opted out
+have = (t4 or {}).get('peers', []) or []
 missing = [s for s in servers if s not in have]
 if not missing:
     sys.exit(0)
@@ -128,12 +157,15 @@ else:
     text = text[:hdr.end()] + body + text[end:]
 tomllib.loads(text)                       # never write a config that will not parse
 open(cfg, 'w').write(text)
-print(' '.join(missing))
+print('ADDED ' + ' '.join(missing))
 PYEOF
 )
-    if [ -n "$T4ADD" ]; then
-        say "T4 peers declared to hf-timestd: $T4ADD - restarting timestd-fusion"
-        systemctl try-restart timestd-fusion 2>/dev/null
+        case "$T4ADD" in
+            ADDED*) say "T4 peers declared to hf-timestd: ${T4ADD#ADDED } - restarting timestd-fusion"
+                    systemctl try-restart timestd-fusion 2>/dev/null ;;
+            "")     ;;
+            *)      say "T4 declaration FAILED, config untouched: $(printf '%s' "$T4ADD" | tail -1)" ;;
+        esac
     fi
 fi
 

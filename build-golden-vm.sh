@@ -265,8 +265,8 @@ fi
 # completed, otherwise-good template. build-usb-v3.sh is the hard gate — it
 # refuses to ship without this file.
 say "capturing component pin manifest (smd version) from the template"
-$SSH 'smd version' > manifest-raw.txt 2>/dev/null
-NCOMP=$(grep -c '^    [A-Za-z]' manifest-raw.txt 2>/dev/null || true); NCOMP=${NCOMP:-0}
+$SSH 'smd version' > manifest-raw.txt.new 2>/dev/null
+NCOMP=$(grep -c '^    [A-Za-z]' manifest-raw.txt.new 2>/dev/null || true); NCOMP=${NCOMP:-0}
 # Gate on the row COUNT, not just the "components (live):" header string.
 # A capture that connects and is cut off right after the header -- an ssh
 # drop, the remote smd process killed mid-write, the VM beginning to shut
@@ -284,11 +284,11 @@ NCOMP=$(grep -c '^    [A-Za-z]' manifest-raw.txt 2>/dev/null || true); NCOMP=${N
 # 10 itself is chosen well under today's dasi2 count so a handful of
 # components coming and going over time won't false-positive, but far
 # above anything a truncated capture produces.
-if grep -q 'components (live):' manifest-raw.txt 2>/dev/null && [ "$NCOMP" -ge 10 ]; then
+if grep -q 'components (live):' manifest-raw.txt.new 2>/dev/null && [ "$NCOMP" -ge 10 ]; then
     say "manifest captured: $NCOMP component lines"
 else
     say "WARNING: manifest capture FAILED or truncated ($NCOMP component lines) — image will be unblessable (manifest-raw.txt missing or malformed); build-usb-v3.sh will refuse to ship without it"
-    rm -f manifest-raw.txt
+    rm -f manifest-raw.txt.new
 fi
 
 say "shutting down VM (halt, not reboot — no machine-id now)"
@@ -298,8 +298,11 @@ pgrep -f "name goldenv3" >/dev/null && { say "force stop"; sudo pkill -f "name g
 
 say "compacting template"
 qemu-img convert -O qcow2 -c golden-v3.qcow2 sigmond-decoder-template-v3.qcow2.new \
-    || { say "FATAL: qemu-img convert failed — template NOT replaced"; rm -f sigmond-decoder-template-v3.qcow2.new golden-v3-revs.txt.new; exit 1; }
+    || { say "FATAL: qemu-img convert failed — template NOT replaced"; rm -f sigmond-decoder-template-v3.qcow2.new golden-v3-revs.txt.new manifest-raw.txt.new; exit 1; }
 mv -f sigmond-decoder-template-v3.qcow2.new sigmond-decoder-template-v3.qcow2
 mv -f golden-v3-revs.txt.new golden-v3-revs.txt
+# The manifest travels with its template: a capture that failed leaves NO
+# manifest (the USB build then refuses), never the previous build's.
+if [ -f manifest-raw.txt.new ]; then mv -f manifest-raw.txt.new manifest-raw.txt; else rm -f manifest-raw.txt; fi
 ls -la sigmond-decoder-template-v3.qcow2
 say "GOLDEN VM BUILD COMPLETE"
