@@ -154,6 +154,12 @@ for you — your portal registration carries over.
    appears, enter BIOS setup and turn **Fast Boot OFF**.
 3. **What you'll see:** an installer runs by itself, asking nothing. After a
    few minutes **the machine turns itself off**. That is your signal.
+
+   ⚠ **It can sit on "creating LVs" for a long time** when the disk held an
+   earlier install. That is the installer working, not a hang. **Do not
+   switch the machine off** — wait at least 30 minutes. Cutting power there
+   only makes you start again (AC0G-ND, 2026-10-05: the first attempt was
+   switched off at this step; the second, left alone, finished).
 4. **REMOVE THE STICK, then power the machine back on.** (Some machines
    always boot USB first and would install again in a loop.)
 
@@ -280,6 +286,8 @@ restored keys in §4, this is already done.)
 | `INSTALL CANNOT CONTINUE NORMALLY: …` on the console | No working network. Its title says which case (no cable / connected but nothing answered / no address offered). Move the cable to a port with a link light and reboot; or set a fixed address, `sigmond-setnet 10.0.0.50/24 10.0.0.1`; or use Wi-Fi, `sigmond-wifi scan` then `sigmond-wifi join <network>` |
 | `import: no Sigmond USB present` | Plug the stick back in — any port, machine running |
 | Wizard: no RX888 found | Not a failure — the station installs dormant. Re-seat the cable in a **blue** port, then `sigmond-vm smd status` and `sigmond-vm smd adopt <name>` |
+| Installer stuck on "creating LVs" | Usually not stuck — on a disk that held an earlier install it can take many minutes. Wait at least 30 minutes before switching off |
+| Receiver found, but nothing decodes; the VM log says `RX888 ADC clock not locked/running` | Unplug the USB 3 cable **at the RX888** and plug it firmly back in. A badly seated plug looks exactly like a missing clock, and cycling power does not cure it (AC0G-ND, 2026-10-05) |
 | Stick still in an hour after "REMOVE THE USB STICK NOW" | Remove it, run `poweroff`, then power the machine back on |
 | Typed a wrong answer | From the host: `sigmond-setup --reconfigure` |
 | Remote access shows FAILED | Later, from the host: `sigmond-setup --reconfigure` |
