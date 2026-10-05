@@ -22,8 +22,11 @@ say(){ echo "[test $(date '+%T')] $*"; }
 # Phase D's metrology verdict over the guest probe's KEY:N lines.  Prints
 #   METROLOGY_OK        metrology units are running
 #   NO_SDR_EXPECTED     zero units, and the guest has NO SDR on its bus, and
-#                       bring-up stopped at 'radiod configured' for exactly that
-#                       reason and no other -- the nest's normal case
+#                       bring-up deferred the radio half for exactly that reason
+#                       and failed nothing else -- the nest's normal case.  Two
+#                       signatures qualify: firstrun's marker reads
+#                       result=awaiting-sdr (sigmond 7966e69 on, 2026-10-04), or
+#                       the older images' stop at 'radiod configured'
 #   FATAL_NO_METROLOGY  anything else with zero units (ad154d3's defect)
 # and returns 1 only for the FATAL.  A missing key reads as the unsafe value,
 # so a garbled reply can never pass.
@@ -40,12 +43,20 @@ phase_d_verdict() {
     # lines with a literal \n.  (No key is a suffix of another, so an
     # unanchored match cannot confuse them -- keep it that way.)
     _pdv() { echo "$r" | grep -oE "$1:[0-9]+" | head -1 | cut -d: -f2; }
-    local count sdr rstep rchk ochk ostep
+    local count sdr rstep rchk ochk ostep await
     count=$(_pdv COUNT);  sdr=$(_pdv SDRDEV)
     rstep=$(_pdv RADIODSTEP); rchk=$(_pdv RADIODCHK)
     ochk=$(_pdv OTHERCHK);  ostep=$(_pdv OTHERSTEP)
+    await=$(_pdv AWAITSDR)
     [ -n "$count" ] || { echo FATAL_NO_METROLOGY; return 1; }
     if [ "$count" -gt 0 ]; then echo METROLOGY_OK; return 0; fi
+    # The honest partial: no card, the marker says so (never "done"), and no
+    # other step or checkpoint failed.  A card on the bus with this marker is
+    # the defect, not the exception.
+    if [ "${sdr:-1}" = 0 ] && [ "${await:-0}" -gt 0 ] \
+       && [ "${ochk:-1}" = 0 ] && [ "${ostep:-1}" = 0 ]; then
+        echo NO_SDR_EXPECTED; return 0
+    fi
     if [ "${sdr:-1}" = 0 ] && [ "${rstep:-0}" -gt 0 ] && [ "${rchk:-0}" -gt 0 ] \
        && [ "${ochk:-1}" = 0 ] && [ "${ostep:-1}" = 0 ]; then
         echo NO_SDR_EXPECTED; return 0
@@ -824,6 +835,7 @@ else
         echo OTHERCHK:\$(grep \"checkpoint: .* FAILED\" \$L 2>/dev/null | grep -vc \"radiod configured\")
         echo OTHERSTEP:\$(grep \"step exited [1-9]\" \$L 2>/dev/null | grep -v \"config init radiod\" | grep -vc sigmond-sdr-recover)
         echo NOSDRMSG:\$(grep -c \"no recognised SDRs detected\" \$L 2>/dev/null)
+        echo AWAITSDR:\$(grep -c \"^result=awaiting-sdr\" /var/lib/sigmond/.firstrun-bringup-done 2>/dev/null)
     '" 2>&1)
     _w=$(echo "$MET" | grep -oE 'WIRED:[0-9]+' | head -1 | cut -d: -f2)
     _c=$(echo "$MET" | grep -oE 'COUNT:[0-9]+' | head -1 | cut -d: -f2)
@@ -835,8 +847,8 @@ else
     if [ "$_v" = METROLOGY_OK ]; then
         say "metrology channels running: ${_c} (channel envs: ${_e:-?}) ✓"
     elif [ "$_v" = NO_SDR_EXPECTED ]; then
-        say "no SDR on the guest's USB bus; bring-up stopped at 'radiod configured'"
-        say "  for exactly that reason, and no other step or checkpoint failed ✓"
+        say "no SDR on the guest's USB bus; bring-up deferred the radio half for"
+        say "  exactly that reason, and no other step or checkpoint failed ✓"
         say "  ⚠ THE METROLOGY ASSERTION WAS NOT EVALUATED — this nest has no RX888."
         say "    Prove metrology on hardware (B4) before rolling this image."
     else

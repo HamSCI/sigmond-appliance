@@ -72,6 +72,28 @@ expect "real qm-guest-exec JSON shape, no SDR -> expected" NO_SDR_EXPECTED 0 "$Q
 expect "real qm-guest-exec JSON shape, card present -> FATAL" FATAL_NO_METROLOGY 1 "${QM_JSON/SDRDEV:0/SDRDEV:1}"
 expect "real qm-guest-exec JSON shape, healthy -> ok" METROLOGY_OK 0 "${QM_JSON/COUNT:0/COUNT:6}"
 
+# sigmond 7966e69 on: no card -> the radio half is DEFERRED, radiod is never
+# configured, and firstrun's marker reads result=awaiting-sdr.  This is the
+# reply v3.67 + sigmond 088ffa1 should produce in the nest.
+NEST_DEFERRED='COUNT:0
+SDRDEV:0
+RADIODSTEP:0
+RADIODCHK:0
+OTHERCHK:0
+OTHERSTEP:0
+NOSDRMSG:0
+AWAITSDR:1'
+expect "no SDR, radio half deferred, marker awaiting-sdr -> expected" NO_SDR_EXPECTED 0 "$NEST_DEFERRED"
+# What v3.67 (before 088ffa1) really produced: the catch-all smd start failed.
+expect "deferred, but a step failed (v3.67 smd start) -> FATAL" FATAL_NO_METROLOGY 1 "${NEST_DEFERRED/OTHERSTEP:0/OTHERSTEP:1}"
+expect "deferred, but a checkpoint failed -> FATAL" FATAL_NO_METROLOGY 1 "${NEST_DEFERRED/OTHERCHK:0/OTHERCHK:1}"
+expect "awaiting-sdr marker with a card ON the bus -> FATAL" FATAL_NO_METROLOGY 1 "${NEST_DEFERRED/SDRDEV:0/SDRDEV:1}"
+expect "deferred, marker NOT awaiting-sdr (claims done) -> FATAL" FATAL_NO_METROLOGY 1 "${NEST_DEFERRED/AWAITSDR:1/AWAITSDR:0}"
+for key in COUNT SDRDEV OTHERCHK OTHERSTEP AWAITSDR; do
+    reply=$(echo "$NEST_DEFERRED" | grep -v "^$key:")
+    expect "deferred reply without $key -> FATAL" FATAL_NO_METROLOGY 1 "$reply"
+done
+
 # A garbled or empty reply must never read as a pass.
 expect "empty guest reply -> FATAL" FATAL_NO_METROLOGY 1 ''
 
