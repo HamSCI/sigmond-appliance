@@ -16,6 +16,13 @@ say(){ echo "[site-timing] $*" | systemd-cat -t sigmond-site-timing -p notice; }
 command -v timestd >/dev/null 2>&1 || { say "hf-timestd not installed - skipping"; exit 0; }
 CFG=/etc/hf-timestd/timestd-config.toml
 SUBNET=$(ip -4 route | awk '/proto kernel/{print $1; exit}')
+# ⛔ Since v3.50 the VM's own route is the host-only 10.99.0.0/30 behind the
+# PM, so scanning it finds nothing: AC0G-ND (v3.67, 2026-10-05) missed BOTH
+# its LAN stratum-1 (T4) and its VTEC box on 192.168.8.0/24.  The wizard
+# records the PM's site LAN in /etc/sigmond/site-lan; scan that instead.
+if [ -s /etc/sigmond/site-lan ] && [[ "$SUBNET" == 10.99.0.* || -z "$SUBNET" ]]; then
+    SUBNET=$(head -1 /etc/sigmond/site-lan | tr -d '[:space:]')
+fi
 
 # ── 1. chrony refclocks (FUSE/HPPS) ─────────────────────────────────────────
 #
@@ -259,7 +266,10 @@ if [ -d "$MC" ]; then
     [ "${RESTART_METROLOGY:-0}" = 1 ] && systemctl try-restart timestd-fusion 2>/dev/null
 fi
 
-# ── 4. local GNSS UBX stream → [gnss_vtec] ──────────────────────────────────
+# ── 4. local GNSS stream (UBX or RTCM3) → [gnss_vtec] ───────────────────────
+# timestd-vtec reads either: u-blox UBX (sync b5 62) or RTCM3 (preamble 0xD3,
+# MSM/1004 -- the Quectel LG290P at AC0G-ND).  Probing for UBX alone left
+# ND's VTEC off on every flash.
 if [ -n "$SUBNET" ] && [ -f "$CFG" ] && grep -q '<YOUR_GNSS_HOST>' "$CFG"; then
     GHOST=$(python3 - "$SUBNET" <<'PYEOF'
 import ipaddress, socket, sys, concurrent.futures
@@ -269,10 +279,21 @@ def probe(ip):
         s = socket.create_connection((str(ip), 9000), timeout=1); s.settimeout(2)
         d = b""
         try:
-            while len(d) < 64: d += s.recv(64)
+            while len(d) < 2048:
+                b = s.recv(2048)
+                if not b: break      # peer closed: recv returns b'' forever
+                d += b
         except socket.timeout: pass
         s.close()
         if b"\xb5\x62" in d: return str(ip)
+        # RTCM3: preamble D3, 6 reserved bits zero, 10-bit length.  Require
+        # two frames back to back so a stray 0xD3 byte cannot qualify.
+        for i in range(len(d) - 3):
+            if d[i] == 0xD3 and d[i + 1] & 0xFC == 0:
+                n = ((d[i + 1] & 0x03) << 8) | d[i + 2]
+                j = i + 3 + n + 3
+                if j < len(d) and d[j] == 0xD3 and d[j + 1] & 0xFC == 0:
+                    return str(ip)
     except Exception: pass
 if net.num_addresses <= 1024:
     with concurrent.futures.ThreadPoolExecutor(64) as ex:
@@ -293,11 +314,11 @@ s = sub(s, "enabled", "true  # auto-wired by sigmond-site-timing")
 s = sub(s, "host", '"%s"' % host)
 open(p, "w").write(s)
 PYEOF
-        say "GNSS UBX stream found: $GHOST:9000 - gnss_vtec enabled"
+        say "GNSS stream (UBX/RTCM3) found: $GHOST:9000 - gnss_vtec enabled"
         # an already-running vtec service read the config before this edit
         systemctl try-restart timestd-vtec 2>/dev/null
     else
-        say "no local GNSS UBX stream on :9000 - vtec stays off"
+        say "no local GNSS stream (UBX/RTCM3) on :9000 - vtec stays off"
     fi
 fi
 

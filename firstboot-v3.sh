@@ -2491,7 +2491,7 @@ Restart=no
 # and prefix with `-` so that even an unforeseen failure here cannot mark a
 # finished wizard as failed.  A getty is pointless on a machine that is
 # rebooting: the next boot starts one anyway.
-ExecStopPost=-/bin/sh -c 'case "$(systemctl is-system-running 2>/dev/null)" in stopping|offline) exit 0 ;; esac; systemctl --no-block start getty@tty1.service
+ExecStopPost=-/bin/sh -c 'case "$(systemctl is-system-running 2>/dev/null)" in stopping|offline) exit 0 ;; esac; systemctl --no-block start getty@tty1.service'
 [Install]
 WantedBy=multi-user.target
 WIZEOF
