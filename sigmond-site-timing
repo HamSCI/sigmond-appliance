@@ -87,6 +87,53 @@ PYEOF
 fi
 [ "$CHANGED" = 1 ] && systemctl restart chrony 2>/dev/null
 
+# ── 2b. declare those LAN stratum-1 servers to hf-timestd as T4 peers ────────
+# Chrony using a LAN stratum-1 is not T4: hf-timestd builds its T4 probe ONLY
+# from [timing.authority_manager.t4] peers.  Step 2 wired chrony and nothing
+# else, so AC0G-ND sat at T3 with 192.168.8.144 selected in chrony (±128 µs)
+# from 2026-10-04 until T4 was declared by hand on 2026-10-05.  Read the
+# servers from local-timeservers.conf -- whether step 2 wrote it just now or a
+# site-restore replayed it -- and ADD any missing one; never remove an
+# operator's peer.  The authority runner lives in timestd-fusion.
+if [ -f "$CFG" ] && [ -f /etc/chrony/conf.d/local-timeservers.conf ]; then
+    T4ADD=$(python3 - "$CFG" /etc/chrony/conf.d/local-timeservers.conf <<'PYEOF'
+import re, sys, tomllib
+cfg, lts = sys.argv[1], sys.argv[2]
+servers = [l.split()[1] for l in open(lts)
+           if l.split() and l.split()[0] in ('server', 'pool', 'peer') and len(l.split()) > 1]
+if not servers:
+    sys.exit(0)
+text = open(cfg).read()
+have = (tomllib.loads(text).get('timing', {}).get('authority_manager', {})
+        .get('t4', {}).get('peers', [])) or []
+missing = [s for s in servers if s not in have]
+if not missing:
+    sys.exit(0)
+peers = list(have) + missing
+line = 'peers = [' + ', '.join('"%s"' % p for p in peers) + ']  # sigmond-site-timing'
+hdr = re.search(r'^\[timing\.authority_manager\.t4\][ \t]*$', text, re.M)
+if hdr is None:
+    text = text.rstrip('\n') + '\n\n[timing.authority_manager.t4]\n' + line + '\n'
+else:
+    nxt = re.search(r'^\[', text[hdr.end():], re.M)
+    end = hdr.end() + (nxt.start() if nxt else len(text) - hdr.end())
+    body = text[hdr.end():end]
+    if re.search(r'^peers\s*=', body, re.M):
+        body = re.sub(r'^peers\s*=.*$', line, body, count=1, flags=re.M)
+    else:
+        body = '\n' + line + body
+    text = text[:hdr.end()] + body + text[end:]
+tomllib.loads(text)                       # never write a config that will not parse
+open(cfg, 'w').write(text)
+print(' '.join(missing))
+PYEOF
+)
+    if [ -n "$T4ADD" ]; then
+        say "T4 peers declared to hf-timestd: $T4ADD - restarting timestd-fusion"
+        systemctl try-restart timestd-fusion 2>/dev/null
+    fi
+fi
+
 # ── 2.5 identity reconciliation (relocation support) ───────────────────────
 # Stations may be staged at one site and deployed at another (rob
 # 2026-08-04: build in Scranton, deploy elsewhere). `sigmond-setup
