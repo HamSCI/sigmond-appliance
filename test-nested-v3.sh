@@ -474,7 +474,19 @@ $SSHN "QP=\$(cat /var/run/qemu-server/$VMID.pid); for tid in \$(ps -T -p \$QP -o
 for i in $(seq 1 30); do $SSHN "qm agent $VMID ping" >/dev/null 2>&1 && break; sleep 10; done
 say "verifying VM account password hash matches PM root (the wizard hash-copy path)"
 RHASH=$($SSHN "getent shadow root | cut -d: -f2" 2>/dev/null)
-VHASH=$($SSHN "qm guest exec $VMID --timeout 20 -- bash -c 'getent shadow hamsci | cut -d: -f2' 2>/dev/null" | grep -o '"out-data" *: *"[^"]*"' | sed 's/.*: *"//;s/\\n"$//;s/"$//')
+# ⛔ A ping is not a ready agent.  v3.67 (2026-10-05 00:11:54Z) failed here
+# twice: qemu-ga answered guest-ping 6 s after it started, then the PM logged
+# "qga command 'guest-exec' failed - got timeout" while the guest was still
+# booting.  The exec never reached the agent, VHASH came back empty, and the
+# FATAL blamed the wizard's hash copy — which a later probe showed matched.
+# So retry until the exec actually returns output, and only then judge.
+VHASH=""
+for i in $(seq 1 12); do
+    VHASH=$($SSHN "qm guest exec $VMID --timeout 20 -- bash -c 'getent shadow hamsci | cut -d: -f2' 2>/dev/null" | grep -o '"out-data" *: *"[^"]*"' | sed 's/.*: *"//;s/\\n"$//;s/"$//')
+    [ -n "$VHASH" ] && break
+    sleep 10
+done
+[ -n "$VHASH" ] || { say "FATAL: guest exec never returned output in 12 tries — guest agent not executing (not a hash verdict)"; exit 1; }
 if [ -n "$RHASH" ] && [ "$VHASH" = "$RHASH" ]; then
     say "VM password hash matches PM root ✓"
 else
