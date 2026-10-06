@@ -540,6 +540,13 @@ echo "$HB_OUT" | grep -qE 'port[[:space:]]*=[[:space:]]*38222' \
     || { say "FATAL: heartbeat port not 38222 — the code default of 22 never delivers"; exit 1; }
 say "heartbeat enabled, host and port 38222 written ✓"
 
+# Every site sink check that does not run, or does not conclude, adds a phrase
+# here.  One line before PHASE D PASS repeats them, so a reader of the verdict
+# line learns what the pass left unchecked.  The phrase must keep the words
+# NOT EVALUATED around it: test-update-v3.sh copies those lines into its log.
+SINK_UNCHECKED=""
+sink_unchecked(){ case "; $SINK_UNCHECKED;" in *"; $*;"*) return 0 ;; esac; SINK_UNCHECKED="${SINK_UNCHECKED:+$SINK_UNCHECKED; }$*"; }
+
 # test-update-v3.sh runs these phases against the PREVIOUS blessed image,
 # whose wizard writes no [uploads] and whose sigmond has no `smd sink`.  Ask
 # the host's wizard what it does; when the answer rules the checks out, say
@@ -548,7 +555,8 @@ case "$($SSHN "grep -q '^uploads_toml()' /usr/local/sbin/sigmond-setup && echo S
     *SINKWIZ:YES*) SINKWIZ=1 ;;
     *SINKWIZ:NO*)  SINKWIZ=0
                    say "⚠ SITE SINK ASSERTIONS NOT EVALUATED — this image's wizard predates"
-                   say "  the site sink switch (pre-v3.69); expected only on the update rig's base image" ;;
+                   say "  the site sink switch (pre-v3.69); expected only on the update rig's base image"
+                   sink_unchecked "all of them (this image's wizard defines no uploads_toml(); it predates the site sink switch, or the wizard renamed it)" ;;
     *) say "FATAL: could not read the host's wizard to decide the site sink checks"; exit 1 ;;
 esac
 if [ "$SINKWIZ" = 1 ]; then
@@ -862,6 +870,7 @@ if [ "$_done" != 1 ]; then
     say "  ⚠ THE METROLOGY ASSERTION WAS NOT EVALUATED — this run does not"
     say "    show whether the station wires its timing chain."
     [ "${SINKWIZ:-0}" = 1 ] && say "  ⚠ THE SITE SINK MANIFEST AND smd sink upload CHECKS WERE NOT EVALUATED either."
+    [ "${SINKWIZ:-0}" = 1 ] && sink_unchecked "the manifest banner, per-pipeline discard and smd sink upload (bring-up did not finish)"
 else
     say "bring-up completed (marker present)"
     if [ "${SINKWIZ:-0}" = 1 ]; then
@@ -893,6 +902,7 @@ else
         if [ "$_data" -eq 0 ]; then
             say "WARN: the manifest renders SITE SINK OFF but holds no data pipeline in this nest;"
             say "  the per-pipeline discard = true was NOT evaluated"
+            sink_unchecked "per-pipeline discard = true and its release by smd sink upload (the nest's manifest holds only the heartbeat)"
         elif [ "$_d" -eq "$_data" ]; then
             say "all ${_data} data pipeline(s) render discard = true while the site sink switch reads off ✓"
         else
@@ -937,22 +947,45 @@ else
     if [ "${SINKWIZ:-0}" = 1 ]; then
         # Show that `smd sink upload` works as root in the image and leaves no
         # pipeline discarding.  The nest has no RX888, so nothing real ships.
+        # Read the switch back from `smd sink status`, never from the command's
+        # own success line ("site sink: upload — every data pipeline is back in
+        # the manifest").  Read the manifest back too: policy_banner returns
+        # nothing in upload mode, so BANNEROFF:0 shows the manifest was
+        # regenerated even when it holds no data pipeline.
         say "raising the site sink switch: smd sink upload"
-        UP=$($SSHN "qm guest exec $VMID --timeout 120 -- bash -lc 'smd sink upload 2>&1; echo DISCLEFT:\$(grep -c \"^discard = true\" /etc/hs-uploader/pipelines.toml); smd sink status 2>&1'" 2>&1)
+        UP=$($SSHN "qm guest exec $VMID --timeout 120 -- bash -lc 'smd sink upload 2>&1; M=/etc/hs-uploader/pipelines.toml; echo DISCLEFT:\$(grep -c \"^discard = true\" \$M); echo BANNEROFF:\$(grep -c \"SITE SINK OFF\" \$M); echo PIPES:\$(grep -c \"^\\[\\[pipeline\\]\\]\" \$M); echo HB:\$(grep -c \"^name = .heartbeat.\" \$M); smd sink status 2>&1'" 2>&1)
         echo "$UP" | tail -12
         case "$UP" in
           *"refusing while packaging runs"*)
             say "WARN: smd sink upload refused because GRAPE or magnetometer packaging ran in the nest;"
-            say "  raising the switch was NOT evaluated" ;;
+            say "  raising the switch was NOT evaluated"
+            sink_unchecked "smd sink upload (it refused while packaging ran in the nest)" ;;
           *)
-            _dl=$(echo "$UP" | grep -oE 'DISCLEFT:[0-9]+' | head -1 | cut -d: -f2)
-            [ -n "$_dl" ] || { say "FATAL: the smd sink upload probe returned no answer (guest exec failed, not a verdict)"; exit 1; }
+            _dl=$(echo "$UP" | grep -oE 'DISCLEFT:[0-9]+'  | head -1 | cut -d: -f2)
+            _bo=$(echo "$UP" | grep -oE 'BANNEROFF:[0-9]+' | head -1 | cut -d: -f2)
+            _up=$(echo "$UP" | grep -oE 'PIPES:[0-9]+'     | head -1 | cut -d: -f2)
+            _uh=$(echo "$UP" | grep -oE 'HB:[0-9]+'        | head -1 | cut -d: -f2)
+            [ -n "$_dl" ] && [ -n "$_bo" ] && [ -n "$_up" ] && [ -n "$_uh" ] \
+                || { say "FATAL: the smd sink upload probe returned no answer (guest exec failed, not a verdict)"; exit 1; }
             [ "$_dl" = 0 ] || { say "FATAL: ${_dl} pipeline(s) still carry discard = true after smd sink upload"; exit 1; }
-            echo "$UP" | grep -q 'site sink: upload' \
+            [ "$_bo" = 0 ] || { say "FATAL: pipelines.toml still renders SITE SINK OFF after smd sink upload; the manifest was not regenerated"; exit 1; }
+            echo "$UP" | grep -q 'site sink: upload (store and send)' \
                 || { say "FATAL: smd sink status does not report upload after smd sink upload"; exit 1; }
-            say "smd sink upload raised the site sink switch; no pipeline discards ✓" ;;
+            if [ "$_up" -eq "$_uh" ]; then
+                say "smd sink upload raised the site sink switch; no pipeline discards (the manifest holds only the heartbeat in this nest, so no data pipeline was released)"
+                sink_unchecked "per-pipeline discard = true and its release by smd sink upload (the nest's manifest holds only the heartbeat)"
+            else
+                say "smd sink upload raised the site sink switch; no pipeline discards ✓"
+            fi ;;
         esac
     fi
+fi
+
+# What the site sink checks left unchecked, said once more beside the verdict.
+# The PHASE D PASS line below stays exactly as it was: test-update-v3.sh and
+# bless-release.sh match it.
+if [ -n "${SINK_UNCHECKED:-}" ]; then
+    say "⚠ SITE SINK CHECKS NOT EVALUATED: $SINK_UNCHECKED"
 fi
 
 say "PHASE D PASS — NESTED TEST COMPLETE"

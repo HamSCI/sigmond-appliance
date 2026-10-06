@@ -506,6 +506,13 @@ if [ "$RESUME" = 0 ]; then
         fatal - "no PHASE D PASS for $IMGBASE in the lines $(basename "$NESTED_TEST") just appended to $NESTED_LOG"
     fi
     say "INSTALL evidence OK: PHASE D PASS for $IMGBASE in this run's block"
+    # A sibling PASS can leave checks unrun, and says so only in the sibling's
+    # log: the metrology check on a nest without an RX888, the site sink checks
+    # on an image whose wizard predates the switch.  Copy each such line here,
+    # marked as the sibling's, so this log carries the caveats beside the PASS.
+    # No line, no output.
+    awk -v from="$PRELINES" 'NR > from && index($0, "NOT EVALUATED")' "$NESTED_LOG" \
+        | while IFS= read -r _sl; do say "  from $(basename "$NESTED_TEST"): $_sl"; done
 else
     say "════ RESUME: reusing the nested production PM/VM from a previous run ════"
 fi
