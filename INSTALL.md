@@ -1,8 +1,8 @@
 # Sigmond Station — Installation Guide for Everyone
 
 > **Audience:** operator
-> **Status:** current
-> **Verified against:** sigmond-appliance v3.65 (cbee2b7, blessed 2026-10-01) and its wizard, sigmond e8fbce8 — the questions, console messages and logins below were read from that code; install exercised on AC0G-B4 hardware and the nested rig the same day
+> **Status:** draft (v3.69 build pending)
+> **Verified against:** pending — v3.69 not yet built
 > **Canonical for:** burning, booting and first-boot wizard of the appliance image
 
 Day-2 operation, troubleshooting beyond §11, remote access and what-not-to-touch live in the [Operator guide](https://github.com/HamSCI/sigmond/blob/main/docs/operator/README.md).
@@ -245,13 +245,51 @@ whenever you like.
 From any computer on the same network (addresses are on the console panel):
 
 - **Live receiver:** `http://<host address>:8081` — a waterfall with signals.
-- **Station pages:** `http://<host address>:8000`
+- **Station pages:** `http://<host address>:8000` — the station's callsign and grid,
+  and its timing and GRAPE pages.
 - **Magnetometer:** `http://<host address>:8082` (if you have one)
-- **Your spots:** search your reporter ID at wsprnet.org (Database) and your
-  callsign at pskreporter.info.
 
-The decoder VM sits on a private link behind the host, so the host relays these
-pages for it.
+The decoder VM sits on a private link behind the host, so the host relays these pages for it.
+
+**No data leaves the station yet.**  A new station starts with its site sink switch at
+`off`.  It records and decodes, but sends no spots or data to wsprnet, pskreporter.info,
+wsprdaemon.org or PSWS.  Only its heartbeat, a five-minute health report for the fleet
+board, goes out.
+
+Log in to the decoder VM (§10) and check three things:
+
+```
+smd watch wspr      # a line per 2-minute cycle counting the WSPR spots it decoded; Ctrl-C stops it
+smd watch psk       # the same for FT8 and FT4, every 15 seconds
+grep -E 'reporter_id|callsign|grid' /etc/sigmond/site-profile.toml
+```
+
+When the waterfall shows signals, the watchers count spots, and the reporter ID, callsign
+and grid read right, read the site sink switch:
+
+```
+smd sink status
+```
+
+A new station says `site sink: off` and gives the reason `new station: …`.  In that case,
+set the site sink switch to `upload`:
+
+```
+smd sink upload
+smd sink status     # should say: site sink: upload
+```
+
+Any other reason means someone set the switch on purpose.  Leave it alone and ask your
+fleet admin.
+
+Nothing recorded before `smd sink upload` leaves the station, with one exception.  The
+station packs each UTC day's GRAPE and magnetometer data after that day ends, between
+01:00 and about 04:00 UTC.  So the packages for the UTC day you run it still go out, and
+so do the previous day's if you run it before that packing has finished.  Run it after
+about 04:00 UTC if you can.  While a packing job runs, `smd sink upload` refuses, names
+the job, and asks you to run it again when the job ends.  About fifteen minutes after
+`smd sink upload`, search your reporter ID at wsprnet.org (Database) and your callsign at
+pskreporter.info.
 
 ---
 
@@ -291,7 +329,7 @@ restored keys in §4, this is already done.)
 | Stick still in an hour after "REMOVE THE USB STICK NOW" | Remove it, run `poweroff`, then power the machine back on |
 | Typed a wrong answer | From the host: `sigmond-setup --reconfigure` |
 | Remote access shows FAILED | Later, from the host: `sigmond-setup --reconfigure` |
-| No spots after 30 minutes | Antenna actually connected? Then log in to the VM and run `smd status` — send its output to your fleet admin |
+| No spots after 30 minutes | Expected on a new station until you run `smd sink upload` (§9). Log in to the VM and run `smd sink status`. If it says `site sink: off` with the reason `new station: …`, check the station as §9 describes, then run `smd sink upload`. If it says `site sink: off` with any other reason, or `hold (legacy)`, ask your fleet admin. If it says `site sink: upload`: antenna actually connected? Then run `smd status` and send its output to your fleet admin |
 | Anything else | If you enabled remote access, your fleet admin can log in and fix it — just ask |
 
 More symptoms and the decision tree: [operator troubleshooting](https://github.com/HamSCI/sigmond/blob/main/docs/operator/troubleshooting.md).
@@ -308,16 +346,25 @@ updated as the wizard changes.*
 ## 12. Moving a station (staged in one place, deployed in another)
 
 Stations are often built and tested at one site (wrong grid square!) and
-then shipped to their permanent home. After the station is physically
-installed at its destination:
+then shipped to their permanent home. Keep the site sink switch at `off`
+until the station knows where it stands:
 
-1. Log into the **Proxmox host** (`ssh root@<host address>`, or the
-   console before the USB controllers were handed to the VM).
-2. Run: `sigmond-setup --reconfigure`
-3. When it asks for the **grid square, type the new one**. For every
-   other question just press Enter (your previous answers, remote-access
-   number, and PSWS registration all stick).
-4. That's it — the new location flows everywhere automatically
-   (reporting grid, timing-station coordinates, metrology channels,
-   magnetometer), the recorders restart themselves, and the next spots
-   upload with the new grid. Verify on wsprnet after ~15 minutes.
+1. At the staging site, leave the site sink switch at `off`; a new station
+   starts that way. Check reception there with the waterfall and
+   `smd watch wspr` (§9). No data leaves the station; only its heartbeat
+   goes out.
+2. At the destination, log into the **Proxmox host** (`ssh root@<host address>`,
+   or the console before the USB controllers were handed to the VM) and run
+   `sigmond-setup --reconfigure`.
+3. Answer the questions again. The wizard asks for your reporter ID and PSWS
+   ids afresh, and pressing Enter at the PSWS station ID skips PSWS, so have
+   them at hand. Type the **new grid square**. A station whose GPSDO has a fix
+   fills in the grid by itself, and may already have moved it; check the grid
+   on the review screen. The wizard keeps your remote-access number and the
+   site sink switch as they were.
+4. Log in to the decoder VM and check the identity:
+   `grep -E 'reporter_id|callsign|grid' /etc/sigmond/site-profile.toml`.
+   (The station pages keep the grid from the first install.) Then run
+   `smd sink status`. If it still gives the reason `new station: …`, run
+   `smd sink upload`, and verify on wsprnet after about 15 minutes. Any other
+   reason means someone set the switch on purpose; ask your fleet admin.
