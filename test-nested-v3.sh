@@ -396,6 +396,16 @@ case "$HBLEAK" in
     *) say "FATAL: heartbeat leak probe returned neither CLEAN nor LEAKED"; echo "$HBLEAK" | head -6; exit 1 ;;
 esac
 
+# The site sink switch belongs to the station.  The wizard writes it on a
+# FRESH install only, and `smd sink status` reads coordination.toml, so
+# neither file in the golden template may carry a live [uploads].
+UPLEAK=$($SSHN "qm guest exec $VMID --timeout 30 -- bash -lc 'grep -qsE \"^[[:space:]]*\\[uploads\\]\" /etc/sigmond/site-profile.toml /etc/sigmond/coordination.toml && echo LEAKED || echo CLEAN'" 2>&1)
+case "$UPLEAK" in
+    *CLEAN*)  say "golden template carries no [uploads] ✓" ;;
+    *LEAKED*) say "FATAL: a live [uploads] section leaked into the golden template"; echo "$UPLEAK" | head -6; exit 1 ;;
+    *) say "FATAL: uploads leak probe returned neither CLEAN nor LEAKED"; echo "$UPLEAK" | head -6; exit 1 ;;
+esac
+
 say "staging a test site-keys tarball (exercises the stick key-restore path)"
 $SSHN "mkdir -p /root/sigmond-appliance /tmp/sk/etc/hs-uploader/keys /tmp/sk/home/timestd/.ssh && echo TESTPRIV > /tmp/sk/etc/hs-uploader/keys/id_ed25519_host && echo TESTPUB > /tmp/sk/etc/hs-uploader/keys/id_ed25519_host.pub && echo TESTRSA > /tmp/sk/home/timestd/.ssh/id_rsa_psws && tar czf /root/sigmond-appliance/site-keys.tar.gz -C /tmp/sk etc home && rm -rf /tmp/sk"
 say "guest kernel + hamsci OK; running wizard with piped answers (identity N0CALL/T1 @ EM00aa)"
@@ -529,6 +539,35 @@ echo "$HB_OUT" | grep -q 'wd30.wsprdaemon.org' \
 echo "$HB_OUT" | grep -qE 'port[[:space:]]*=[[:space:]]*38222' \
     || { say "FATAL: heartbeat port not 38222 — the code default of 22 never delivers"; exit 1; }
 say "heartbeat enabled, host and port 38222 written ✓"
+
+# test-update-v3.sh runs these phases against the PREVIOUS blessed image,
+# whose wizard writes no [uploads] and whose sigmond has no `smd sink`.  Ask
+# the host's wizard what it does; when the answer rules the checks out, say
+# so loudly rather than pass in silence.
+case "$($SSHN "grep -q '^uploads_toml()' /usr/local/sbin/sigmond-setup && echo SINKWIZ:YES || echo SINKWIZ:NO" 2>&1)" in
+    *SINKWIZ:YES*) SINKWIZ=1 ;;
+    *SINKWIZ:NO*)  SINKWIZ=0
+                   say "⚠ SITE SINK ASSERTIONS NOT EVALUATED — this image's wizard predates"
+                   say "  the site sink switch (pre-v3.69); expected only on the update rig's base image" ;;
+    *) say "FATAL: could not read the host's wizard to decide the site sink checks"; exit 1 ;;
+esac
+if [ "$SINKWIZ" = 1 ]; then
+    say "verifying the site sink switch starts off on a fresh install"
+    # One KEY:N token per file.  qm guest exec returns JSON whose "out-data"
+    # carries every output line on ONE line, so grep -c over $SINK_OUT can never
+    # count past 1; read tokens instead, as phase_d_verdict does.
+    SINK_OUT=$($SSHN "qm guest exec $VMID --timeout 60 -- bash -lc 'for f in site-profile coordination; do echo \"\$f:\$(grep -A3 \"^\\[uploads\\]\" /etc/sigmond/\$f.toml 2>/dev/null | grep -cE \"^mode *= *.discard.\")\"; done; smd sink status 2>&1'" 2>&1)
+    echo "$SINK_OUT" | tail -12
+    _sp=$(echo "$SINK_OUT" | grep -oE 'site-profile:[0-9]+' | head -1 | cut -d: -f2)
+    _co=$(echo "$SINK_OUT" | grep -oE 'coordination:[0-9]+' | head -1 | cut -d: -f2)
+    [ -n "$_sp" ] && [ -n "$_co" ] \
+        || { say "FATAL: the site sink probe returned no answer (guest exec failed, not a verdict)"; exit 1; }
+    [ "$_sp" -ge 1 ] || { say "FATAL: site-profile.toml carries no [uploads] mode = \"discard\" after a fresh install"; exit 1; }
+    [ "$_co" -ge 1 ] || { say "FATAL: coordination.toml carries no [uploads] mode = \"discard\"; smd config render did not copy it"; exit 1; }
+    echo "$SINK_OUT" | grep -q 'site sink: off' \
+        || { say "FATAL: smd sink status does not report site sink: off"; exit 1; }
+    say "site sink switch off in both files and in smd sink status ✓"
+fi
 say "PSWS: ids recorded, key generated, banner armed — pending verify (as designed)"
 
 say "── v3.4 fixes: wizard unit disabled, getty alive, panel, sentinel, wisdom"
@@ -822,8 +861,44 @@ if [ "$_done" != 1 ]; then
     say "WARN: bring-up did not finish within ${BRINGUP_WAIT_MIN:-25} min"
     say "  ⚠ THE METROLOGY ASSERTION WAS NOT EVALUATED — this run does not"
     say "    show whether the station wires its timing chain."
+    [ "${SINKWIZ:-0}" = 1 ] && say "  ⚠ THE SITE SINK MANIFEST AND smd sink upload CHECKS WERE NOT EVALUATED either."
 else
     say "bring-up completed (marker present)"
+    if [ "${SINKWIZ:-0}" = 1 ]; then
+        # The manifest shows what hs-uploader will do.  Its banner names the mode
+        # it rendered: SITE SINK OFF, or the legacy hold that an hs-uploader too
+        # old to discard falls back to.  Every [[pipeline]] but the heartbeat
+        # must carry discard = true.
+        DISC=$($SSHN "qm guest exec $VMID --timeout 30 -- bash -lc '
+            M=/etc/hs-uploader/pipelines.toml
+            [ -r \$M ] || { echo NOMANIFEST; exit 0; }
+            echo BANNER:\$(grep -c \"SITE SINK OFF\" \$M)
+            echo PIPES:\$(grep -c \"^\\[\\[pipeline\\]\\]\" \$M)
+            echo HB:\$(grep -c \"^name = .heartbeat.\" \$M)
+            echo DISC:\$(grep -c \"^discard = true\" \$M)
+        '" 2>&1)
+        _b=$(echo "$DISC" | grep -oE 'BANNER:[0-9]+' | head -1 | cut -d: -f2)
+        _p=$(echo "$DISC" | grep -oE 'PIPES:[0-9]+'  | head -1 | cut -d: -f2)
+        _h=$(echo "$DISC" | grep -oE 'HB:[0-9]+'     | head -1 | cut -d: -f2)
+        _d=$(echo "$DISC" | grep -oE 'DISC:[0-9]+'   | head -1 | cut -d: -f2)
+        case "$DISC" in
+          *NOMANIFEST*) say "FATAL: no /etc/hs-uploader/pipelines.toml after a completed bring-up"; exit 1 ;;
+        esac
+        [ -n "$_b" ] && [ -n "$_p" ] && [ -n "$_h" ] && [ -n "$_d" ] \
+            || { say "FATAL: the manifest probe returned no answer (guest exec failed, not a verdict)"; echo "$DISC" | head -6; exit 1; }
+        [ "$_b" -ge 1 ] \
+            || { say "FATAL: pipelines.toml does not render SITE SINK OFF while the site sink switch reads off"
+                 say "  (an hs-uploader that cannot discard makes sigmond render the legacy hold)"; exit 1; }
+        _data=$(( _p - _h ))
+        if [ "$_data" -eq 0 ]; then
+            say "WARN: the manifest renders SITE SINK OFF but holds no data pipeline in this nest;"
+            say "  the per-pipeline discard = true was NOT evaluated"
+        elif [ "$_d" -eq "$_data" ]; then
+            say "all ${_data} data pipeline(s) render discard = true while the site sink switch reads off ✓"
+        else
+            say "FATAL: ${_d} of ${_data} data pipeline(s) carry discard = true"; exit 1
+        fi
+    fi
     MET=$($SSHN "qm guest exec $VMID --timeout 60 -- bash -lc '
         L=/var/log/sigmond/firstrun-bringup.log
         echo WIRED:\$(grep -c \"re-running site wiring\" \$L 2>/dev/null)
@@ -857,6 +932,26 @@ else
         say "  defect v3.54 exists to close. Do not ship this image."
         $SSHN "qm guest exec $VMID --timeout 30 -- bash -lc 'tail -20 /var/log/sigmond/firstrun-bringup.log; ls -la /etc/hf-timestd/ 2>&1'" 2>&1
         exit 1
+    fi
+
+    if [ "${SINKWIZ:-0}" = 1 ]; then
+        # Show that `smd sink upload` works as root in the image and leaves no
+        # pipeline discarding.  The nest has no RX888, so nothing real ships.
+        say "raising the site sink switch: smd sink upload"
+        UP=$($SSHN "qm guest exec $VMID --timeout 120 -- bash -lc 'smd sink upload 2>&1; echo DISCLEFT:\$(grep -c \"^discard = true\" /etc/hs-uploader/pipelines.toml); smd sink status 2>&1'" 2>&1)
+        echo "$UP" | tail -12
+        case "$UP" in
+          *"refusing while packaging runs"*)
+            say "WARN: smd sink upload refused because GRAPE or magnetometer packaging ran in the nest;"
+            say "  raising the switch was NOT evaluated" ;;
+          *)
+            _dl=$(echo "$UP" | grep -oE 'DISCLEFT:[0-9]+' | head -1 | cut -d: -f2)
+            [ -n "$_dl" ] || { say "FATAL: the smd sink upload probe returned no answer (guest exec failed, not a verdict)"; exit 1; }
+            [ "$_dl" = 0 ] || { say "FATAL: ${_dl} pipeline(s) still carry discard = true after smd sink upload"; exit 1; }
+            echo "$UP" | grep -q 'site sink: upload' \
+                || { say "FATAL: smd sink status does not report upload after smd sink upload"; exit 1; }
+            say "smd sink upload raised the site sink switch; no pipeline discards ✓" ;;
+        esac
     fi
 fi
 
