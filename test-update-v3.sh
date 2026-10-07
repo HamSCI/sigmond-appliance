@@ -54,7 +54,10 @@
 #   "detached" finding kind             bin/smd:4443
 #   "nothing to do"                     bin/smd:3060, 3062
 #   "HELD"                              bin/smd:3451; exit 3 = bin/smd:3036
-#   "heartbeat: not enabled" + exit 2   bin/smd:4135
+#   emit --dry-run exits 0, and         bin/smd:6670 (dry-run JSON, exit 0)
+#     "heartbeat: not enabled" ABSENT   bin/smd:6624 (that line + exit 2)
+#                                       both at sigmond 401bb12; the install
+#                                       enables it: test-nested-v3.sh:433
 #   "plan OK — "                        bin/smd:3759, 3764
 #   "sanctioned superset"               bin/smd:3761
 #   "installed live (<sha>) but not in the manifest"
@@ -847,17 +850,25 @@ fi
 say "no NEW doctor finding kinds across the update ✓"
 
 # ── the awareness payload survives an update, not just an install ───────
-# Same ruled contract Phase D asserts on a fresh image (fleet-awareness plan
-# Phase 6): no [heartbeat] block means emit --dry-run exits 2 WITH the
-# not-enabled message.  Exit 0 would mean a config leaked in; any other exit
-# means the CLI is broken.  Asserting it AFTER the update is the point: an
+# The station this rig updates has the heartbeat switched on.  The sibling's
+# wizard enables it by default (test-nested-v3.sh:433), and the sibling fails
+# unless emit --dry-run exits 0 without "not enabled" (:677-681).  The same
+# contract must hold AFTER the update.  smd prints "heartbeat: not enabled"
+# and exits 2 when [heartbeat] is off or absent (bin/smd:6624).  A
+# configured station gets the JSON payload and exit 0 (bin/smd:6670).  An
 # update that quietly unwired the heartbeat would leave the fleet blind in
-# exactly the situation the heartbeat exists for.
+# exactly the situation the heartbeat exists for.  Do not bring back the old
+# exit-2 assertion: it describes an unconfigured image, and this rig never
+# runs one.
+# gx sends the rc on its own line ahead of the payload, so a long payload
+# cannot push it out of the capture.  The grep ignores case, as the
+# sibling's does.
 gx_ok 120 e8-heartbeat 'smd admin heartbeat emit --dry-run' "heartbeat contract"
-[ "$GX_RC" -eq 2 ] || fatal "$WORK/e8-heartbeat.out" "smd admin heartbeat emit --dry-run exited $GX_RC after the update (expected 2 on an unconfigured image)"
-grep -q 'heartbeat: not enabled' "$WORK/e8-heartbeat.out" \
-    || fatal "$WORK/e8-heartbeat.out" "heartbeat emit --dry-run exited 2 but without the 'heartbeat: not enabled' message — the CLI contract changed under the update"
-say "heartbeat CLI contract intact after the update: exit 2 + not-enabled ✓"
+[ "$GX_RC" -eq 0 ] || fatal "$WORK/e8-heartbeat.out" "smd admin heartbeat emit --dry-run exited $GX_RC after the update (expected 0: the install enabled the heartbeat, and the update must keep it wired)"
+if grep -qi 'not enabled' "$WORK/e8-heartbeat.out"; then
+    fatal "$WORK/e8-heartbeat.out" "heartbeat emit --dry-run exited 0 but its output says 'not enabled' — the update unwired the heartbeat, or the CLI contract changed under it"
+fi
+say "heartbeat still wired after the update: exit 0, no not-enabled ✓"
 
 say "PHASE E PASS — rolled forward to $TARGET_SHA, idempotent, level, no new findings"
 
