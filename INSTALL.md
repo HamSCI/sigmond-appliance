@@ -283,9 +283,9 @@ smd sink status     # should say: site sink: upload
 
 Nothing recorded before `smd sink upload` leaves the station, with one exception.  The
 station packs each UTC day's GRAPE and magnetometer data after that day ends, between
-01:00 and about 04:00 UTC.  So the packages for the UTC day you run it still go out, and
+01:00 and about 05:00 UTC.  So the packages for the UTC day you run it still go out, and
 so do the previous day's if you run it before that packing has finished.  Run it after
-about 04:00 UTC if you can.  While a packing job runs, `smd sink upload` refuses, names
+about 05:00 UTC if you can.  While a packing job runs, `smd sink upload` refuses, names
 the job, and asks you to run it again when the job ends.  About fifteen minutes after
 `smd sink upload`, search your reporter ID at wsprnet.org (Database) and your callsign at
 pskreporter.info.

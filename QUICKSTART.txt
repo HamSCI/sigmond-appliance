@@ -216,7 +216,7 @@ check reporter ID, callsign and grid, then run:  smd sink status
 Any reason except  new station: ...  means someone set the switch on purpose:
 ask your fleet admin.  If the reason reads  new station: ...  run:
     smd sink upload
-From about 01:00 to about 04:00 UTC, while data packs, that command refuses;
+From about 01:00 to about 05:00 UTC, while data packs, that command refuses;
 run it again when packing ends.
 (INSTALL.md section 9 has the details.)
 
