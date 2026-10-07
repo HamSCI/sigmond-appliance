@@ -208,13 +208,16 @@ Paste it into the PSWS portal for your station, then run:  smd psws verify
 ONE KEY SERVES THE WHOLE MACHINE: if it uploads for more than one station,
 register the same key on each.
 
-NO DATA LEAVES YET: a new station starts with its site sink switch at off.
-It records and decodes but sends no data; only its heartbeat goes out.
+NO SPOTS OR PSWS DATA LEAVE YET: a new station starts with its site sink
+switch at off.  It records and decodes but sends no data; only its heartbeat
+goes out.
 Log in to the VM, watch decode counts with  smd watch wspr  and  smd watch psk,
 check reporter ID, callsign and grid, then run:  smd sink status
-If it gives the reason  new station: ...  run:  smd sink upload
+Any reason except  new station: ...  means someone set the switch on purpose:
+ask your fleet admin.  If the reason reads  new station: ...  run:
+    smd sink upload
 From about 01:00 to about 04:00 UTC, while data packs, that command refuses;
-run it again when packing ends.  Any other reason: ask your fleet admin.
+run it again when packing ends.
 (INSTALL.md section 9 has the details.)
 
 This stick is appliance version @@VERSION@@.  Before the wizard runs, the

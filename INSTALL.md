@@ -251,10 +251,10 @@ From any computer on the same network (addresses are on the console panel):
 
 The decoder VM sits on a private link behind the host, so the host relays these pages for it.
 
-**No data leaves the station yet.**  A new station starts with its site sink switch at
-`off`.  It records and decodes, but sends no spots or data to wsprnet, pskreporter.info,
-wsprdaemon.org or PSWS.  Only its heartbeat, a five-minute health report for the fleet
-board, goes out.
+**No spots or PSWS data leave the station yet.**  A new station starts with its site sink
+switch at `off`.  It records and decodes, but sends no spots or data to wsprnet,
+pskreporter.info, wsprdaemon.org or PSWS.  Only its heartbeat, a five-minute health report
+for the fleet board, goes out.
 
 Log in to the decoder VM (§10) and check three things:
 
@@ -271,16 +271,15 @@ and grid read right, read the site sink switch:
 smd sink status
 ```
 
-A new station says `site sink: off` and gives the reason `new station: …`.  In that case,
-set the site sink switch to `upload`:
+A new station says `site sink: off` and gives the reason `new station: …`.  Any other
+reason means someone set the switch on purpose.  Leave it alone and ask your fleet admin.
+
+With the reason `new station: …`, set the site sink switch to `upload`:
 
 ```
 smd sink upload
 smd sink status     # should say: site sink: upload
 ```
-
-Any other reason means someone set the switch on purpose.  Leave it alone and ask your
-fleet admin.
 
 Nothing recorded before `smd sink upload` leaves the station, with one exception.  The
 station packs each UTC day's GRAPE and magnetometer data after that day ends, between
@@ -309,10 +308,12 @@ Change it: run `passwd` on the host, and in the VM.
 
 **PSWS stations:** the VM's login banner shows this machine's public upload key.
 Paste it into the PSWS portal for your station
-(https://pswsnetwork.eng.ua.edu/), then run `smd psws verify`. Until then data
-records locally; nothing is lost. **One key serves the whole machine:** if it
-uploads for more than one station, register the same key on each. (If you
-restored keys in §4, this is already done.)
+(https://pswsnetwork.eng.ua.edu/), then run `smd psws verify`. Until then the
+station keeps recording locally. Packages built after you run `smd sink upload`
+wait on the station and ship once the key verifies. Packages built before that
+command stay on the station in a held folder and never ship (§9). **One key
+serves the whole machine:** if it uploads for more than one station, register
+the same key on each. (If you restored keys in §4, this is already done.)
 
 ---
 
@@ -359,12 +360,15 @@ until the station knows where it stands:
 3. Answer the questions again. The wizard asks for your reporter ID and PSWS
    ids afresh, and pressing Enter at the PSWS station ID skips PSWS, so have
    them at hand. Type the **new grid square**. A station whose GPSDO has a fix
-   fills in the grid by itself, and may already have moved it; check the grid
+   fills in the grid by itself, and may already have moved the grid; check it
    on the review screen. The wizard keeps your remote-access number and the
    site sink switch as they were.
 4. Log in to the decoder VM and check the identity:
    `grep -E 'reporter_id|callsign|grid' /etc/sigmond/site-profile.toml`.
    (The station pages keep the grid from the first install.) Then run
-   `smd sink status`. If it still gives the reason `new station: …`, run
-   `smd sink upload`, and verify on wsprnet after about 15 minutes. Any other
-   reason means someone set the switch on purpose; ask your fleet admin.
+   `smd sink status`. If it says `site sink: upload`, someone raised the
+   switch earlier; verify on wsprnet after about 15 minutes. If it gives any
+   reason but `new station: …`, or says `hold (legacy)`, someone set the
+   switch on purpose; ask your fleet admin. If it still gives the reason
+   `new station: …`, run `smd sink upload` (§9 explains the packing window),
+   then verify on wsprnet after about 15 minutes.
