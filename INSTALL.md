@@ -1,8 +1,8 @@
 # Sigmond Station — Installation Guide for Everyone
 
 > **Audience:** operator
-> **Status:** draft (v3.69 built; the hardware test is still to come)
-> **Verified against:** sigmond-appliance v3.69 (1c63a35) with sigmond f01e86f, image sha256 f50ffa3b…, on the nested rig test of 2026-10-07 (no RX888); a station run is still to come
+> **Status:** current
+> **Verified against:** sigmond-appliance v3.69 (1c63a35) with sigmond f01e86f, image sha256 f50ffa3b…: the nested rig test and a hardware install on AC0G-ND, 2026-10-07 (the site sink switch read off until `smd sink upload`; nothing recorded while off shipped)
 > **Canonical for:** burning, booting and first-boot wizard of the appliance image
 
 Day-2 operation, troubleshooting beyond §11, remote access and what-not-to-touch live in the [Operator guide](https://github.com/HamSCI/sigmond/blob/main/docs/operator/README.md).
