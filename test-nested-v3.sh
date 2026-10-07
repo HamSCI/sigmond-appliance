@@ -879,6 +879,8 @@ if [ "$_done" != 1 ]; then
     say "    show whether the station wires its timing chain."
     [ "${SINKWIZ:-0}" = 1 ] && say "  ⚠ THE SITE SINK MANIFEST AND smd sink upload CHECKS WERE NOT EVALUATED either."
     [ "${SINKWIZ:-0}" = 1 ] && sink_unchecked "the manifest banner, per-pipeline discard, wspr-recorder's in-process sender and smd sink upload (bring-up did not finish)"
+    say "  ⚠ THE v3.70 SINK FOUNDATION CHECKS WERE NOT EVALUATED either."
+    sink_unchecked "the v3.70 sink foundation: send-record version, psk-recorder's sink writer, sink.db columns (bring-up did not finish)"
 else
     say "bring-up completed (marker present)"
     if [ "${SINKWIZ:-0}" = 1 ]; then
@@ -1009,6 +1011,202 @@ else
                 say "smd sink upload raised the site sink switch; no pipeline discards ✓"
             fi ;;
         esac
+    fi
+
+    # ── the v3.70 sink foundation ───────────────────────────────────────────
+    # Three facts about the image's sink code (tasks/plan-sink-control.md §10.4):
+    #   1. bring-up ran `hs-uploader migrate`, and watermarks.db now sits at
+    #      this release's schema version with nothing pending (D10);
+    #   2. psk-recorder's venv writes through hs-uploader's writer, not
+    #      sigmond's bundled copy (D14);
+    #   3. a sink.db that holds pending_uploads carries producer and local (D12).
+    # This runs after `smd sink upload`, whose manifest write runs migrate too.
+    # On a fresh install bring-up's migrate can meet no watermarks.db at all:
+    # the daemon creates its store on its first start, after that migrate, and
+    # migrate never creates one.  The bring-up log says which happened.
+    #
+    # test-update-v3.sh runs these phases on the PREVIOUS blessed image, whose
+    # hs-uploader has no `migrate`.  Only that run, with SINK_BASE_IMAGE=1, may
+    # skip these checks; anywhere else such an image FATALs, for the reason the
+    # SINKWIZ gate gives.  One KEY:N token per fact, as above.
+    say "── v3.70 sink foundation: the send-record version, psk-recorder's sink writer, sink.db's columns"
+    F70SCRIPT=$(cat <<'F70EOF'
+set -u
+export PYTHONDONTWRITEBYTECODE=1
+EXE=/opt/hs-uploader/venv/bin/hs-uploader
+W=/var/lib/hs-uploader/watermarks.db
+L=/var/log/sigmond/firstrun-bringup.log
+PSKPY=/opt/git/sigmond/psk-recorder/venv/bin/python3
+S=/var/lib/sigmond/sink.db
+[ -x "$EXE" ] || { echo "HSUEXE:0"; exit 0; }
+echo "HSUEXE:1"
+# 1. The send-record version, read as hsupload (the store's owner and the
+#    daemon's user) from the unit's working directory.  An hs-uploader that
+#    predates v3.70 answers "invalid choice: 'migrate'".
+o=$(cd /opt/hs-uploader && runuser -u hsupload -- /usr/bin/env PYTHONDONTWRITEBYTECODE=1 "$EXE" migrate --check --db "$W" 2>&1)
+rc=$?
+printf '%s\n' "$o" | head -6 | sed 's/^/migrate-check| /'
+if printf '%s\n' "$o" | grep -q "invalid choice: 'migrate'"; then echo "MIGCLI:0"; exit 0; fi
+echo "MIGCLI:1"
+echo "MIGRC:$rc"
+echo "MIGVER:$(printf '%s\n' "$o" | sed -n 's/^watermarks\.db: version \([0-9][0-9]*\)$/\1/p' | head -1)"
+echo "MIGPEND:$(printf '%s\n' "$o" | grep -c '^  pending ')"
+echo "MIGNEWER:$(printf '%s\n' "$o" | grep -c 'newer than this hs-uploader')"
+echo "MIGNOSTORE:$(printf '%s\n' "$o" | grep -c '^watermarks\.db: not found at ')"
+# What bring-up's own migrate reported.  Bring-up's manifest step prints
+# migrate's lines, and firstrun-bringup.log takes every step's output.
+if [ -r "$L" ]; then
+    echo "BULOG:1"
+    echo "BULOGV:$(grep -c 'watermarks\.db: version [0-9]' "$L")"
+    echo "BULOGNF:$(grep -c 'watermarks\.db: not found at ' "$L")"
+else
+    echo "BULOG:0"
+fi
+# 2. The writer psk-recorder's venv imports.  -B: write no bytecode into the
+#    checkouts as root.
+if [ -x "$PSKPY" ]; then
+    echo "PSKVENV:1"
+    io=$(cd / && "$PSKPY" -B -c "import sigmond.hamsci_sink as s; print(s.SINK_IMPL)" 2>&1)
+    echo "IMPLRC:$?"
+    echo "IMPLHS:$(printf '%s\n' "$io" | grep -cx 'hs_uploader')"
+    echo "IMPLBUN:$(printf '%s\n' "$io" | grep -cx 'bundled')"
+    printf '%s\n' "$io" | tail -3 | sed 's/^/sink-impl| /'
+else
+    echo "PSKVENV:0"
+fi
+# 3. sink.db's columns, read-only.  Bring-up creates sink.db as an empty
+#    file; pending_uploads appears only once a writer opens it.
+if [ -e "$S" ]; then
+    echo "SINKDB:1"
+    python3 -B - "$S" 2>&1 <<'PY'
+import pathlib, sqlite3, sys
+try:
+    p = pathlib.Path(sys.argv[1]).resolve()
+    c = sqlite3.connect(p.as_uri() + "?mode=ro", uri=True, timeout=10)
+    n = c.execute("SELECT count(*) FROM sqlite_master WHERE type = 'table' "
+                  "AND name = 'pending_uploads'").fetchone()[0]
+    print("SINKTAB:%d" % (1 if n else 0))
+    if n:
+        cols = {r[1] for r in c.execute("PRAGMA table_info(pending_uploads)")}
+        print("SINKPROD:%d" % ("producer" in cols))
+        print("SINKLOCAL:%d" % ("local" in cols))
+except Exception as exc:
+    print("sink-read| %s: %s" % (type(exc).__name__, exc))
+PY
+else
+    echo "SINKDB:0"
+fi
+exit 0
+F70EOF
+)
+    F70=$($SSHN "qm guest exec $VMID --timeout 120 -- bash -lc \"echo $(printf '%s\n' "$F70SCRIPT" | base64 -w0) | base64 -d > /tmp/sig-f70.sh; bash /tmp/sig-f70.sh\"" 2>&1)
+    echo "$F70" | tail -12
+    _f70(){ echo "$F70" | grep -oE "$1:[0-9]+" | head -1 | cut -d: -f2; }
+    _hx=$(_f70 HSUEXE); _mcli=$(_f70 MIGCLI)
+    [ -n "$_hx" ] || { say "FATAL: the v3.70 sink foundation probe returned no answer (guest exec failed, not a verdict)"; echo "$F70" | head -6; exit 1; }
+    [ "$_hx" = 1 ] || { say "FATAL: no /opt/hs-uploader/venv/bin/hs-uploader after a completed bring-up"; exit 1; }
+    [ -n "$_mcli" ] || { say "FATAL: the hs-uploader migrate probe returned no answer (not a verdict)"; echo "$F70" | head -6; exit 1; }
+    if [ "$_mcli" = 0 ]; then
+        if [ "${SINK_BASE_IMAGE:-0}" != 1 ]; then
+            say "FATAL: the image under test has no hs-uploader migrate (its hs-uploader predates v3.70)"
+            say "  only the update rig's base image may lack it; test-update-v3.sh sets SINK_BASE_IMAGE=1 for that run"
+            exit 1
+        fi
+        say "⚠ v3.70 SINK FOUNDATION ASSERTIONS NOT EVALUATED — this image's hs-uploader has no"
+        say "  migrate (pre-v3.70); expected only on the update rig's base image"
+        sink_unchecked "the v3.70 sink foundation (this image's hs-uploader has no migrate; it predates v3.70)"
+    else
+        # 1. the send-record version, and bring-up's own migrate
+        _mrc=$(_f70 MIGRC); _mver=$(_f70 MIGVER); _mpend=$(_f70 MIGPEND)
+        _mnew=$(_f70 MIGNEWER); _mnone=$(_f70 MIGNOSTORE)
+        _bl=$(_f70 BULOG); _blv=$(_f70 BULOGV); _blnf=$(_f70 BULOGNF)
+        [ -n "$_mrc" ] && [ -n "$_mpend" ] && [ -n "$_mnew" ] && [ -n "$_mnone" ] && [ -n "$_bl" ] \
+            || { say "FATAL: the send-record version probe returned no answer (not a verdict)"; echo "$F70" | head -6; exit 1; }
+        [ "$_mrc" = 0 ] || { say "FATAL: hs-uploader migrate --check exited $_mrc"; echo "$F70" | head -6; exit 1; }
+        if [ "$_bl" = 1 ]; then
+            [ -n "$_blv" ] && [ -n "$_blnf" ] \
+                || { say "FATAL: the bring-up log probe returned no answer (not a verdict)"; exit 1; }
+            if [ "$_blv" -ge 1 ]; then
+                say "bring-up's manifest step ran hs-uploader migrate on the store ✓"
+            elif [ "$_blnf" -ge 1 ]; then
+                say "bring-up's manifest step ran hs-uploader migrate before the daemon had created its store ✓"
+            else
+                say "FATAL: firstrun-bringup.log carries no 'watermarks.db:' line: bring-up never ran hs-uploader migrate (D10)"; exit 1
+            fi
+        else
+            say "WARN: no firstrun-bringup.log in the VM; bring-up's own migrate was NOT evaluated"
+            sink_unchecked "bring-up's own hs-uploader migrate (no firstrun-bringup.log)"
+        fi
+        # Did a manifest write run migrate after bring-up?  smd sink upload's
+        # did, unless it refused while packaging ran.
+        _later=0
+        if [ "${SINKWIZ:-0}" = 1 ]; then
+            case "${UP:-}" in *"refusing while packaging runs"*) ;; *) _later=1 ;; esac
+        fi
+        if [ "$_mnone" -ge 1 ]; then
+            say "WARN: no watermarks.db: the daemon has not created its store, so the send-record version was NOT evaluated"
+            sink_unchecked "the send-record version (no watermarks.db: the daemon has not created its store)"
+        elif [ -z "$_mver" ]; then
+            say "FATAL: hs-uploader migrate --check printed no 'watermarks.db: version N' line"; echo "$F70" | head -6; exit 1
+        elif [ "$_mnew" -ge 1 ]; then
+            say "FATAL: watermarks.db reads version $_mver, newer than this image's hs-uploader knows"; exit 1
+        elif [ "$_mpend" = 0 ] && [ "$_mver" -ge 1 ]; then
+            say "watermarks.db at version $_mver with nothing pending (hs-uploader migrate --check) ✓"
+        elif [ "$_later" = 0 ] && [ "$_bl" = 0 ]; then
+            say "WARN: watermarks.db reads version $_mver with $_mpend migration(s) pending.  No bring-up log"
+            say "  says why, and smd sink upload ran no migrate, so the version was NOT evaluated"
+            sink_unchecked "the send-record version (no bring-up log, and smd sink upload ran no migrate)"
+        elif [ "$_later" = 0 ] && [ "$_blv" = 0 ] && [ "$_blnf" -ge 1 ]; then
+            say "WARN: watermarks.db reads version $_mver with $_mpend migration(s) pending.  Bring-up's migrate"
+            say "  ran before the daemon created the store, and smd sink upload ran no migrate, so the version"
+            say "  was NOT evaluated"
+            sink_unchecked "the send-record version (bring-up's migrate ran before the daemon created watermarks.db, and smd sink upload ran no migrate)"
+        else
+            say "FATAL: watermarks.db reads version $_mver with $_mpend migration(s) pending; neither bring-up"
+            say "  nor a later manifest write brought it to this release's version (D10)"; exit 1
+        fi
+        # 2. psk-recorder's sink writer
+        _pv=$(_f70 PSKVENV)
+        [ -n "$_pv" ] || { say "FATAL: the psk-recorder sink writer probe returned no answer (not a verdict)"; exit 1; }
+        if [ "$_pv" = 0 ]; then
+            say "WARN: no psk-recorder venv in this nest; its sink writer was NOT evaluated"
+            sink_unchecked "psk-recorder's sink writer (no psk-recorder venv in this nest)"
+        else
+            _irc=$(_f70 IMPLRC); _ihs=$(_f70 IMPLHS); _ibn=$(_f70 IMPLBUN)
+            [ -n "$_irc" ] && [ -n "$_ihs" ] && [ -n "$_ibn" ] \
+                || { say "FATAL: the psk-recorder sink writer probe returned no answer (not a verdict)"; exit 1; }
+            [ "$_irc" = 0 ] || { say "FATAL: importing sigmond.hamsci_sink in psk-recorder's venv exited $_irc"; echo "$F70" | head -6; exit 1; }
+            if [ "$_ihs" = 1 ]; then
+                say "psk-recorder's venv writes through hs_uploader.sink (SINK_IMPL = hs_uploader) ✓"
+            elif [ "$_ibn" = 1 ]; then
+                say "FATAL: psk-recorder's venv fell back to sigmond's bundled writer (SINK_IMPL = bundled):"
+                say "  the hs-uploader in that venv has no hs_uploader.sink"; exit 1
+            else
+                say "FATAL: sigmond.hamsci_sink.SINK_IMPL printed neither hs_uploader nor bundled"; echo "$F70" | head -6; exit 1
+            fi
+        fi
+        # 3. sink.db's columns
+        _sdb=$(_f70 SINKDB)
+        [ -n "$_sdb" ] || { say "FATAL: the sink.db probe returned no answer (not a verdict)"; exit 1; }
+        if [ "$_sdb" = 0 ]; then
+            say "WARN: no /var/lib/sigmond/sink.db; its producer and local columns were NOT evaluated"
+            sink_unchecked "sink.db's producer and local columns (no /var/lib/sigmond/sink.db)"
+        else
+            _stab=$(_f70 SINKTAB)
+            [ -n "$_stab" ] || { say "FATAL: the sink.db probe could not read the file (not a verdict)"; echo "$F70" | head -6; exit 1; }
+            if [ "$_stab" = 0 ]; then
+                say "WARN: no writer has opened sink.db in this nest (it has no RX888), so it holds no pending_uploads;"
+                say "  its producer and local columns were NOT evaluated"
+                sink_unchecked "sink.db's producer and local columns (no writer has created pending_uploads in this nest)"
+            else
+                _sprod=$(_f70 SINKPROD); _sloc=$(_f70 SINKLOCAL)
+                [ -n "$_sprod" ] && [ -n "$_sloc" ] \
+                    || { say "FATAL: the sink.db column probe returned no answer (not a verdict)"; exit 1; }
+                [ "$_sprod" = 1 ] && [ "$_sloc" = 1 ] \
+                    || { say "FATAL: sink.db's pending_uploads lacks producer ($_sprod) or local ($_sloc)"; exit 1; }
+                say "sink.db's pending_uploads carries producer and local ✓"
+            fi
+        fi
     fi
 fi
 

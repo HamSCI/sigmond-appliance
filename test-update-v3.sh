@@ -18,10 +18,19 @@
 #             scripted): pre-state, `smd update --apply`, idempotence,
 #             SHA-level assertion against --target, no NEW doctor findings,
 #             and the awareness heartbeat contract survives the update.
+#   PHASE E-bis — what `smd align` does once the code has moved: bring-up's
+#             manifest step, which from v3.70 runs `hs-uploader migrate`
+#             first, then a restart of hs-uploader.  watermarks.db must sit
+#             at the release's schema version with nothing pending, and the
+#             daemon must start after the migrate and stay up.
 #   PHASE F — adopt the release manifest with --allow-superset (the updated
 #             guest is a sanctioned superset of the blessed baseline).
 #   PHASE G — `smd admin manifest restore` back to the blessed SHAs, then a
 #             STRICT adopt of the same manifest: the round-trip proof.
+#   PHASE G-bis — the rollback's own re-render (D11), then the restored
+#             release's daemon: the restored smd reads pipelines.toml as up
+#             to date, and the restored daemon starts on the store E-bis
+#             migrated, which keeps its version.
 #
 # Log conventions match the sibling: append-only, one line per step, phases
 # announced with ════ banners and closed with a PASS line, so bless-release
@@ -71,6 +80,16 @@
 #   4-char sha prefix floor             lib/sigmond/doctor.py:354
 #   "USB image under test: ", "PHASE D PASS"
 #                                       test-nested-v3.sh:36, :385
+#   "watermarks.db: version <N>",       hs-uploader src/hs_uploader/cli.py
+#   "  pending <N>: ...",               _cmd_migrate (v3.70).  An older
+#   "newer than this hs-uploader"       hs-uploader exits 2 with
+#                                       "invalid choice: 'migrate'"
+#   "is up to date"                     lib/sigmond/commands/uploader.py
+#                                       cmd_uploader_manifest, check mode
+#   "pipelines.toml re-rendered by the restored sigmond"
+#                                       bin/smd _restore_rerender_uploader,
+#                                       after every verified restore
+#                                       --apply (v3.70, D11)
 set -u
 
 # ── arguments ───────────────────────────────────────────────────────────
@@ -492,7 +511,8 @@ if [ "$RESUME" = 0 ]; then
     [ -f "$NESTED_LOG" ] && PRELINES="$(awk 'END{print NR}' "$NESTED_LOG")"
     say "sibling log $NESTED_LOG is $PRELINES lines before this run"
     # SINK_BASE_IMAGE=1 tells the sibling that this image may predate the site
-    # sink switch; without it the sibling fails any image whose wizard lacks it.
+    # sink switch or v3.70's sink foundation (an hs-uploader with `migrate`);
+    # without it the sibling fails any image that lacks either.
     say "running: USBIMG=$IMGBASE SINK_BASE_IMAGE=1 $NESTED_TEST all   (its output goes to $NESTED_LOG, not here)"
     USBIMG="$IMGBASE" SINK_BASE_IMAGE=1 "$NESTED_TEST" all
     NRC=$?
@@ -873,6 +893,179 @@ say "heartbeat still wired after the update: exit 0, no not-enabled ✓"
 say "PHASE E PASS — rolled forward to $TARGET_SHA, idempotent, level, no new findings"
 
 # ════════════════════════════════════════════════════════════════════════
+say "════ PHASE E-bis: migrate the send-record store, then restart hs-uploader on it ════"
+
+# `smd update --apply` moves code and stops there.  It re-runs no bring-up
+# step and restarts no daemon, so after PHASE E the hs-uploader daemon still
+# runs the code it started with, on a watermarks.db at the base image's
+# schema version.  `smd align` finishes the job in two steps: bring-up's
+# manifest step, which from v3.70 runs `hs-uploader migrate` before anything
+# starts or restarts the daemon (D10), and then a restart of hs-uploader,
+# last, because its checkout moved after it started (bin/smd
+# _align_staleness and _align_restart_uploader).  The rig runs both steps
+# through the production channel.  It cannot run `smd align` itself: align
+# reads GitHub Releases, and nobody has blessed the release under test yet.
+#
+# Every probe below prints one KEY:N line per fact.  gx hands back real
+# lines, so gx_tok anchors the match at both ends and one key never reads
+# another's value.  A key that does not come back means the probe did not
+# answer.  The rig says so, and never reads the gap as 0.
+gx_tok(){ sed -n "s/^$2:\([0-9][0-9]*\)\$/\1/p" "$1" | head -1; }
+
+# The send-record store.  migrate --check runs as hsupload, the store's
+# owner and the daemon's user, from the unit's working directory, so no
+# root-owned file can appear beside the store.  PRAGMA user_version then
+# reads the same number straight from the file, through code that shares
+# nothing with migrate.
+UPL_STORE=$(cat <<'UPLEOF'
+W=/var/lib/hs-uploader/watermarks.db
+EXE=/opt/hs-uploader/venv/bin/hs-uploader
+if [ -e "$W" ]; then echo "WMFILE:1"; else echo "WMFILE:0"; fi
+o=$(cd /opt/hs-uploader && runuser -u hsupload -- /usr/bin/env PYTHONDONTWRITEBYTECODE=1 "$EXE" migrate --check --db "$W" 2>&1)
+echo "MIGRC:$?"
+echo "MIGVER:$(printf '%s\n' "$o" | sed -n 's/^watermarks\.db: version \([0-9][0-9]*\)$/\1/p' | head -1)"
+echo "MIGPEND:$(printf '%s\n' "$o" | grep -c '^  pending ')"
+echo "MIGNEWER:$(printf '%s\n' "$o" | grep -c 'newer than this hs-uploader')"
+printf '%s\n' "$o" | sed 's/^/  migrate --check | /'
+if [ -e "$W" ]; then
+    uv=$(cd / && runuser -u hsupload -- /usr/bin/env PYTHONDONTWRITEBYTECODE=1 /usr/bin/python3 -c '
+import pathlib, sqlite3, sys
+p = pathlib.Path(sys.argv[1]).resolve()
+c = sqlite3.connect(p.as_uri() + "?mode=ro", uri=True, timeout=30)
+print(c.execute("PRAGMA user_version").fetchone()[0])' "$W" 2>&1)
+    case "$uv" in
+        ''|*[!0-9]*) printf '%s\n' "$uv" | tail -3 | sed 's/^/  user_version read | /' ;;
+        *) echo "USERVER:$uv" ;;
+    esac
+fi
+exit 0
+UPLEOF
+)
+
+# The daemon: ACTIVE1 and START1 (ActiveEnterTimestampMonotonic, in µs).
+# With SETTLE=<s> on a line ahead of it, a second read follows the settle:
+# Restart=always brings back a daemon that died after READY, with a new
+# start time, so an unchanged START2 shows it stayed up.
+UPL_UNIT=$(cat <<'UPLEOF'
+SVC=hs-uploader.service
+unit(){
+    if [ "$(systemctl is-active "$SVC" 2>/dev/null)" = active ]; then echo "ACTIVE$1:1"; else echo "ACTIVE$1:0"; fi
+    echo "START$1:$(systemctl show -p ActiveEnterTimestampMonotonic --value "$SVC" 2>/dev/null)"
+}
+unit 1
+if [ "${SETTLE:-0}" -gt 0 ]; then sleep "$SETTLE"; unit 2; fi
+journalctl -u "$SVC" -n 5 --no-pager -o cat 2>/dev/null | sed 's/^/  journal | /'
+exit 0
+UPLEOF
+)
+
+# The guest's CLOCK_MONOTONIC in µs, the clock systemd stamps
+# ActiveEnterTimestampMonotonic with.  The rig can then order a start
+# against one of its own moments without trusting the wall clock, which
+# chrony may step.
+UPL_CLOCK=$(cat <<'UPLEOF'
+echo "MONO:$(python3 -c 'import time; print(time.monotonic_ns() // 1000)')"
+UPLEOF
+)
+
+# ── the store before the manifest step ─────────────────────────────────
+gx_ok 120 eb0-store-pre "$UPL_STORE" "E-bis: the send-record store before the manifest step"
+sed 's/^/      /' "$GX_OUT"
+EB_PRE_FILE="$(gx_tok "$GX_OUT" WMFILE)"
+EB_PRE_VER="$(gx_tok "$GX_OUT" MIGVER)"
+[ -n "$EB_PRE_FILE" ] || fatal "$GX_OUT" "E-bis: the store probe returned no answer (the snippet died before its first line; not a verdict)"
+[ "$EB_PRE_FILE" = 1 ] || fatal "$GX_OUT" "no watermarks.db before the manifest step: the base image's daemon never created its store, so this rig cannot exercise the migrate"
+say "before the manifest step: watermarks.db at version ${EB_PRE_VER:-? (migrate --check gave none)}"
+
+# ── bring-up's manifest step, as align runs it ─────────────────────────
+say "── smd admin uploader manifest --write --enable (from v3.70 it runs hs-uploader migrate before it touches the daemon)"
+EB_MANIFEST=$(cat <<'UPLEOF'
+mono(){ python3 -c 'import time; print(time.monotonic_ns() // 1000)'; }
+echo "T0:$(mono)"
+smd admin uploader manifest --write --enable
+rc=$?
+echo "T1:$(mono)"
+exit $rc
+UPLEOF
+)
+gx_ok 900 eb1-manifest "$EB_MANIFEST" "E-bis: smd admin uploader manifest --write --enable"
+EB_RC="$GX_RC"
+grep -vE '^T[01]:[0-9]+$' "$WORK/eb1-manifest.out" | sed 's/^/      /'
+if grep -q 'Traceback (most recent call last)' "$WORK/eb1-manifest.out"; then
+    fatal "$WORK/eb1-manifest.out" "smd admin uploader manifest --write --enable printed a Python traceback"
+fi
+[ "$EB_RC" -eq 0 ] || fatal "$WORK/eb1-manifest.out" "smd admin uploader manifest --write --enable exited $EB_RC; a failed migrate leaves the daemon as it stood and exits 1 (D10)"
+EB_T0="$(gx_tok "$WORK/eb1-manifest.out" T0)"
+EB_T1="$(gx_tok "$WORK/eb1-manifest.out" T1)"
+[ -n "$EB_T0" ] && [ -n "$EB_T1" ] \
+    || fatal "$WORK/eb1-manifest.out" "E-bis: no guest clock reading around the manifest step (python3 failed in the guest; not a verdict)"
+say "manifest step exit 0; its migrate report: $(grep -m1 'watermarks\.db: ' "$WORK/eb1-manifest.out" || echo 'none printed')"
+
+# ── the store after the manifest step, before anything restarts ────────
+# Read here, ahead of any restart by this rig, a migrated store shows that
+# the manifest step migrated it, not a daemon at its start (D10).
+gx_ok 120 eb2-store "$UPL_STORE" "E-bis: the send-record store after the manifest step"
+sed 's/^/      /' "$GX_OUT"
+EB_FILE="$(gx_tok "$GX_OUT" WMFILE)"
+EB_MRC="$(gx_tok "$GX_OUT" MIGRC)"
+EB_VER="$(gx_tok "$GX_OUT" MIGVER)"
+EB_PEND="$(gx_tok "$GX_OUT" MIGPEND)"
+EB_NEW="$(gx_tok "$GX_OUT" MIGNEWER)"
+EB_UV="$(gx_tok "$GX_OUT" USERVER)"
+[ -n "$EB_FILE" ] && [ -n "$EB_MRC" ] && [ -n "$EB_PEND" ] && [ -n "$EB_NEW" ] \
+    || fatal "$GX_OUT" "E-bis: the store probe returned no answer (not a verdict)"
+[ "$EB_FILE" = 1 ] || fatal "$GX_OUT" "watermarks.db disappeared during the manifest step"
+if [ "$EB_MRC" -ne 0 ]; then
+    if grep -q "invalid choice: 'migrate'" "$GX_OUT"; then
+        fatal "$GX_OUT" "the updated hs-uploader has no migrate command: $TARGET predates v3.70's hs-uploader, or the update never reached it"
+    fi
+    fatal "$GX_OUT" "hs-uploader migrate --check exited $EB_MRC"
+fi
+[ -n "$EB_VER" ] || fatal "$GX_OUT" "hs-uploader migrate --check printed no 'watermarks.db: version N' line"
+[ "$EB_NEW" = 0 ] || fatal "$GX_OUT" "watermarks.db reads version $EB_VER, newer than the updated hs-uploader knows"
+[ "$EB_PEND" = 0 ] || fatal "$GX_OUT" "watermarks.db reads version $EB_VER with $EB_PEND migration(s) still pending: the manifest step did not migrate it (D10)"
+[ "$EB_VER" -ge 1 ] || fatal "$GX_OUT" "watermarks.db reads version $EB_VER with nothing pending: the updated hs-uploader knows no migration at all"
+[ -n "$EB_UV" ] || fatal "$GX_OUT" "E-bis: PRAGMA user_version could not be read (no answer; not a verdict)"
+[ "$EB_UV" = "$EB_VER" ] || fatal "$GX_OUT" "migrate --check reports version $EB_VER, but the file's PRAGMA user_version reads $EB_UV"
+if [ "${EB_PRE_VER:-}" = "$EB_VER" ]; then
+    say "watermarks.db at version $EB_VER, nothing pending; it stood there before the manifest step ✓"
+else
+    say "watermarks.db at version $EB_VER, nothing pending; the manifest step's migrate raised it from ${EB_PRE_VER:-an unversioned store} ✓"
+fi
+
+# ── the daemon starts after the migrate ────────────────────────────────
+gx_ok 60 eb3-unit "$UPL_UNIT" "E-bis: hs-uploader after the manifest step"
+EB_ACT="$(gx_tok "$GX_OUT" ACTIVE1)"
+EB_START="$(gx_tok "$GX_OUT" START1)"
+[ -n "$EB_ACT" ] && [ -n "$EB_START" ] || fatal "$GX_OUT" "E-bis: the hs-uploader probe returned no answer (not a verdict)"
+[ "$EB_ACT" = 1 ] || fatal "$GX_OUT" "hs-uploader is not active after smd admin uploader manifest --enable"
+if [ "$EB_START" -gt "$EB_T0" ]; then
+    say "the manifest step itself started or restarted hs-uploader, after its migrate"
+else
+    # The manifest did not change, so --enable left the running daemon alone.
+    say "the manifest step left hs-uploader running since before the update (its manifest did not change);"
+    say "  restarting it, as smd align does for a daemon whose checkout moved after it started"
+    gx_ok 120 eb4-restart 'systemctl restart hs-uploader.service' "E-bis: systemctl restart hs-uploader"
+    [ "$GX_RC" -eq 0 ] || fatal "$GX_OUT" "systemctl restart hs-uploader.service exited $GX_RC: the updated daemon did not reach READY within its start timeout"
+fi
+gx_ok 180 eb5-unit "SETTLE=15
+$UPL_UNIT" "E-bis: hs-uploader after a 15 s settle"
+sed 's/^/      /' "$GX_OUT"
+EB_A1="$(gx_tok "$GX_OUT" ACTIVE1)"; EB_S1="$(gx_tok "$GX_OUT" START1)"
+EB_A2="$(gx_tok "$GX_OUT" ACTIVE2)"; EB_S2="$(gx_tok "$GX_OUT" START2)"
+[ -n "$EB_A1" ] && [ -n "$EB_S1" ] && [ -n "$EB_A2" ] && [ -n "$EB_S2" ] \
+    || fatal "$GX_OUT" "E-bis: the hs-uploader probe returned no answer (not a verdict)"
+[ "$EB_A1" = 1 ] && [ "$EB_A2" = 1 ] \
+    || fatal "$GX_OUT" "hs-uploader is not active on the migrated store (first read $EB_A1, 15 s later $EB_A2)"
+[ "$EB_S1" = "$EB_S2" ] \
+    || fatal "$GX_OUT" "hs-uploader restarted during the 15 s settle (start $EB_S1, then $EB_S2): the updated daemon dies after READY"
+[ "$EB_S1" -gt "$EB_T0" ] \
+    || fatal "$GX_OUT" "hs-uploader last started at $EB_S1 µs, before the manifest step began at $EB_T0 µs: the daemon running now never restarted after the migrate"
+say "hs-uploader active, started $(( (EB_S1 - EB_T0) / 1000000 )) s after the manifest step began, and still up 15 s later ✓"
+
+say "PHASE E-bis PASS — watermarks.db at version $EB_VER with nothing pending; hs-uploader restarted after the migrate and stayed up"
+
+# ════════════════════════════════════════════════════════════════════════
 say "════ PHASE F: adopt the blessed manifest (superset-tolerant) ════"
 
 # File injection reuses the production idiom — sigmond-wizard.sh's gexec
@@ -965,6 +1158,10 @@ else
     say "WARN: some blessed shas are not local ($(awk '$1=="MISSING"{printf "%s ", $2}' "$WORK/g2-local.out")) → restoring WITHOUT --no-fetch"
 fi
 
+# PHASE G-bis orders the daemon's next start against this moment.
+gx_ok 60 gb0-clock "$UPL_CLOCK" "G-bis: the guest's monotonic clock before the restore"
+GB_T0="$(gx_tok "$GX_OUT" MONO)"
+[ -n "$GB_T0" ] || fatal "$GX_OUT" "G-bis: no guest clock reading before the restore (python3 failed in the guest; not a verdict)"
 gx_ok 1800 g3-restore-apply "smd admin manifest restore $GMANIFEST --apply $NOFETCH" "manifest restore --apply"
 sed 's/^/      /' "$WORK/g3-restore-apply.out"
 [ "$GX_RC" -eq 0 ] || fatal "$WORK/g3-restore-apply.out" "smd admin manifest restore --apply $NOFETCH exited $GX_RC — the rollback path is broken, which is worse than the forward path being broken"
@@ -1055,6 +1252,79 @@ fi
 say "no NEW doctor finding kinds across the rollback beyond the expected 'detached' ✓"
 
 say "PHASE G PASS — rolled back to the blessed baseline and proved it strictly"
+
+# ════════════════════════════════════════════════════════════════════════
+say "════ PHASE G-bis: the restored release re-renders its manifest, and its daemon runs on the migrated store ════"
+
+# Restore moves checkouts only.  From v3.70 it then runs the restored
+# checkout's smd as `admin uploader manifest --write --enable`, so a
+# rolled-back daemon never reads pipelines a newer renderer wrote (D11).
+# That write restarts hs-uploader only when the manifest changed, and v3.70
+# changes none, so the daemon goes on running the code it started with.  Its
+# next start, after a crash, a reboot or a later re-render, runs the restored
+# code on the store E-bis migrated.  This phase makes that start happen now,
+# as smd align would for a daemon whose checkout moved after it started, and
+# proves it.  g4 above already showed every checkout at its blessed sha.
+
+# ── restore printed its re-render line ─────────────────────────────────
+# Restore re-renders after every verified --apply, even one that moved
+# nothing, so a restore that exits 0 always prints this line.  _ok colours
+# the tick ahead of the text; grep -o keeps the text alone.
+GB_RR="$(grep -m1 -o 'pipelines\.toml re-rendered by the restored sigmond.*' "$WORK/g3-restore-apply.out")"
+[ -n "$GB_RR" ] \
+    || fatal "$WORK/g3-restore-apply.out" "restore --apply moved $MOVED component(s) but printed no re-render line: it left pipelines.toml as the newer sigmond rendered it (D11)"
+say "restore: $GB_RR ✓"
+
+# ── the restored smd reads the manifest as its own ─────────────────────
+gx_ok 300 gb1-manifest-check 'smd admin uploader manifest' "G-bis: smd admin uploader manifest (check)"
+sed 's/^/      /' "$GX_OUT"
+[ "$GX_RC" -eq 0 ] || fatal "$GX_OUT" "the restored smd's manifest check exited $GX_RC: pipelines.toml is not what the restored sigmond renders (D11)"
+grep -q 'is up to date' "$GX_OUT" \
+    || fatal "$GX_OUT" "the restored smd's manifest check exited 0 without 'is up to date'; the check's contract changed"
+say "the restored smd reads pipelines.toml as up to date ✓"
+
+# ── the restored daemon starts, after the restore ──────────────────────
+gx_ok 60 gb2-unit "$UPL_UNIT" "G-bis: hs-uploader after the restore"
+GB_ACT="$(gx_tok "$GX_OUT" ACTIVE1)"
+GB_START="$(gx_tok "$GX_OUT" START1)"
+[ -n "$GB_ACT" ] && [ -n "$GB_START" ] || fatal "$GX_OUT" "G-bis: the hs-uploader probe returned no answer (not a verdict)"
+[ "$GB_ACT" = 1 ] || fatal "$GX_OUT" "hs-uploader is not active after the restore and its re-render"
+if [ "$GB_START" -gt "$GB_T0" ]; then
+    say "the restore's re-render restarted hs-uploader itself"
+else
+    say "hs-uploader has run since before the restore (its manifest did not change); restarting it,"
+    say "  as smd align does for a daemon whose checkout moved after it started"
+    gx_ok 120 gb3-restart 'systemctl restart hs-uploader.service' "G-bis: systemctl restart hs-uploader"
+    [ "$GX_RC" -eq 0 ] || fatal "$GX_OUT" "systemctl restart hs-uploader.service exited $GX_RC: the restored daemon did not reach READY on the migrated store"
+fi
+gx_ok 180 gb4-unit "SETTLE=15
+$UPL_UNIT" "G-bis: hs-uploader after a 15 s settle"
+sed 's/^/      /' "$GX_OUT"
+GB_A1="$(gx_tok "$GX_OUT" ACTIVE1)"; GB_S1="$(gx_tok "$GX_OUT" START1)"
+GB_A2="$(gx_tok "$GX_OUT" ACTIVE2)"; GB_S2="$(gx_tok "$GX_OUT" START2)"
+[ -n "$GB_A1" ] && [ -n "$GB_S1" ] && [ -n "$GB_A2" ] && [ -n "$GB_S2" ] \
+    || fatal "$GX_OUT" "G-bis: the hs-uploader probe returned no answer (not a verdict)"
+[ "$GB_A1" = 1 ] && [ "$GB_A2" = 1 ] \
+    || fatal "$GX_OUT" "the restored hs-uploader is not active (first read $GB_A1, 15 s later $GB_A2)"
+[ "$GB_S1" = "$GB_S2" ] \
+    || fatal "$GX_OUT" "the restored hs-uploader restarted during the 15 s settle (start $GB_S1, then $GB_S2): it dies after READY on the migrated store"
+[ "$GB_S1" -gt "$GB_T0" ] \
+    || fatal "$GX_OUT" "hs-uploader last started at $GB_S1 µs, before the restore began at $GB_T0 µs: the daemon running now is not the restored code"
+say "the restored hs-uploader active, started after the restore, and still up 15 s later ✓"
+
+# ── the store keeps the version E-bis gave it ──────────────────────────
+# The restored release's hs-uploader may predate migrate, so read the number
+# from the file.  A rollback never lowers it: a later roll forward must not
+# repeat a migration it already ran.
+gx_ok 120 gb5-store "$UPL_STORE" "G-bis: the send-record store under the restored daemon"
+sed 's/^/      /' "$GX_OUT"
+GB_UV="$(gx_tok "$GX_OUT" USERVER)"
+[ -n "$GB_UV" ] || fatal "$GX_OUT" "G-bis: PRAGMA user_version could not be read (no answer; not a verdict)"
+[ "$GB_UV" = "$EB_VER" ] \
+    || fatal "$GX_OUT" "watermarks.db reads version $GB_UV under the restored daemon, but E-bis left it at $EB_VER: the rollback changed the store's version"
+say "watermarks.db still at version $GB_UV under the restored daemon ✓"
+
+say "PHASE G-bis PASS — the restored release re-rendered its manifest, and its daemon runs on the version-$GB_UV store"
 say "UPDATE RIG COMPLETE — $IMGBASE rolled forward to $TARGET_SHA and back, both directions verified"
 say "evidence: $WORK   log: $LOG"
 exit 0
