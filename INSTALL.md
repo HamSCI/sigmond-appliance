@@ -1,8 +1,8 @@
 # Sigmond Station — Installation Guide for Everyone
 
 > **Audience:** operator
-> **Status:** draft (v3.69 build pending)
-> **Verified against:** pending — v3.69 not yet built
+> **Status:** draft (v3.69 built; the hardware test is still to come)
+> **Verified against:** sigmond-appliance v3.69 (1c63a35) with sigmond f01e86f, image sha256 f50ffa3b…, on the nested rig test of 2026-10-07 (no RX888); a station run is still to come
 > **Canonical for:** burning, booting and first-boot wizard of the appliance image
 
 Day-2 operation, troubleshooting beyond §11, remote access and what-not-to-touch live in the [Operator guide](https://github.com/HamSCI/sigmond/blob/main/docs/operator/README.md).
@@ -70,8 +70,8 @@ fleet admin. Any other name is an ordinary station and nothing here applies.
 
 Ask your fleet admin for the current release — or download links for it:
 
-- `sigmond-appliance-v3.65-20261001-release.img`  (about 5.5 GB)
-- `sigmond-appliance-v3.65-20261001-release.sha256`  (its checksum)
+- `sigmond-appliance-v3.69-20261007-release.img`  (about 5.5 GB)
+- `sigmond-appliance-v3.69-20261007-release.sha256`  (its checksum)
 
 Each release carries its own version and date in the filename; use the names
 you were given wherever this guide shows one.
@@ -80,7 +80,7 @@ The image is published **uncompressed** (`.img`) — there is nothing to
 decompress. With both files in one folder, check it:
 
 ```
-sha256sum -c sigmond-appliance-v3.65-20261001-release.sha256
+sha256sum -c sigmond-appliance-v3.69-20261007-release.sha256
 ```
 
 ---
@@ -92,7 +92,7 @@ USB attributes instead of a letter you type, refuses the disk your computer
 runs from, and reads the stick back to compare every byte:
 
 ```
-./flash-usb.sh sigmond-appliance-v3.65-20261001-release.img
+./flash-usb.sh sigmond-appliance-v3.69-20261007-release.img
 ```
 
 **Any OS, graphical:** balenaEtcher (balena.io/etcher) or Raspberry Pi Imager
@@ -101,7 +101,7 @@ runs from, and reads the stick back to compare every byte:
 **Command line (Linux):**
 ```
 lsblk -dno NAME,SIZE,TRAN,RM,MODEL     # find the stick: check size, removable
-sudo dd if=sigmond-appliance-v3.65-20261001-release.img of=/dev/sdX bs=4M \
+sudo dd if=sigmond-appliance-v3.69-20261007-release.img of=/dev/sdX bs=4M \
         oflag=direct conv=fsync status=progress
 sync
 ```
@@ -111,12 +111,12 @@ sync
 ```
 diskutil list                      # find your stick, e.g. /dev/disk4
 diskutil unmountDisk /dev/disk4
-sudo dd if=sigmond-appliance-v3.65-20261001-release.img of=/dev/rdisk4 bs=4m
+sudo dd if=sigmond-appliance-v3.69-20261007-release.img of=/dev/rdisk4 bs=4m
 ```
 
 **Verify a hand-written stick** by reading back exactly the image's size:
 ```
-IMG=sigmond-appliance-v3.65-20261001-release.img
+IMG=sigmond-appliance-v3.69-20261007-release.img
 sudo head -c "$(stat -c %s $IMG)" /dev/sdX | sha256sum
 sha256sum $IMG                     # the two hashes must match
 ```
