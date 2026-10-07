@@ -488,8 +488,10 @@ if [ "$RESUME" = 0 ]; then
     PRELINES=0
     [ -f "$NESTED_LOG" ] && PRELINES="$(awk 'END{print NR}' "$NESTED_LOG")"
     say "sibling log $NESTED_LOG is $PRELINES lines before this run"
-    say "running: USBIMG=$IMGBASE $NESTED_TEST all   (its output goes to $NESTED_LOG, not here)"
-    USBIMG="$IMGBASE" "$NESTED_TEST" all
+    # SINK_BASE_IMAGE=1 tells the sibling that this image may predate the site
+    # sink switch; without it the sibling fails any image whose wizard lacks it.
+    say "running: USBIMG=$IMGBASE SINK_BASE_IMAGE=1 $NESTED_TEST all   (its output goes to $NESTED_LOG, not here)"
+    USBIMG="$IMGBASE" SINK_BASE_IMAGE=1 "$NESTED_TEST" all
     NRC=$?
     say "sibling rig exited $NRC"
     # rc first, evidence second: both must agree.  A sibling that exited 0

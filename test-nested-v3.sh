@@ -549,11 +549,19 @@ sink_unchecked(){ case "; $SINK_UNCHECKED;" in *"; $*;"*) return 0 ;; esac; SINK
 
 # test-update-v3.sh runs these phases against the PREVIOUS blessed image,
 # whose wizard writes no [uploads] and whose sigmond has no `smd sink`.  Ask
-# the host's wizard what it does; when the answer rules the checks out, say
-# so loudly rather than pass in silence.
+# the host's wizard what it does.  Only that base image may lack the switch:
+# test-update-v3.sh sets SINK_BASE_IMAGE=1 for its run, and there the checks
+# are skipped, loudly.  Anywhere else a wizard without it is FATAL, because
+# bless gate 5 reads only PHASE D PASS, and a pass with every site sink check
+# skipped would bless an image that never sets the switch.
 case "$($SSHN "grep -q '^uploads_toml()' /usr/local/sbin/sigmond-setup && echo SINKWIZ:YES || echo SINKWIZ:NO" 2>&1)" in
     *SINKWIZ:YES*) SINKWIZ=1 ;;
     *SINKWIZ:NO*)  SINKWIZ=0
+                   if [ "${SINK_BASE_IMAGE:-0}" != 1 ]; then
+                       say "FATAL: the image under test has no site sink wizard (its wizard defines no uploads_toml())"
+                       say "  only the update rig's base image may lack it; test-update-v3.sh sets SINK_BASE_IMAGE=1 for that run"
+                       exit 1
+                   fi
                    say "⚠ SITE SINK ASSERTIONS NOT EVALUATED — this image's wizard predates"
                    say "  the site sink switch (pre-v3.69); expected only on the update rig's base image"
                    sink_unchecked "all of them (this image's wizard defines no uploads_toml(); it predates the site sink switch, or the wizard renamed it)" ;;
@@ -870,7 +878,7 @@ if [ "$_done" != 1 ]; then
     say "  ⚠ THE METROLOGY ASSERTION WAS NOT EVALUATED — this run does not"
     say "    show whether the station wires its timing chain."
     [ "${SINKWIZ:-0}" = 1 ] && say "  ⚠ THE SITE SINK MANIFEST AND smd sink upload CHECKS WERE NOT EVALUATED either."
-    [ "${SINKWIZ:-0}" = 1 ] && sink_unchecked "the manifest banner, per-pipeline discard and smd sink upload (bring-up did not finish)"
+    [ "${SINKWIZ:-0}" = 1 ] && sink_unchecked "the manifest banner, per-pipeline discard, wspr-recorder's in-process sender and smd sink upload (bring-up did not finish)"
 else
     say "bring-up completed (marker present)"
     if [ "${SINKWIZ:-0}" = 1 ]; then
@@ -907,6 +915,29 @@ else
             say "all ${_data} data pipeline(s) render discard = true while the site sink switch reads off ✓"
         else
             say "FATAL: ${_d} of ${_data} data pipeline(s) carry discard = true"; exit 1
+        fi
+        # wspr-recorder runs its own in-process sender when its environment
+        # carries WD_RECEIVER_GRID (wspr_recorder/hs_uploader_shim.py from_env),
+        # and the site sink switch does not govern that sender.  A fresh station
+        # keeps it off only because nothing writes the variable.  Count it in
+        # both files wspr-recorder@.service loads: every instance env, and
+        # coordination.env.  A missing file counts 0.
+        WDG=$($SSHN "qm guest exec $VMID --timeout 30 -- bash -lc '
+            echo WSPRENVS:\$(ls -1 /etc/wspr-recorder/env/*.env 2>/dev/null | wc -l)
+            echo WDGRID:\$(cat /etc/wspr-recorder/env/*.env /etc/sigmond/coordination.env 2>/dev/null | grep -cE \"^[[:space:]]*WD_RECEIVER_GRID=\")
+        '" 2>&1)
+        _we=$(echo "$WDG" | grep -oE 'WSPRENVS:[0-9]+' | head -1 | cut -d: -f2)
+        _wg=$(echo "$WDG" | grep -oE 'WDGRID:[0-9]+'   | head -1 | cut -d: -f2)
+        [ -n "$_we" ] && [ -n "$_wg" ] \
+            || { say "FATAL: the wspr-recorder env probe returned no answer (guest exec failed, not a verdict)"; echo "$WDG" | head -4; exit 1; }
+        [ "$_wg" = 0 ] \
+            || { say "FATAL: ${_wg} WD_RECEIVER_GRID line(s) in wspr-recorder's environment:"
+                 say "  wspr-recorder's in-process sender is armed; the site sink switch does not govern it"; exit 1; }
+        if [ "$_we" = 0 ]; then
+            say "WARN: no wspr-recorder instance env in this nest; its in-process sender was NOT evaluated"
+            sink_unchecked "wspr-recorder's in-process sender (this nest wrote no wspr-recorder instance env)"
+        else
+            say "no WD_RECEIVER_GRID in ${_we} wspr-recorder instance env(s) or coordination.env: its in-process sender stays off ✓"
         fi
     fi
     MET=$($SSHN "qm guest exec $VMID --timeout 60 -- bash -lc '
