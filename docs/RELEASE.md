@@ -106,6 +106,14 @@ notes are generated, never hand-typed, and are self-checked for leakage
 (hostnames, IPs, absolute paths, usernames) before publishing — the script
 refuses to publish rather than guess.
 
+**Then update the operator install pages for the new image** (Michael's standing
+policy since 2026-10-07). `INSTALL.md` gets `Status: current` and its
+"Verified against" line names the image commit and the hardware run. The shared
+page "Installing a Sigmond Station", which new operators read, gets rebuilt from
+that `INSTALL.md`: version, file names, and every step the release changed.
+Its link lives in the operators' notes. A release is not finished while either
+page still names the previous image.
+
 ### 4. Rolled
 
 Rolling has the two orientations sigmond's `CONTRIBUTING.md` §3 defines,
