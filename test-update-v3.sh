@@ -842,8 +842,19 @@ for d in /opt/git/sigmond/*/; do
 done
 exit 0' "post-update: behind counts"
 sed 's/^/      /' "$WORK/e6-behind.out"
-BEHIND_BAD="$(awk '$1=="BEHIND" && $3!="0" {printf "%s(%s) ", $2, $3}' "$WORK/e6-behind.out")"
+# A component that smd update itself reports as HELD sits at a pin on purpose,
+# and a pin may lie behind its upstream.  onion did from 2026-10-07 20:02Z:
+# upstream gained its first commit in four years, sigmond's build pin stayed
+# put, and this check then failed a correct update (2026-10-08 18:31Z).  Such
+# a checkout was not left behind by the update.  Only the product's own HELD
+# line exempts a name (read from the idempotence dry run above), so a
+# component that merely failed to pull still fails here.
+HELD_NAMES=" $(sed -E 's/\x1b\[[0-9;]*m//g' "$WORK/e4-update-dry.out" \
+    | sed -nE 's/^[^[:alnum:]]*([[:alnum:]_.+-]+): HELD .*/\1/p' | sort -u | tr '\n' ' ')"
+BEHIND_BAD="$(awk -v held="$HELD_NAMES" '$1=="BEHIND" && $3!="0" && index(held, " " $2 " ")==0 {printf "%s(%s) ", $2, $3}' "$WORK/e6-behind.out")"
+BEHIND_HELD="$(awk -v held="$HELD_NAMES" '$1=="BEHIND" && $3!="0" && index(held, " " $2 " ")>0 {printf "%s(%s) ", $2, $3}' "$WORK/e6-behind.out")"
 [ -z "$BEHIND_BAD" ] || fatal "$WORK/e6-behind.out" "components still behind their upstream after smd update --apply: $BEHIND_BAD"
+[ -z "$BEHIND_HELD" ] || say "held at a pin that lies behind its upstream, by smd update's own HELD line (not a miss): $BEHIND_HELD"
 NOUP="$(awk '$1=="NOUPSTREAM" {printf "%s ", $2}' "$WORK/e6-behind.out")"
 # "no component is behind" is only reassuring if components were ASSESSED.
 # Every checkout detached or missing an upstream would produce zero BEHIND
