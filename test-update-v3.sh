@@ -81,7 +81,7 @@
 #   "USB image under test: ", "PHASE D PASS"
 #                                       test-nested-v3.sh:36, :385
 #   "watermarks.db: version <N>",       hs-uploader src/hs_uploader/cli.py
-#   "  pending <N>: ...",               _cmd_migrate (v3.70).  An older
+#   "  pending <name>",                 _cmd_migrate (v3.70).  An older
 #   "newer than this hs-uploader"       hs-uploader exits 2 with
 #                                       "invalid choice: 'migrate'"
 #   "is up to date"                     lib/sigmond/commands/uploader.py
@@ -1040,7 +1040,21 @@ EB_START="$(gx_tok "$GX_OUT" START1)"
 [ -n "$EB_ACT" ] && [ -n "$EB_START" ] || fatal "$GX_OUT" "E-bis: the hs-uploader probe returned no answer (not a verdict)"
 [ "$EB_ACT" = 1 ] || fatal "$GX_OUT" "hs-uploader is not active after smd admin uploader manifest --enable"
 if [ "$EB_START" -gt "$EB_T0" ]; then
-    say "the manifest step itself started or restarted hs-uploader, after its migrate"
+    # The manifest step started or restarted the daemon.  Task 7 prints
+    # "<why> — restarting hs-uploader.service" ahead of a restart, after
+    # migrate's report, so the step's own output orders the two.  A start by
+    # `enable --now` prints no such line: the code runs migrate first, and the
+    # output cannot show it.
+    EB_LN_MIG="$(grep -n -m1 'watermarks\.db: ' "$WORK/eb1-manifest.out" | cut -d: -f1)"
+    EB_LN_RST="$(grep -n -m1 'restarting hs-uploader' "$WORK/eb1-manifest.out" | cut -d: -f1)"
+    if [ -z "$EB_LN_RST" ]; then
+        say "the manifest step started hs-uploader and printed no restart line:"
+        say "  its output does not order that start against migrate"
+    else
+        [ -n "$EB_LN_MIG" ] && [ "$EB_LN_MIG" -lt "$EB_LN_RST" ] \
+            || fatal "$WORK/eb1-manifest.out" "the manifest step restarted hs-uploader before migrate reported (migrate's 'watermarks.db:' line at ${EB_LN_MIG:-none}, the restart line at $EB_LN_RST): the restarted daemon met a store not yet migrated (D10)"
+        say "the manifest step restarted hs-uploader itself, after migrate's report ✓"
+    fi
 else
     # The manifest did not change, so --enable left the running daemon alone.
     say "the manifest step left hs-uploader running since before the update (its manifest did not change);"
