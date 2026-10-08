@@ -7,6 +7,8 @@
 # dry run, so PHASE E can tell "held at a pin that lies behind its upstream"
 # from "the update left this component behind".  restore_moved reads the count
 # out of restore's success line, which decides what PHASE G may assert.
+# PANEL_DEFECT_RE tells the rig whether the base image's console panel sends
+# the agent request that Proxmox truncates.
 #
 # Why: the first version passed every check I ran by hand and failed on the rig
 # (2026-10-08 23:03Z, "components still behind their upstream: onion(1)").  It
@@ -134,5 +136,34 @@ oldm=$(sed -n 's/.*restored to manifest \xe2\x80\x94 \([0-9]\+\) component(s) mo
 if [ -z "$oldm" ]; then echo "  ok   control: the pattern with the dash spelled out finds no count in the mangled line"
 else echo "  FAIL control: the old pattern found '$oldm' — this fixture does not reproduce the defect"; fail=1; fi
 
-[ "$fail" = 0 ] && echo "PASS: held_names, restore_moved" || echo "FAILED: held_names, restore_moved"
+# ── PANEL_DEFECT_RE ─────────────────────────────────────────────────────
+# The signature test-update-v3.sh looks for in the nested host's console panel
+# before it holds that panel off.  It must match the panel v3.69 and v3.70
+# ship, and must not match a panel that builds the same bytes in the guest.
+eval "$(sed -n '/^# >>> panel_defect_re/,/^# <<< panel_defect_re/p' "$SRC")"
+[ -n "${PANEL_DEFECT_RE:-}" ] || { echo "FAIL: PANEL_DEFECT_RE not found between its markers in $SRC"; exit 1; }
+PD="$T/panel-shipped.sh"
+{
+    printf '%s\n' '_bu=$(timeout 12 qm guest exec "$VMID" --timeout 8 -- /bin/bash -c \'
+    printf '           | grep -E "^\342\224\200\342\224\200\342\224\200|\302\273 " | tail -1 | cut -c1-58 2>/dev/null\n'
+} > "$PD"
+PF="$T/panel-fixed.sh"
+{
+    printf '# the panel prints a rule of \342\224\200 and a \302\273 before each step\n'
+    printf '%s\n' '         p=$(printf "\342\224\200\342\224\200\342\224\200|\302\273 "); \'
+    printf '%s\n' '           | grep -E "^$p" | tail -1 | cut -c1-58 2>/dev/null'
+} > "$PF"
+if LC_ALL=C grep -q "$PANEL_DEFECT_RE" "$PD"; then echo "  ok   the shipped panel line carries the signature"
+else echo "  FAIL the shipped panel line does not match PANEL_DEFECT_RE"; fail=1; fi
+if LC_ALL=C grep -q "$PANEL_DEFECT_RE" "$PF"; then echo "  FAIL a panel that builds the bytes in the guest matches PANEL_DEFECT_RE"; fail=1
+else echo "  ok   a panel that builds the bytes in the guest carries none"; fi
+# The panel this checkout would ship, read from firstboot-v3.sh beside the rig.
+# A note, not a verdict: once the panel changes, the hold stops by itself.
+FB="$(dirname "$SRC")/firstboot-v3.sh"
+if [ -r "$FB" ]; then
+    if LC_ALL=C grep -q "$PANEL_DEFECT_RE" "$FB"; then echo "  note this checkout's panel still carries the signature (the rig will hold it off)"
+    else echo "  note this checkout's panel carries no signature (the rig will leave it running)"; fi
+fi
+
+[ "$fail" = 0 ] && echo "PASS: held_names, restore_moved, PANEL_DEFECT_RE" || echo "FAILED: held_names, restore_moved, PANEL_DEFECT_RE"
 exit "$fail"

@@ -748,6 +748,69 @@ fi
 # The guest agent must answer twice in a row: a lone success during guest
 # boot can be followed by an agent restart (observed 2026-07-26, false
 # FATAL in the sibling).
+# ── the base image's console panel can cost this test an agent call ─────
+# Images up to v3.70 ship a console panel (sigmond-issue, on the Proxmox host,
+# every 5 min and on every network or wizard event) whose bring-up status
+# request holds non-ASCII characters.  Proxmox sends such a `qm guest exec`
+# request short.  The guest agent then drops the NEXT request it receives,
+# from anyone, or (about one time in six) every later one, until a 0xFF byte
+# resets its parser.  On 2026-10-08 three base installs of four went deaf, and
+# one run lost PHASE E-bis to a single dropped ping, five seconds after a
+# panel refresh.  The panel plays no part in what this test measures.  So when
+# the installed panel carries the defect, hold it off for the phases below,
+# reset the agent's parser once, and SAY SO.  A base image that holds the fix
+# keeps its panel running, and the phases below then run beside it.
+#
+# The hold is a drop-in under /run, so it lasts until the nested host reboots
+# and no unit file changes.  A Condition, not a mask: the unit file sits in
+# /etc, which a mask under /run cannot override.
+# >>> panel_defect_re (test-update-smd-lines.sh loads exactly this block)
+# The defect's signature in /usr/local/sbin/sigmond-issue: a byte above 0x7F
+# right after the caret of the status request's grep.  Used under LC_ALL=C.
+PANEL_DEFECT_RE='grep -E "\^[^ -~]'
+# <<< panel_defect_re
+PANEL="$($SSHN "bash -s $VMID '$PANEL_DEFECT_RE'" 2>/dev/null <<'PANELEOF'
+f=/usr/local/sbin/sigmond-issue
+[ -r "$f" ] || { echo NOPANEL; exit 0; }
+LC_ALL=C grep -q "$2" "$f" || { echo CLEAN; exit 0; }
+mkdir -p /run/systemd/system/sigmond-issue.service.d
+printf '[Unit]\nConditionPathExists=/run/sigmond-rig-releases-the-panel\n' \
+    > /run/systemd/system/sigmond-issue.service.d/rig-hold.conf
+systemctl daemon-reload
+systemctl stop sigmond-issue.timer 2>/dev/null
+for i in 1 2 3 4 5 6 7 8 9 10 11 12; do
+    systemctl is-active --quiet sigmond-issue.service || break
+    sleep 5
+done
+python3 - "$1" <<'PANELPY'
+import socket, sys
+s = socket.socket(socket.AF_UNIX); s.settimeout(4)
+try:
+    s.connect("/var/run/qemu-server/%s.qga" % sys.argv[1])
+    s.sendall(b"\xff" + b'{"execute":"guest-sync-delimited","arguments":{"id":4242}}\n')
+    d = b""
+    try:
+        while b"4242" not in d:
+            c = s.recv(4096)
+            if not c:
+                break
+            d += c
+    except socket.timeout:
+        pass
+    print("RESET=%s" % ("answered" if b"4242" in d else "no answer"))
+except Exception as e:
+    print("RESET=not sent (%s)" % e)
+PANELPY
+if systemctl is-active --quiet sigmond-issue.service; then echo HELD=0; else echo HELD=1; fi
+PANELEOF
+)"
+case "$PANEL" in
+    *CLEAN*)   say "console panel on the nested host sends no non-ASCII agent request — left running ✓" ;;
+    *NOPANEL*) say "WARN: no /usr/local/sbin/sigmond-issue on the nested host — nothing to hold" ;;
+    *HELD=1*)  say "⚠ CONSOLE PANEL HELD OFF for the phases below: this base image's panel sends a guest-agent request that Proxmox truncates, which costs whoever speaks to the agent next its request.  The panel plays no part in the update under test.  Agent parser reset: $(printf '%s\n' "$PANEL" | sed -n 's/^RESET=//p')" ;;
+    *)         fatal - "could not hold the console panel on the nested host (answer: ${PANEL:-none}) — its truncated agent request would cost this run an agent call at random" ;;
+esac
+
 AGENT_OK=0
 for i in $(seq 1 40); do
     if $SSHN "qm agent $VMID ping" >/dev/null 2>&1; then
