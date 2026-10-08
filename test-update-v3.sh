@@ -1062,20 +1062,23 @@ else
     gx_ok 120 eb4-restart 'systemctl restart hs-uploader.service' "E-bis: systemctl restart hs-uploader"
     [ "$GX_RC" -eq 0 ] || fatal "$GX_OUT" "systemctl restart hs-uploader.service exited $GX_RC: the updated daemon did not reach READY within its start timeout"
 fi
-gx_ok 180 eb5-unit "SETTLE=15
-$UPL_UNIT" "E-bis: hs-uploader after a 15 s settle"
+# 45 s, not 15: the daemon waits one full interval (30 s, sigmond uploader_manifest.py) before its
+# first pump, and a nest has no recorder traffic to wake it sooner.  A shorter settle never watches
+# a pump run on the migrated store.
+gx_ok 180 eb5-unit "SETTLE=45
+$UPL_UNIT" "E-bis: hs-uploader after a 45 s settle"
 sed 's/^/      /' "$GX_OUT"
 EB_A1="$(gx_tok "$GX_OUT" ACTIVE1)"; EB_S1="$(gx_tok "$GX_OUT" START1)"
 EB_A2="$(gx_tok "$GX_OUT" ACTIVE2)"; EB_S2="$(gx_tok "$GX_OUT" START2)"
 [ -n "$EB_A1" ] && [ -n "$EB_S1" ] && [ -n "$EB_A2" ] && [ -n "$EB_S2" ] \
     || fatal "$GX_OUT" "E-bis: the hs-uploader probe returned no answer (not a verdict)"
 [ "$EB_A1" = 1 ] && [ "$EB_A2" = 1 ] \
-    || fatal "$GX_OUT" "hs-uploader is not active on the migrated store (first read $EB_A1, 15 s later $EB_A2)"
+    || fatal "$GX_OUT" "hs-uploader is not active on the migrated store (first read $EB_A1, 45 s later $EB_A2)"
 [ "$EB_S1" = "$EB_S2" ] \
-    || fatal "$GX_OUT" "hs-uploader restarted during the 15 s settle (start $EB_S1, then $EB_S2): the updated daemon dies after READY"
+    || fatal "$GX_OUT" "hs-uploader restarted during the 45 s settle (start $EB_S1, then $EB_S2): the updated daemon dies after READY"
 [ "$EB_S1" -gt "$EB_T0" ] \
     || fatal "$GX_OUT" "hs-uploader last started at $EB_S1 µs, before the manifest step began at $EB_T0 µs: the daemon running now never restarted after the migrate"
-say "hs-uploader active, started $(( (EB_S1 - EB_T0) / 1000000 )) s after the manifest step began, and still up 15 s later ✓"
+say "hs-uploader active, started $(( (EB_S1 - EB_T0) / 1000000 )) s after the manifest step began, and still up 45 s later ✓"
 
 say "PHASE E-bis PASS — watermarks.db at version $EB_VER with nothing pending; hs-uploader restarted after the migrate and stayed up"
 
@@ -1311,20 +1314,20 @@ else
     gx_ok 120 gb3-restart 'systemctl restart hs-uploader.service' "G-bis: systemctl restart hs-uploader"
     [ "$GX_RC" -eq 0 ] || fatal "$GX_OUT" "systemctl restart hs-uploader.service exited $GX_RC: the restored daemon did not reach READY on the migrated store"
 fi
-gx_ok 180 gb4-unit "SETTLE=15
-$UPL_UNIT" "G-bis: hs-uploader after a 15 s settle"
+gx_ok 180 gb4-unit "SETTLE=45
+$UPL_UNIT" "G-bis: hs-uploader after a 45 s settle"
 sed 's/^/      /' "$GX_OUT"
 GB_A1="$(gx_tok "$GX_OUT" ACTIVE1)"; GB_S1="$(gx_tok "$GX_OUT" START1)"
 GB_A2="$(gx_tok "$GX_OUT" ACTIVE2)"; GB_S2="$(gx_tok "$GX_OUT" START2)"
 [ -n "$GB_A1" ] && [ -n "$GB_S1" ] && [ -n "$GB_A2" ] && [ -n "$GB_S2" ] \
     || fatal "$GX_OUT" "G-bis: the hs-uploader probe returned no answer (not a verdict)"
 [ "$GB_A1" = 1 ] && [ "$GB_A2" = 1 ] \
-    || fatal "$GX_OUT" "the restored hs-uploader is not active (first read $GB_A1, 15 s later $GB_A2)"
+    || fatal "$GX_OUT" "the restored hs-uploader is not active (first read $GB_A1, 45 s later $GB_A2)"
 [ "$GB_S1" = "$GB_S2" ] \
-    || fatal "$GX_OUT" "the restored hs-uploader restarted during the 15 s settle (start $GB_S1, then $GB_S2): it dies after READY on the migrated store"
+    || fatal "$GX_OUT" "the restored hs-uploader restarted during the 45 s settle (start $GB_S1, then $GB_S2): it dies after READY on the migrated store"
 [ "$GB_S1" -gt "$GB_T0" ] \
     || fatal "$GX_OUT" "hs-uploader last started at $GB_S1 µs, before the restore began at $GB_T0 µs: the daemon running now is not the restored code"
-say "the restored hs-uploader active, started after the restore, and still up 15 s later ✓"
+say "the restored hs-uploader active, started after the restore, and still up 45 s later ✓"
 
 # ── the store keeps the version E-bis gave it ──────────────────────────
 # The restored release's hs-uploader may predate migrate, so read the number
