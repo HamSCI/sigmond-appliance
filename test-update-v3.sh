@@ -383,6 +383,38 @@ sha_equal(){
 }
 sha_of(){ awk -v n="$2" '$1==n {print $2; exit}' "$1"; }
 
+# >>> held_names (test-update-smd-lines.sh loads exactly this block)
+# held_names <smd-update-output>: the components that output reports as HELD,
+# one per word, sorted, each followed by a space.
+#
+# ⛔ BYTES, NOT CHARACTERS: every tool below runs under LC_ALL=C and the name's
+# class is spelled out in ASCII.  The first version skipped the line's leading
+# characters with [^[:alnum:]]*.  smd's warning sign reaches the rig
+# double-encoded through `qm guest exec`, as a-circumflex plus two controls;
+# the rig runs in a UTF-8 locale, where a-circumflex IS alphanumeric; so the
+# skip stopped there and no name ever counted as held (2026-10-08 23:03Z).  The
+# name is now whatever name-shaped run of bytes stands right before ": HELD ",
+# and what precedes it on the line does not matter.
+held_names(){
+    LC_ALL=C sed -E 's/\x1b\[[0-9;]*m//g' "$1" 2>/dev/null \
+        | LC_ALL=C sed -nE 's/^(.*[^A-Za-z0-9_.+-])?([A-Za-z0-9_.+-]+): HELD .*/\2/p' \
+        | LC_ALL=C sort -u | tr '\n' ' '
+}
+# <<< held_names
+
+# >>> restore_moved (test-update-smd-lines.sh loads exactly this block)
+# restore_moved <restore-apply-output>: the count in restore's own success
+# line, "restored to manifest <dash> N component(s) moved", or nothing.
+#
+# The pattern used to spell the dash out, and never matched: the dash arrives
+# double-encoded like every other non-ASCII character.  Every run before
+# 2026-10-08 logged "components moved: unknown" and took the cautious branch.
+# So the pattern now names no non-ASCII character at all.
+restore_moved(){
+    LC_ALL=C sed -n 's/.*restored to manifest [^0-9]*\([0-9][0-9]*\) component(s) moved.*/\1/p' "$1" 2>/dev/null | head -1
+}
+# <<< restore_moved
+
 # rows_match <a-rows> <b-rows>: same component set, each pair sha-equal.
 # Prints the first disagreements it finds (for the caller to log) and
 # returns nonzero.  Used to tie a candidate manifest to the one the running
@@ -849,8 +881,7 @@ sed 's/^/      /' "$WORK/e6-behind.out"
 # a checkout was not left behind by the update.  Only the product's own HELD
 # line exempts a name (read from the idempotence dry run above), so a
 # component that merely failed to pull still fails here.
-HELD_NAMES=" $(sed -E 's/\x1b\[[0-9;]*m//g' "$WORK/e4-update-dry.out" \
-    | sed -nE 's/^[^[:alnum:]]*([[:alnum:]_.+-]+): HELD .*/\1/p' | sort -u | tr '\n' ' ')"
+HELD_NAMES=" $(held_names "$WORK/e4-update-dry.out")"
 BEHIND_BAD="$(awk -v held="$HELD_NAMES" '$1=="BEHIND" && $3!="0" && index(held, " " $2 " ")==0 {printf "%s(%s) ", $2, $3}' "$WORK/e6-behind.out")"
 BEHIND_HELD="$(awk -v held="$HELD_NAMES" '$1=="BEHIND" && $3!="0" && index(held, " " $2 " ")>0 {printf "%s(%s) ", $2, $3}' "$WORK/e6-behind.out")"
 [ -z "$BEHIND_BAD" ] || fatal "$WORK/e6-behind.out" "components still behind their upstream after smd update --apply: $BEHIND_BAD"
@@ -1211,7 +1242,7 @@ fi
 # conditioned on this: on a same-day release PHASE E is a no-op, restore
 # moves nothing, and asserting that the tree changed would fail the rig for
 # the calendar.
-MOVED="$(sed -n 's/.*restored to manifest — \([0-9]\+\) component(s) moved.*/\1/p' "$WORK/g3-restore-apply.out" | head -1)"
+MOVED="$(restore_moved "$WORK/g3-restore-apply.out")"
 [ -n "$MOVED" ] || MOVED=unknown
 say "restore --apply exit 0, self-verified ✓ (components moved: $MOVED)"
 
