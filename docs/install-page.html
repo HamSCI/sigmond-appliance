@@ -1,0 +1,412 @@
+<title>Installing a Sigmond Station</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;0,6..72,600;1,6..72,400&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<style>
+/* Layout: one reading column; numbered steps carry a teal rule because the order is the instruction. */
+:root{
+  --paper:#f6f5f2; --panel:#fffefb; --ink:#16191c; --muted:#5b6368; --faint:#8b9298;
+  --rule:#ddd9d1; --hair:#eae6de;
+  --sig:#0d6b60; --sig-soft:#0d6b6022;
+  --gain:#b26a22; --gain-soft:#b26a2222;
+  --warn:#a3302f; --warn-soft:#a3302f1a;
+  --ok:#2f6b3d;
+  --display:Newsreader,Georgia,serif;
+  --body:"IBM Plex Sans",ui-sans-serif,system-ui,sans-serif;
+  --mono:"IBM Plex Mono",ui-monospace,Menlo,monospace;
+}
+@media (prefers-color-scheme:dark){
+  :root:not([data-theme="light"]){
+    --paper:#121417; --panel:#191c20; --ink:#e7e4de; --muted:#9aa2a8; --faint:#6e767c;
+    --rule:#2c3137; --hair:#23272c;
+    --sig:#4fbfae; --sig-soft:#4fbfae22;
+    --gain:#e0964a; --gain-soft:#e0964a22;
+    --warn:#e4736f; --warn-soft:#e4736f1a;
+    --ok:#6fb884; color-scheme:dark;
+  }
+}
+:root[data-theme="dark"]{
+  --paper:#121417; --panel:#191c20; --ink:#e7e4de; --muted:#9aa2a8; --faint:#6e767c;
+  --rule:#2c3137; --hair:#23272c;
+  --sig:#4fbfae; --sig-soft:#4fbfae22;
+  --gain:#e0964a; --gain-soft:#e0964a22;
+  --warn:#e4736f; --warn-soft:#e4736f1a;
+  --ok:#6fb884; color-scheme:dark;
+}
+*{box-sizing:border-box}
+body{background:var(--paper); color:var(--ink); font-family:var(--body);
+  font-size:16.5px; line-height:1.62; -webkit-font-smoothing:antialiased;}
+.wrap{max-width:1080px; margin:0 auto; padding:0 24px; padding-block:0 96px;}
+.col{max-width:66ch; margin:0 auto; min-width:0;}
+h1,h2,h3{font-family:var(--display); font-weight:500; text-wrap:balance; margin:0;}
+h1{font-size:clamp(2.2rem,5.4vw,3.5rem); line-height:1.06; letter-spacing:-.015em;}
+h2{font-size:1.72rem; line-height:1.2; margin:3.4rem 0 .5rem; letter-spacing:-.01em;}
+h3{font-size:1.16rem; margin:2rem 0 .35rem; font-weight:600;}
+p{margin:.85rem 0;}
+a{color:var(--sig);}
+a:focus-visible{outline:2px solid var(--sig); outline-offset:2px;}
+.lede{font-size:1.14rem; color:var(--muted); margin-top:1rem;}
+.kicker{font-family:var(--mono); font-size:.72rem; letter-spacing:.14em;
+  text-transform:uppercase; color:var(--faint); margin:0 0 1.1rem;}
+header{padding-block:72px 8px; border-bottom:1px solid var(--rule); margin-bottom:2rem;}
+.tablewrap{overflow-x:auto;}
+table{width:100%; border-collapse:collapse; margin:1.3rem 0; font-size:.9rem;}
+th,td{text-align:left; padding:.5rem .6rem; border-bottom:1px solid var(--hair); vertical-align:top;}
+th{font-family:var(--mono); font-size:.7rem; letter-spacing:.07em;
+  text-transform:uppercase; color:var(--faint); font-weight:500; border-bottom:1px solid var(--rule);}
+td small{color:var(--muted);}
+tr.hi td{background:var(--sig-soft);}
+.note{border-left:3px solid var(--rule); padding:.2rem 0 .2rem 1.1rem; margin:1.5rem 0;
+  color:var(--muted); font-size:.95rem;}
+.note.key{border-left-color:var(--sig); color:var(--ink);}
+.note.warn{border-left-color:var(--warn);}
+.note b{color:var(--ink);}
+code,.mono{font-family:var(--mono); font-size:.88em; font-variant-numeric:tabular-nums;}
+pre{background:var(--panel); border:1px solid var(--rule); padding:14px 16px;
+  overflow-x:auto; font-family:var(--mono); font-size:.82rem; line-height:1.5;}
+.screen{background:var(--panel); border:1px solid var(--rule); border-left:3px solid var(--gain);
+  padding:12px 16px; font-family:var(--mono); font-size:.82rem; line-height:1.5;
+  overflow-x:auto; white-space:pre; margin:1rem 0;}
+hr{border:0; border-top:1px solid var(--rule); margin:3rem 0;}
+.foot{color:var(--muted); font-size:.87rem;}
+.step{border-left:3px solid var(--sig); padding:.1rem 0 .1rem 1.2rem; margin:2rem 0;}
+.step h3{margin-top:0;}
+.num{font-family:var(--mono); font-size:.72rem; letter-spacing:.12em;
+  text-transform:uppercase; color:var(--sig); display:block; margin-bottom:.3rem;}
+.fill{border-bottom:1px solid var(--rule); display:inline-block; min-width:9rem;}
+.switch{display:inline-block; font-family:var(--mono); font-size:.78rem; letter-spacing:.04em;
+  padding:.05rem .5rem; border:1px solid var(--rule); border-radius:3px; white-space:nowrap;}
+.switch.off{color:var(--warn); border-color:var(--warn); background:var(--warn-soft);}
+.switch.up{color:var(--ok); border-color:var(--ok);}
+ol li, ul li{margin:.25rem 0;}
+@media (max-width:640px){ body{font-size:16px} .wrap{padding:0 16px; padding-block:0 72px} }
+@media print{ body{font-size:11pt} .wrap{max-width:none} .note,.step{break-inside:avoid} }
+</style>
+<div class="wrap">
+<header class="col">
+  <p class="kicker">Sigmond appliance v3.69 &middot; new station</p>
+  <h1>Setting up a new station</h1>
+  <p class="lede">You have a USB stick and a small computer with a radio receiver attached.
+  About an hour from now the machine will record and decode HF signals on its own. It
+  sends nothing to the outside world until you have checked it and said so. Read the
+  first section before you touch anything: it is the only part that needs preparation.</p>
+</header>
+
+<div class="col">
+<div class="note warn">
+  <p><b>This erases the computer's internal disk.</b> Everything on it goes, with no
+  further warning once you boot from the stick. Use a machine you intend to dedicate to
+  this.</p>
+</div>
+
+<h2>1 &middot; Collect these first</h2>
+<p>The setup wizard asks for these after the machine has installed itself. Written down
+in advance, they take two minutes to type. Only the first two are required.</p>
+
+<div class="tablewrap">
+<table>
+<thead><tr><th>The wizard asks, in this order</th><th>Looks like</th><th>Yours</th></tr></thead>
+<tbody>
+<tr><td><b>Reporter ID</b><br><small>required</small></td>
+    <td>AC0G/B4<br><small>your callsign; a suffix after the slash tells apart several stations you run</small></td><td><span class="fill"></span></td></tr>
+<tr><td><b>Grid square</b><br><small>required</small></td>
+    <td>EM38ww<br><small>not asked at all if the GPS clock already has a fix</small></td><td><span class="fill"></span></td></tr>
+<tr><td>Antenna description</td>
+    <td>80 m dipole at 40 ft<br><small>optional, free text</small></td><td><span class="fill"></span></td></tr>
+<tr><td>Wi-Fi network and passphrase</td>
+    <td>only if you will run without a network cable<br><small>asked only when the machine has a Wi-Fi radio</small></td><td><span class="fill"></span></td></tr>
+<tr><td>DASI station? Its unit number</td>
+    <td>Y, then 3 (for DASI-003)<br><small>only for HamSCI DASI stations</small></td><td><span class="fill"></span></td></tr>
+<tr><td>Remote access</td>
+    <td>Y<br><small>lets your fleet admin reach the station for support; the default</small></td><td><span class="fill"></span></td></tr>
+<tr class="hi"><td><b>PSWS station ID</b></td>
+    <td>S000170<br><small>the letter S and six digits, from your PSWS account; Enter skips PSWS</small></td><td><span class="fill"></span></td></tr>
+<tr class="hi"><td><b>GRAPE instrument ID</b></td>
+    <td>171<br><small>the receiver, as numbered on the PSWS portal</small></td><td><span class="fill"></span></td></tr>
+<tr class="hi"><td><b>Magnetometer instrument number</b></td>
+    <td>84<br><small>only if you have a magnetometer; it reports under the same station ID</small></td><td><span class="fill"></span></td></tr>
+<tr><td>Status heartbeats</td>
+    <td>Y<br><small>press Enter to accept the collector it offers</small></td><td><span class="fill"></span></td></tr>
+<tr><td>Station designator</td>
+    <td>AC0G-B4<br><small>offered from your reporter ID; press Enter to accept</small></td><td><span class="fill"></span></td></tr>
+</tbody>
+</table>
+</div>
+
+<div class="note">
+  <p><b>Names beginning <span class="mono">DASI</span> and three digits are reserved</b> for the
+  NSF-funded DASI2 fleet and checked against a roster that ships with the software. If you
+  were issued one, use exactly that; your PSWS IDs come from the roster. A DASI name that
+  is not in the roster gets refused rather than guessed at: check for a typo, or ask your
+  fleet admin.</p>
+  <p><b>No PSWS account yet?</b> Press Enter at the PSWS station ID. The station records and
+  works; PSWS uploads start once you add the IDs and register the station's key.</p>
+</div>
+
+<h3>And physically, before you begin</h3>
+<ul>
+<li>A mini-PC with <b>16 GB of RAM or more</b> and an internal <b>NVMe</b> drive. The installer
+writes only to an NVMe drive.</li>
+<li>The <b>RX888 Mk2 receiver and the LBE-1421 GPS clock</b> plugged in and powered before the
+first boot. A magnetometer, a TS-1 time injector or a local GPS time server, if you have
+one, can plug in now too; the station finds them by itself. Anything missing does not stop
+the install; you can add it later.</li>
+<li>A USB stick of <b>16 GB or more</b>. It gets overwritten.</li>
+<li>A screen and keyboard on the machine, until the wizard finishes.</li>
+<li>A network: a cable to your router (the machine takes its address automatically), or a
+Wi-Fi network you join during setup. Sites with only IPv6 work too.</li>
+</ul>
+
+<h2>2 &middot; Get the image and write the stick</h2>
+<div class="step">
+  <span class="num">step 1</span>
+  <p>Your fleet admin sends you two files, or download links for them: the image,
+  <span class="mono">sigmond-appliance-v3.69-20261007-release.img</span> (about 5.5 GB), and its
+  checksum, <span class="mono">…release.sha256</span>. A later release carries its own version and
+  date in the name; use the names you were given. Keep both in one folder and check the
+  image:</p>
+  <pre>sha256sum -c sigmond-appliance-v3.69-20261007-release.sha256</pre>
+  <p>The image is <b>not compressed</b>: there is nothing to unzip.</p>
+  <p>With the project's tools, this is the safe way to write it. It finds the stick by
+  looking for something removable, <em>refuses</em> the disk your own computer runs from,
+  and reads the stick back afterwards to check every byte:</p>
+  <pre>./flash-usb.sh sigmond-appliance-v3.69-20261007-release.img</pre>
+  <p>balenaEtcher or Raspberry Pi Imager ("Use custom") work too, and both verify the write.
+  By hand, with only the image file:</p>
+  <pre>lsblk -dno NAME,SIZE,TRAN,RM,MODEL        # find the stick, check its size
+sudo dd if=sigmond-appliance-v3.69-20261007-release.img of=/dev/sdX bs=4M \
+        oflag=direct conv=fsync status=progress
+sync</pre>
+  <div class="note warn">
+    <p>Getting <span class="mono">/dev/sdX</span> wrong overwrites that computer's own
+    disk, immediately and without asking. Check the size and that it says removable
+    before you press Enter.</p>
+  </div>
+  <p>Afterwards your computer may show one small drive from the stick, often named "EFI" or
+  "NO NAME". That is normal.</p>
+</div>
+
+<h2>3 &middot; Install</h2>
+
+<div class="step">
+  <span class="num">step 2</span><h3>Boot from the stick</h3>
+  <p>With the receiver connected, power on and boot from the USB stick: press the boot-menu
+  key as it starts (usually F7, F11, F12 or Del) and pick the USB entry. If no menu
+  appears, turn <b>Fast Boot off</b> in the BIOS setup. The installer then runs <b>by
+  itself</b>, asking nothing. This is when the internal disk gets erased.</p>
+  <div class="note warn">
+    <p><b>It can sit on "creating LVs" for a long time</b> when the disk held an earlier
+    install. The installer is working, not hung. Wait at least 30 minutes before you
+    consider switching it off; cutting power there only makes you start again.</p>
+  </div>
+</div>
+
+<div class="step">
+  <span class="num">step 3</span><h3>Wait for it to switch itself off</h3>
+  <p>After a few minutes the machine <b>powers off</b>. That is the signal, not a failure.</p>
+  <p><b>Remove the stick, then switch the machine back on.</b> The power-off is deliberate:
+  some machines always boot from USB first, and would otherwise install again in a loop.</p>
+  <p>When it comes back up, the screen says the host is running and gives its address,
+  its login, and the next step:</p>
+  <div class="screen">NEXT STEP: plug in the Sigmond install USB stick.
+The decoder VM then installs itself automatically.</div>
+</div>
+
+<div class="step">
+  <span class="num">step 4</span><h3>Put the stick back in</h3>
+  <p>Insert <b>the same stick</b> again, into any port, and leave it in. The screen answers:</p>
+  <div class="screen"> Sigmond USB detected (…).
+ Importing the decoder VM (~3 min). LEAVE THE STICK IN.</div>
+</div>
+
+<div class="step">
+  <span class="num">step 5</span><h3>Answer the wizard</h3>
+  <p>The setup questions appear on the screen. <b>Leave the stick in.</b></p>
+  <ol>
+    <li>First the wizard lists the equipment it found: receiver, GPS clock, TS-1,
+    magnetometer. Missing items do not stop it.</li>
+    <li>Then it asks the questions from your sheet, in the order of the table above. Press
+    Enter to accept a suggestion or to skip an optional item.</li>
+    <li>A <b>review screen</b> shows every answer. Type a line number to change one, or
+    <b>Y</b> to apply.</li>
+  </ol>
+  <p>Saying yes to heartbeats lets a dashboard show that your station is alive and
+  healthy. It sends a small report every five minutes, outbound only, and opens nothing
+  on your machine.</p>
+</div>
+
+<div class="step">
+  <span class="num">step 6</span><h3>Remove the stick; it powers off</h3>
+  <p>The machine now tunes itself: it reserves processor cores for the receiver and hands
+  it the USB ports. Then it says:</p>
+  <div class="screen"> &gt;&gt;&gt; INSTALL COMPLETE — REMOVE THE USB STICK NOW &lt;&lt;&lt;
+ As soon as the stick is removed this machine POWERS OFF.</div>
+  <p><b>Pull the stick. The machine switches off. Switch it back on.</b> That full
+  power-off also resets the receiver, which it needs.</p>
+</div>
+
+<div class="step">
+  <span class="num">step 7</span><h3>Let it finish building</h3>
+  <p>After you power it on, the screen shows a status panel. While the panel says
+  <b>STATION IS STILL BUILDING</b>, leave it alone: on a fresh machine that can take tens of
+  minutes. The panel also shows every address and login you need next. From here on you
+  use the station from another computer.</p>
+</div>
+
+<h2>4 &middot; Check it, then turn on uploads</h2>
+
+<div class="note key">
+  <p><b>A new station starts with its site sink switch at <span class="switch off">off</span>.</b>
+  It records and decodes, but sends no spots or data to wsprnet, pskreporter.info,
+  wsprdaemon.org or PSWS. Only its heartbeat, the five-minute health report, goes out. That
+  way nothing leaves until you know the station hears well and reports the right
+  callsign and grid.</p>
+</div>
+
+<div class="step">
+  <span class="num">step 8</span><h3>Look and listen</h3>
+  <p>About fifteen minutes after the panel stops saying it is building, open these from any
+  computer on the same network (the panel shows the host address):</p>
+  <div class="tablewrap">
+  <table>
+  <thead><tr><th>Page</th><th>Address</th><th>You should see</th></tr></thead>
+  <tbody>
+  <tr><td>Live receiver</td><td><span class="mono">http://&lt;host&gt;:8081</span></td><td>a waterfall with signals</td></tr>
+  <tr><td>Station pages</td><td><span class="mono">http://&lt;host&gt;:8000</span></td><td>your callsign and grid, and the timing and GRAPE pages</td></tr>
+  <tr><td>Magnetometer</td><td><span class="mono">http://&lt;host&gt;:8082</span></td><td>its readings, if you have one</td></tr>
+  </tbody>
+  </table>
+  </div>
+  <p>Then log in to the recorder (see section 6) and check that it decodes and knows who it is:</p>
+  <pre>smd watch wspr      # one line per 2-minute cycle, counting WSPR spots; Ctrl-C stops it
+smd watch psk       # the same for FT8 and FT4, every 15 seconds
+grep -E 'reporter_id|callsign|grid' /etc/sigmond/site-profile.toml</pre>
+</div>
+
+<div class="step">
+  <span class="num">step 9</span><h3>Raise the site sink switch</h3>
+  <p>When the waterfall shows signals, the watchers count spots, and the reporter ID,
+  callsign and grid read right, look at the switch:</p>
+  <pre>smd sink status</pre>
+  <p>A new station says <span class="mono">site sink: off</span> with the reason
+  <span class="mono">new station: …</span>. Any other reason means someone set the switch on
+  purpose: leave it alone and ask your fleet admin. With the reason
+  <span class="mono">new station: …</span>, turn uploads on:</p>
+  <pre>smd sink upload
+smd sink status     # should now say: site sink: upload</pre>
+  <p>About fifteen minutes later, search your reporter ID at wsprnet.org (Database) and your
+  callsign at pskreporter.info.</p>
+  <div class="note">
+    <p><b>What ships, and when.</b> Nothing recorded before <span class="mono">smd sink upload</span>
+    leaves the station, with one exception. The station packs each UTC day's GRAPE and
+    magnetometer data after that day ends, between 01:00 and about 05:00 UTC, so the
+    packages for the day you run it still go out, and the previous day's too if its
+    packing has not finished. Run it after about 05:00 UTC if you can. While a packing job
+    runs, <span class="mono">smd sink upload</span> refuses, names the job, and asks you to run it
+    again when the job ends.</p>
+  </div>
+</div>
+
+<h2>5 &middot; Things that look wrong and are not</h2>
+<div class="tablewrap">
+<table>
+<thead><tr><th>You see</th><th>What it means</th></tr></thead>
+<tbody>
+<tr><td>The machine switches itself off, twice</td><td>Both are expected: once after the first install, once after you remove the stick at the end. Power it on each time.</td></tr>
+<tr><td>It asks for the stick a second time</td><td>Expected. The first boot installs the host; the second loads the recording system.</td></tr>
+<tr><td>The keyboard stops working at the end</td><td>Normal. The USB ports now belong to the receiver. The screen says the console is read-only. Use SSH or a web page from another computer.</td></tr>
+<tr><td>No spots on wsprnet or pskreporter</td><td>Expected until you run <span class="mono">smd sink upload</span> (section 4). If <span class="mono">smd sink status</span> already says <span class="mono">upload</span>, check that the antenna is connected, then run <span class="mono">smd status</span> and send its output to your fleet admin.</td></tr>
+<tr><td>"no RX888" or other missing equipment</td><td>The station installs and waits. Plug the RX888 into a <b>blue</b> USB 3 port, straight into the machine with no hub. Then run <span class="mono">sigmond-vm smd status</span> on the host and <span class="mono">sigmond-vm smd adopt &lt;name&gt;</span> with the name it printed. Nothing starts until you ask.</td></tr>
+<tr><td>The receiver shows up, but nothing decodes and the log says <span class="mono">RX888 ADC clock not locked/running</span></td><td>Unplug the USB 3 cable <b>at the RX888</b> and plug it firmly back in. A badly seated plug looks exactly like a missing clock, and a power cycle does not cure it.</td></tr>
+<tr><td>Remote access says FAILED</td><td>The support server may be busy. The station works; turn it on later with <span class="mono">sigmond-setup --reconfigure</span> on the host.</td></tr>
+</tbody>
+</table>
+</div>
+
+<h3>If it says the install cannot continue</h3>
+<p>A block on the screen beginning <span class="mono">INSTALL CANNOT CONTINUE NORMALLY</span>
+means the machine found no working network. Its title says which case:
+<b>no network cable detected</b>, <b>the port is connected but nothing answered</b>, or
+<b>no address offered</b>. The block lists three ways out:</p>
+<ol>
+<li>Move the cable to a port whose link light is on, then reboot.</li>
+<li>Give it a fixed address: <span class="mono">sigmond-setnet 10.0.0.50/24 10.0.0.1</span> (your
+address and router).</li>
+<li>Use Wi-Fi instead: <span class="mono">sigmond-wifi scan</span>, then join your network
+with <span class="mono">sigmond-wifi join YourNetwork</span>, giving the passphrase as the
+screen shows.</li>
+</ol>
+
+<h2>6 &middot; Logins and the password</h2>
+<p>The status panel on the machine's screen lists everything below with your real
+addresses filled in.</p>
+<div class="tablewrap">
+<table>
+<thead><tr><th>What</th><th>How</th></tr></thead>
+<tbody>
+<tr><td>The host (Proxmox)</td><td><span class="mono">ssh root@&lt;host&gt;</span>, or the web page <span class="mono">https://&lt;host&gt;:8006</span></td></tr>
+<tr><td>The recorder (decoder VM)</td><td><span class="mono">ssh -p 2222 sigmond@&lt;host&gt;</span>, relayed by the host, or <span class="mono">ssh sigmond@&lt;recorder&gt;</span> (also <span class="mono">hamsci@</span>)</td></tr>
+</tbody>
+</table>
+</div>
+
+<div class="note key">
+  <p><b>One password for the whole station.</b> It starts as
+  <span class="mono">hamsci-sigmond</span>. The wizard copies the host's root password to
+  the recorder's accounts, so the recorder accepts the same one. <b>Change it</b>: run
+  <span class="mono">passwd</span> on the host and on the recorder. Root login over SSH on
+  the recorder stays off.</p>
+</div>
+
+<h3>Register for PSWS uploads</h3>
+<p>If you gave PSWS IDs, log in to the recorder. Its login banner shows this machine's
+public upload key. Paste that key into the PSWS portal for your station
+(pswsnetwork.eng.ua.edu), then run:</p>
+<pre>smd psws verify</pre>
+<p>Until the key verifies, the station keeps recording. Packages built after you run
+<span class="mono">smd sink upload</span> wait on the station and ship once the key verifies;
+packages built before that command stay in a held folder on the station and never ship.
+<b>One key serves the whole machine:</b> if it uploads for more than one station, register
+the same key on each of them.</p>
+
+<h2>7 &middot; Replacing an existing station?</h2>
+<p>Its upload keys can travel on the stick, so you need not register again.</p>
+<ol>
+<li>On the old machine: <span class="mono">tar czf site-keys.tar.gz -C / etc/hs-uploader/keys home/timestd/.ssh</span></li>
+<li>After writing the stick, your computer shows one small drive from it. Copy
+<span class="mono">site-keys.tar.gz</span> onto it and eject.</li>
+<li>Install as above. The wizard restores the keys and, if you gave PSWS IDs, checks the
+PSWS login for you.</li>
+</ol>
+
+<h2>8 &middot; Moving a station</h2>
+<p>A station often gets built and tested in one place, with the wrong grid square, and
+then shipped to its permanent home. Keep the site sink switch at
+<span class="switch off">off</span> until the station knows where it stands.</p>
+<ol>
+<li>At the staging site, leave the switch at <span class="mono">off</span>; a new station
+starts that way. Check reception with the waterfall and <span class="mono">smd watch wspr</span>.
+Only the heartbeat goes out.</li>
+<li>At the destination, log in to the host and run <span class="mono">sigmond-setup --reconfigure</span>.</li>
+<li>Answer the questions again. The wizard asks for your reporter ID and PSWS IDs afresh,
+and Enter at the PSWS station ID skips PSWS, so have them at hand. Type the <b>new grid
+square</b>. A GPS clock with a fix fills in the grid by itself and may already have
+changed it; check it on the review screen. The wizard keeps your remote-access number and
+the site sink switch as they were, and restarts the recorders itself.</li>
+<li>On the recorder, check the identity with
+<span class="mono">grep -E 'reporter_id|callsign|grid' /etc/sigmond/site-profile.toml</span>,
+then run <span class="mono">smd sink status</span>. With the reason
+<span class="mono">new station: …</span>, run <span class="mono">smd sink upload</span>. If it
+already says <span class="switch up">upload</span>, someone raised it earlier. Any other
+reason, or <span class="mono">hold (legacy)</span>: ask your fleet admin. Check wsprnet about
+fifteen minutes later.</li>
+</ol>
+
+<hr>
+<p class="foot">For sigmond-appliance v3.69, blessed 2026-10-07. The steps, screen messages and
+logins here follow the release's installation guide, verified on the image builder's
+nested test and on a hardware install at AC0G-ND. Day-2 operation, health checks and
+troubleshooting live in the operator guide:
+<span class="mono">github.com/HamSCI/sigmond/blob/main/docs/operator/README.md</span></p>
+</div>
+</div>

@@ -83,9 +83,10 @@ rollout, not here.
 ### 3. Blessed
 
 `bless-release.sh <version> [--apply]` is the gate. It refuses to create a
-GitHub Release unless all seven checks pass (version format, tag reachable
+GitHub Release unless all eight checks pass (version format, tag reachable
 from `origin/main`, clean tree, verified checksum, manifest with a
-components block, tied test evidence, no pre-existing Release for the tag).
+components block, tied test evidence, no pre-existing Release for the tag,
+install instructions that name this release).
 Dry-run by default — `--apply` is required to create anything, and even
 then only after every gate has passed.
 
@@ -106,13 +107,42 @@ notes are generated, never hand-typed, and are self-checked for leakage
 (hostnames, IPs, absolute paths, usernames) before publishing — the script
 refuses to publish rather than guess.
 
-**Then update the operator install pages for the new image** (Michael's standing
-policy since 2026-10-07). `INSTALL.md` gets `Status: current` and its
-"Verified against" line names the image commit and the hardware run. The shared
-page "Installing a Sigmond Station", which new operators read, gets rebuilt from
-that `INSTALL.md`: version, file names, and every step the release changed.
-Its link lives in the operators' notes. A release is not finished while either
-page still names the previous image.
+**Update the operator install pages before you bless** (Michael's standing
+policy since 2026-10-07; gate 7 enforces it from 2026-10-08). The order runs:
+cut the tag, build, run the hardware test, update the instructions, bless. The
+tag stays put. Only the instructions move, in a commit after the tag.
+
+After the hardware test, edit `INSTALL.md`. Set `**Status:** current`, and make
+the `**Verified against:**` line name `sigmond-appliance <version>`, the image
+commit and the hardware run. Bring `docs/install-page.html` level with it:
+version, file names, and every step the release changed. Commit both files and
+push them to `origin/main`.
+
+Gate 7 reads both files with `git show origin/main:<path>`. It never reads the
+tag, whose tree still holds the previous release's words, and it never reads
+the working tree. Gate 1 fetches `origin` first. Gate 7 passes only when:
+
+- `INSTALL.md` has a `**Status:**` line that reads `current`;
+- its `**Verified against:**` line holds `sigmond-appliance <version>` as a
+  whole token, so `v3.7` does not satisfy `v3.70` and `v3.70` does not satisfy
+  `v3.701`;
+- `docs/install-page.html` holds the exact file name of the image gate 3
+  verified.
+
+A release is not blessable while either file still names the previous image.
+When gate 7 fails, its detail names which of the three conditions failed.
+
+On `--apply`, the bless puts two files beside the image in every publish
+target's download directory, after the image lands there: `<stem>.INSTALL.md`
+and `<stem>.INSTALL.html`, where `<stem>` stands for the image name without
+`.img`. They carry the exact bytes gate 7 checked. They go to the publish
+targets only. They stay off the GitHub Release and out of its notes. A failed
+upload warns with a by-hand recipe and leaves the bless at exit 0, the way a
+failed promotion does.
+
+The shared web page "Installing a Sigmond Station", which new operators read,
+comes from the same `docs/install-page.html`. Republish it after the bless.
+Its link lives in the operators' notes.
 
 ### 4. Rolled
 

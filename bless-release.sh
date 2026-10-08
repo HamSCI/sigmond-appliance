@@ -17,15 +17,21 @@
 #   4. the manifest exists and contains a components block
 #   5. test evidence exists and records a PASS for THIS exact image
 #   6. no Release already exists for this tag
+#   7. the install instructions name this release: origin/main's INSTALL.md
+#      reads Status: current and Verified against: sigmond-appliance <version>,
+#      and origin/main's docs/install-page.html names this image's file name
 #
 # Dry-run by default, matching smd update's contract on this fleet.
 # --apply is required to create anything, and even then only after every
-# gate above has passed.
+# gate above has passed.  On --apply the bless also publishes the two
+# instruction files beside the image at every publish target, as
+# <image stem>.INSTALL.md and <image stem>.INSTALL.html.
 #
 # Usage: bless-release.sh <version> [--apply]
 #
 # Env overrides (used by the verification suite to point at scratch
-# fixtures instead of the real rig -- never required for normal use):
+# fixtures instead of the real rig -- never required for normal use;
+# test-bless-instructions.sh builds such fixtures for gate 7 and the publish):
 #   APPLIANCE_REPO  sigmond-appliance checkout (default: $HOME/appliance/repos/sigmond-appliance)
 #   RIG_DIR         build/test staging dir: images, .sha256, .manifest.txt,
 #                    test-v3.log (default: $HOME/appliance/v3)
@@ -310,11 +316,124 @@ else
     gate_fail "6 (no existing Release)" "could not verify -- gh release view failed: $GH_OUT"
 fi
 
+# ---- Gate 7: the install instructions name THIS release ---------------------
+#
+# ⛔ Michael's standing policy since 2026-10-08: every build gets updated
+# install instructions, and the bless carries them.  The rule had stood for one
+# day as a paragraph in docs/RELEASE.md, and nothing enforced it.  Every other
+# gate reads the image or the tag.  None read the words an operator follows to
+# install the image, which lived in INSTALL.md and on a hand-published page.
+#
+# WHERE the gate reads.  The tag is cut BEFORE the hardware test.  INSTALL.md
+# gets its "Verified against" line AFTER that test, in a commit later than the
+# tag.  So at bless time this release's instructions live at origin/main, not in
+# the tag's tree (which still holds the previous release's words) and not in the
+# working tree (which may differ from what the team pushed).  Gate 1 fetches
+# origin first and warns when the fetch fails.  This gate reads through
+# `git show origin/main:<path>`.
+#
+# The bytes it reads go into a temp directory under the names --apply
+# publishes, so the files published are the files checked here -- no second
+# read, nothing a late fetch could change between the check and the upload.
+#
+# PASS needs all three:
+#   - INSTALL.md has a **Status:** line that reads exactly "current"
+#   - INSTALL.md has a **Verified against:** line that holds
+#     "sigmond-appliance <VERSION>" as a whole token: v3.7 does not satisfy
+#     v3.70, v3.70 does not satisfy v3.701, v3.70.1 or v3.70-rc1
+#   - docs/install-page.html holds this image's exact file name
+INSTR_DIR=""
+INSTR_STEM=""
+INSTR_MD=""
+INSTR_HTML=""
+if [ -n "${IMGBASE:-}" ]; then INSTR_STEM="${IMGBASE%.img}"; fi
+INSTR_DIR="$(mktemp -d)"
+INSTR_MD="$INSTR_DIR/${INSTR_STEM:-unresolved}.INSTALL.md"
+INSTR_HTML="$INSTR_DIR/${INSTR_STEM:-unresolved}.INSTALL.html"
+# This trap replaces gate 5b's, so it removes 5b's files as well.
+trap 'rm -f "${TAGFB:-}" "${RENDERED:-}"; [ -n "${INSTR_DIR:-}" ] && rm -rf "$INSTR_DIR"' EXIT
+
+# _md_field <file> <label> — the text after the first "**<label>:**" line, with
+# edge blanks stripped.  [:space:] covers the CR of a CRLF file.  Quote marks
+# ("> ") before the label do not matter.  Prints nothing and fails when the
+# line is absent.
+_md_field(){
+    local line
+    line="$(grep -m1 -E "^[[:space:]>]*\*\*$2:\*\*" "$1")"
+    [ -n "$line" ] || return 1
+    line="${line#*"**$2:**"}"
+    line="${line#"${line%%[![:space:]]*}"}"
+    line="${line%"${line##*[![:space:]]}"}"
+    printf '%s\n' "$line"
+}
+
+# _tok_in <text> <needle> — succeeds when needle occurs in text as a whole
+# token.  Fixed-string, so the dots in a version stay dots.  The character
+# before the needle must not belong to a word; the character after must not
+# extend it (a letter, digit, "_" or "-", or a "." that a digit or letter
+# follows).  A comma, a bracket, a space, or a full stop that ends the line
+# all count as the end of the token.
+_tok_in(){
+    local text="$1" needle="$2" i=0 n=${#2} len=${#1} before after after2
+    while [ $((i+n)) -le "$len" ]; do
+        if [ "${text:i:n}" = "$needle" ]; then
+            before=""; [ "$i" -gt 0 ] && before="${text:i-1:1}"
+            after="${text:i+n:1}"; after2="${text:i+n+1:1}"
+            case "$before" in [A-Za-z0-9_-]) i=$((i+1)); continue ;; esac
+            case "$after" in [A-Za-z0-9_-]) i=$((i+1)); continue ;; esac
+            if [ "$after" = "." ]; then
+                case "$after2" in [A-Za-z0-9]) i=$((i+1)); continue ;; esac
+            fi
+            return 0
+        fi
+        i=$((i+1))
+    done
+    return 1
+}
+
+G7_NAME="7 (install instructions name this release)"
+G7_BAD=()
+_have_inst=0; _have_page=0
+git -C "$REPO" show "origin/main:INSTALL.md" > "$INSTR_MD" 2>/dev/null && _have_inst=1
+git -C "$REPO" show "origin/main:docs/install-page.html" > "$INSTR_HTML" 2>/dev/null && _have_page=1
+
+if [ $_have_inst -eq 0 ]; then
+    G7_BAD+=("INSTALL.md is not readable at origin/main")
+else
+    if ! _st="$(_md_field "$INSTR_MD" "Status")"; then
+        G7_BAD+=("INSTALL.md has no **Status:** line")
+    elif [ "$_st" != "current" ]; then
+        G7_BAD+=("INSTALL.md Status is not 'current' (it reads '$_st')")
+    fi
+    if ! _va="$(_md_field "$INSTR_MD" "Verified against")"; then
+        G7_BAD+=("INSTALL.md has no **Verified against:** line")
+    elif ! _tok_in "$_va" "sigmond-appliance $VERSION"; then
+        G7_BAD+=("INSTALL.md Verified against does not name 'sigmond-appliance $VERSION'")
+    fi
+fi
+if [ $_have_page -eq 0 ]; then
+    G7_BAD+=("docs/install-page.html is not readable at origin/main")
+elif [ -z "${IMGBASE:-}" ]; then
+    G7_BAD+=("no image to check the page against (see gate 3)")
+elif ! grep -qF -- "$IMGBASE" "$INSTR_HTML"; then
+    G7_BAD+=("docs/install-page.html does not name '$IMGBASE'")
+fi
+
+if [ ${#G7_BAD[@]} -eq 0 ]; then
+    gate_pass "$G7_NAME" \
+        "INSTALL.md is current and verified against sigmond-appliance $VERSION; docs/install-page.html names $IMGBASE (origin/main $(git -C "$REPO" rev-parse --short origin/main 2>/dev/null))"
+else
+    _g7_join=""
+    for _b in "${G7_BAD[@]}"; do _g7_join="${_g7_join:+$_g7_join; }$_b"; done
+    gate_fail "$G7_NAME" \
+        "$_g7_join -- update INSTALL.md and docs/install-page.html for this image, commit and push them, then bless (docs/RELEASE.md, rung 3)"
+fi
+
 # ---- report -----------------------------------------------------------------
 say "=== bless-release.sh $VERSION ($([ $APPLY -eq 1 ] && echo apply || echo dry-run)) ==="
 i=0
 while [ $i -lt ${#GATE_NAMES[@]} ]; do
-    printf '  [gate %-40s %-4s %s\n' "${GATE_NAMES[$i]}]" "${GATE_RESULTS[$i]}" "${GATE_DETAIL[$i]}"
+    printf '  [gate %-44s %-4s %s\n' "${GATE_NAMES[$i]}]" "${GATE_RESULTS[$i]}" "${GATE_DETAIL[$i]}"
     i=$((i+1))
 done
 
@@ -334,6 +453,7 @@ if [ $APPLY -eq 0 ]; then
     say "DRY RUN -- would create Release $VERSION on $GH_REPO attaching:"
     say "  $(basename "$MANIFEST")"
     say "  $(basename "$SHAFILE")"
+    say "DRY RUN -- would also publish $(basename "$INSTR_MD") and $(basename "$INSTR_HTML") beside the image at every publish target (from origin/main)"
     say "Re-run with --apply to publish. Creating a public Release is outward-facing and requires explicit human authorization."
     exit 0
 fi
@@ -777,6 +897,20 @@ if [ $RC -eq 0 ]; then
                 _link="$(pub_link "$_d" "$IMGBASE")"
                 say "  [$_lab] promoted: $_d/$IMGBASE"
                 [ -n "$_link" ] && say "  [$_lab] link: $_link"
+                # The install instructions go beside the image, in the blessed
+                # directory -- never into pending/, and never before the image
+                # itself landed.  The files are the ones gate 7 checked
+                # (INSTR_MD and INSTR_HTML), already named <stem>.INSTALL.*.
+                # A failed upload costs a WARNING and the by-hand recipe, like
+                # a failed promotion: the Release exists and stays authoritative.
+                if pub_put "$_d" "" "$INSTR_MD" "$INSTR_HTML" 2>/dev/null; then
+                    say "  [$_lab] instructions: $(basename "$INSTR_MD"), $(basename "$INSTR_HTML")"
+                else
+                    _allok=0
+                    say "  [$_lab] WARNING: could not publish the install instructions to $_d"
+                    say "  [$_lab]   by hand, in a checkout with origin/main fetched: git show origin/main:INSTALL.md > '$(basename "$INSTR_MD")'; git show origin/main:docs/install-page.html > '$(basename "$INSTR_HTML")'"
+                    say "  [$_lab]   then copy both files beside $IMGBASE in $_d"
+                fi
                 # Prune what this bless supersedes, only AFTER the promote
                 # landed, so a target is never left without the image.  Newer
                 # candidates stay; see pub_superseded.
@@ -801,7 +935,7 @@ if [ $RC -eq 0 ]; then
         # this point.  Say so loudly rather than unwind a Release over a
         # download convenience -- but name every target that missed, so a
         # partial publish can never read as a complete one.
-        [ "$_allok" = 1 ] || say "NOTE: some targets above did not receive $IMGBASE — the GitHub Release is authoritative."
+        [ "$_allok" = 1 ] || say "NOTE: some targets above did not receive $IMGBASE or its install instructions (see the WARNING lines) — the GitHub Release is authoritative."
     fi
 fi
 exit $RC
