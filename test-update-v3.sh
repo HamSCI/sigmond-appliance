@@ -1284,7 +1284,19 @@ fi
 gx_ok 60 gb0-clock "$UPL_CLOCK" "G-bis: the guest's monotonic clock before the restore"
 GB_T0="$(gx_tok "$GX_OUT" MONO)"
 [ -n "$GB_T0" ] || fatal "$GX_OUT" "G-bis: no guest clock reading before the restore (python3 failed in the guest; not a verdict)"
-gx_ok 1800 g3-restore-apply "smd admin manifest restore $GMANIFEST --apply $NOFETCH" "manifest restore --apply"
+# ⛔ NOT INSIDE THE GUEST AGENT'S OWN CGROUP.  sigmond caps
+# qemu-guest-agent.service at MemoryMax=128M (sigmond's
+# systemd/qemu-guest-agent-selfheal.conf), so that a runaway exec buffer kills
+# the agent instead of wedging it.  That cap covers every process a
+# `qm guest exec` starts.  From v3.70 restore runs the restored checkout's smd
+# as a child, to re-render pipelines.toml (D11), and two Python processes plus
+# the inventory call they make need more than 128 MB together.  On 2026-10-08
+# 23:46:26Z the kernel killed that child, systemd then stopped the whole unit
+# (OOMPolicy=stop), and the agent restarted under this very call.  An operator
+# runs a restore from an ssh session, which no such cap covers.  So the rig
+# gives this one command a transient unit of its own; every other command still
+# goes through the agent as before.
+gx_ok 1800 g3-restore-apply "systemd-run --quiet --wait --pipe --collect --unit=rig-restore-apply /bin/bash -lc 'smd admin manifest restore $GMANIFEST --apply $NOFETCH'" "manifest restore --apply"
 sed 's/^/      /' "$WORK/g3-restore-apply.out"
 [ "$GX_RC" -eq 0 ] || fatal "$WORK/g3-restore-apply.out" "smd admin manifest restore --apply $NOFETCH exited $GX_RC — the rollback path is broken, which is worse than the forward path being broken"
 # The success line is `admin manifest restore: restored to manifest — N
