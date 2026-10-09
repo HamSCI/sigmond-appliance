@@ -26,6 +26,9 @@ ok(){  printf '  ok    %s\n' "$1"; pass=$((pass+1)); }
 bad(){ printf '  FAIL  %s\n        %s\n' "$1" "${2:-}"; fail=$((fail+1)); }
 has(){   case "$2" in *"$3"*) ok "$1" ;; *) bad "$1" "missing: $3" ;; esac; }
 lacks(){ case "$2" in *"$3"*) bad "$1" "found: $3" ;; *) ok "$1" ;; esac; }
+# at <seconds> : the UTC stamp the switch writes as checked_at, that many
+# seconds from now (negative = in the past).
+at(){ date -u -d "@$(( $(date -u +%s) + $1 ))" +%Y-%m-%dT%H:%M:%SZ; }
 
 sed -n '/^# >>> rac_block/,/^# <<< rac_block/p' "$SRC" > "$T/block.sh"
 [ -s "$T/block.sh" ] || { echo "FAIL: no rac_block between its markers in $SRC"; exit 1; }
@@ -57,8 +60,15 @@ TOML
 # panel <scene dir> : run the block as sigmond-issue would, print $RACBLOCK.
 # A scene holds: marks/ (rac-number, rac-tier, ...), state (what the switch
 # writes; absent = the switch leaves none), no-switch (this host has no
-# switch script), no-toml, unit-active (for the text of v3.70 and before).
+# switch script), no-exec (the script is there without its execute bit),
+# switch-leaves (the script exits 1 and writes nothing), preseed (the state
+# file already stands in the run dir before the panel asks), no-toml,
+# unit-active (for the text of v3.70 and before).
 # $BLOCK names the block to run; the control below points it at a mutant.
+# The stub switch records its arguments (switch.calls) and what it inherited
+# (switch.env); the stub timeout records its own (timeout.calls).  The panel
+# runs with stdin on a scratch file and fd 9 open, as sigmond-issue does with
+# its lock, so the stub can tell whether the block took them away.
 BLOCK="$T/block.sh"
 panel(){
     local d="$1"
@@ -66,19 +76,23 @@ panel(){
         export RAC_MARKS="$d/marks" RAC_STATE_FILE="$d/run/rac-state" RAC_TOML="$d/frpc-host.toml"
         export RAC_SWITCH="$d/switch"
         mkdir -p "$d/marks" "$d/run"
+        : > "$d/stdin-marker"; exec 0< "$d/stdin-marker" 9> "$d/lock9"
         [ -e "$d/no-toml" ] || cp "$T/frpc-host.toml" "$d/frpc-host.toml"
         if [ ! -e "$d/no-switch" ]; then
             { echo '#!/bin/bash'
               echo "echo \"\$*\" >> '$d/switch.calls'"
-              echo "[ -e '$d/state' ] && cp '$d/state' '$d/run/rac-state'"
-              echo 'exit 0'; } > "$d/switch"
+              echo "echo \"stdin=\$(readlink /proc/\$\$/fd/0) fd9=\$([ -e /proc/\$\$/fd/9 ] && echo open || echo closed)\" >> '$d/switch.env'"
+              if [ -e "$d/switch-leaves" ]; then echo 'exit 1'
+              else echo "[ -e '$d/state' ] && cp '$d/state' '$d/run/rac-state'"; echo 'exit 0'; fi; } > "$d/switch"
             chmod 755 "$d/switch"
+            [ -e "$d/no-exec" ] && chmod 644 "$d/switch"
         fi
+        [ -e "$d/preseed" ] && cp "$d/state" "$d/run/rac-state"
         HOSTIP=192.168.1.50
         ipurl(){ printf '%s\n' "${1:-}"; }
         systemctl(){ [ "$1" = is-active ] && [ -e "$d/unit-active" ]; }
         curl(){ printf '{"tcp":[{"status":"running"},{"status":"running"},{"status":"running"},{"status":"running"},{"status":"running"},{"status":"running"}]}\n'; }
-        timeout(){ shift; "$@"; }
+        timeout(){ echo "$*" >> "$d/timeout.calls"; [ "${1:-}" = -k ] && shift 2; shift; "$@"; }
         # shellcheck disable=SC1090
         . "$BLOCK"
         printf '%s\n' "$RACBLOCK"
@@ -93,7 +107,7 @@ scene(){   # scene <name> <rac-number|-> [state lines...]
 }
 
 echo "── on: the tunnel runs, and the panel says how to turn it off ─────"
-d=$(scene on 507 state=on registered=yes tunnel=running channels_up=6 channels_declared=6 changed_at=2026-10-09T18:22:05Z)
+d=$(scene on 507 state=on registered=yes tunnel=running channels_up=6 channels_declared=6 changed_at=2026-10-09T18:22:05Z "checked_at=$(at 0)")
 out=$(panel "$d")
 has   "it reads ON with the RAC number and gateway" "$out" "Remote access   ON — RAC 507 on gw2.wsprdaemon.org  (wsprdaemon (secure))"
 has   "it counts the channels the switch counted"   "$out" "status   6/6 channels up"
@@ -104,12 +118,20 @@ has   "all four VM channels are listed"             "$out" "magnetometer :50307"
 lacks "it prints no fault word"                     "$out" "OFFLINE"
 [ "$(cat "$d/switch.calls")" = status ] && ok "the panel asks the switch for status, once, and nothing else" \
     || bad "the panel asks the switch for status, once, and nothing else" "$(cat "$d/switch.calls" 2>/dev/null)"
+# The call is bounded, and the switch inherits neither the panel's stdin nor
+# its lock: an orphan holding fd 9 would wedge every later refresh.
+[ "$(cat "$d/timeout.calls" 2>/dev/null)" = "-k 5 20 $d/switch status" ] \
+    && ok "the switch runs under timeout -k 5 20" \
+    || bad "the switch runs under timeout -k 5 20" "$(cat "$d/timeout.calls" 2>/dev/null)"
+[ "$(cat "$d/switch.env" 2>/dev/null)" = "stdin=/dev/null fd9=closed" ] \
+    && ok "the switch gets no stdin and not the panel's lock on fd 9" \
+    || bad "the switch gets no stdin and not the panel's lock on fd 9" "$(cat "$d/switch.env" 2>/dev/null)"
 
-d=$(scene on-partial 507 state=on registered=yes tunnel=running channels_up=4 channels_declared=6)
+d=$(scene on-partial 507 state=on registered=yes tunnel=running channels_up=4 channels_declared=6 "checked_at=$(at 0)")
 has   "a partial tunnel shows its real count"       "$(panel "$d")" "status   4/6 channels up"
 
 echo "── off: a decision, never a fault ─────────────────────────────────"
-d=$(scene off 507 state=off registered=yes tunnel=stopped channels_up=0 channels_declared=6 changed_at=2026-10-09T18:22:05Z changed_by=vm)
+d=$(scene off 507 state=off registered=yes tunnel=stopped channels_up=0 channels_declared=6 changed_at=2026-10-09T18:22:05Z changed_by=vm "checked_at=$(at 0)")
 out=$(panel "$d")
 has   "it says OFF, by the operator's choice"       "$out" "Remote access   OFF, by the operator's choice (since 2026-10-09T18:22:05Z) — not a fault"
 has   "it says the registration stays"              "$out" "The registration stays (RAC 507 on gw2.wsprdaemon.org)."
@@ -117,29 +139,94 @@ has   "it names the command that turns it on"       "$out" "and type:  smd remot
 lacks "it prints no fault word"                     "$out" "OFFLINE"
 lacks "it sends nobody to the journal"              "$out" "journalctl"
 lacks "it lists no channel nobody can reach"        "$out" "ADMINISTRATORS ONLY"
+lacks "an ordinary off carries no warning"          "$out" "NOTE:"
 
-d=$(scene off-never - state=off registered=no tunnel=stopped wish_source=units)
+d=$(scene off-never - state=off registered=no tunnel=stopped wish_source=units "checked_at=$(at 0)")
 touch "$d/no-toml"
 out=$(panel "$d")
 has   "a station that never registered says so"     "$out" "Remote access   off — this station has not registered for it"
 has   "and still names the command"                 "$out" "and type:  smd remote on"
 lacks "it does not send the reader to the wizard"   "$out" "sigmond-setup --reconfigure"
 
+# The switch's exit-4 case, or a unit someone started by hand: off, and the
+# tunnel runs.  Calling that "not a fault" while the door stands open misleads.
+d=$(scene off-open 507 state=off registered=yes tunnel=running channels_up=6 channels_declared=6 changed_at=2026-10-09T18:22:05Z changed_by=vm "checked_at=$(at 0)")
+out=$(panel "$d")
+has   "an off with a running tunnel still says OFF"  "$out" "Remote access   OFF, by the operator's choice (since 2026-10-09T18:22:05Z)"
+lacks "but no longer calls it 'not a fault'"         "$out" "not a fault"
+has   "it says the station can still be reached"     "$out" "   NOTE: the tunnel service still runs, so this station can still be reached."
+has   "it gives the whole command that closes it"    "$out" "   ==> to close it, log in to the decoder VM (ssh -p 2222 sigmond@192.168.1.50) and type:  smd remote off"
+lacks "it does not also offer to turn it on"         "$out" "to turn it on"
+lacks "it lists no channel"                          "$out" "ADMINISTRATORS ONLY"
+
 echo "── down: wanted on and not up stays the fault ─────────────────────"
-d=$(scene down-stopped 507 state=down registered=yes tunnel=stopped channels_up=0 channels_declared=6)
+d=$(scene down-stopped 507 state=down registered=yes tunnel=stopped channels_up=0 channels_declared=6 "checked_at=$(at 0)")
 out=$(panel "$d")
 has   "a stopped tunnel reads WANTED ON, BUT NOT UP" "$out" "WANTED ON, BUT NOT UP — the tunnel service does not run (RAC 507)"
 has   "it gives a whole command for another computer" "$out" "ssh root@192.168.1.50 'journalctl -u sigmond-rac-host -n 50'"
 
-d=$(scene down-running 507 state=down registered=yes tunnel=running channels_up=0 channels_declared=6)
+d=$(scene down-running 507 state=down registered=yes tunnel=running channels_up=0 channels_declared=6 "checked_at=$(at 0)")
 has   "a running tunnel with no channel says 0/6"   "$(panel "$d")" "WANTED ON, BUT NOT UP — RAC 507 on gw2.wsprdaemon.org: 0/6 channels accepted"
 
-d=$(scene down-unregistered - state=down registered=no tunnel=stopped)
+d=$(scene down-unregistered - state=down registered=no tunnel=stopped "checked_at=$(at 0)")
 touch "$d/no-toml"
 out=$(panel "$d")
 has   "an unregistered station says so"             "$out" "WANTED ON, NOT REGISTERED YET — no gateway has answered"
 has   "and says the host keeps trying"              "$out" "tries again every 10 minutes"
 lacks "it does not send the reader to the wizard"   "$out" "sigmond-setup --reconfigure"
+
+echo "── a file the switch did not just write is never shown as current ─"
+# `status` stamps checked_at at every run.  A call that hangs, fails, or
+# exits 0 without writing leaves the OLD file standing; the panel reads the
+# stamp, and anything outside 300 seconds of now (either side) is no answer.
+NR="Remote access   STATE NOT READ — the switch gave no fresh answer"
+CMD="==> check: ssh root@192.168.1.50 '/usr/local/sbin/sigmond-rac-switch status'"
+s=$(at -600)
+d=$(scene stale-off 507 state=off registered=yes tunnel=stopped channels_up=0 channels_declared=6 changed_at=2026-10-09T18:22:05Z "checked_at=$s")
+out=$(panel "$d")
+has   "a stale off reads STATE NOT READ, with its last stamp" "$out" "$NR (last: $s)"
+has   "it gives a whole command for another computer"  "$out" "$CMD"
+lacks "it does not call a stale off a decision"       "$out" "not a fault"
+lacks "it does not say the operator chose it"         "$out" "by the operator's choice"
+lacks "it prints no OFFLINE"                          "$out" "OFFLINE"
+lacks "it sends nobody to the journal"                "$out" "journalctl"
+s=$(at -600)
+d=$(scene stale-on 507 state=on registered=yes tunnel=running channels_up=6 channels_declared=6 "checked_at=$s")
+out=$(panel "$d")
+has   "a stale on reads STATE NOT READ too"           "$out" "$NR (last: $s)"
+lacks "it lists no channel"                           "$out" "ADMINISTRATORS ONLY"
+lacks "it lists no VM channel"                        "$out" "magnetometer"
+lacks "it does not claim ON"                          "$out" "ON — RAC"
+s=$(at 600)
+d=$(scene future 507 state=on registered=yes tunnel=running channels_up=6 channels_declared=6 "checked_at=$s")
+has   "a stamp 10 minutes ahead is no answer either"  "$(panel "$d")" "$NR (last: $s)"
+d=$(scene edge-past 507 state=off registered=yes tunnel=stopped channels_declared=6 "checked_at=$(at -240)")
+has   "a stamp 4 minutes old still reads as current"   "$(panel "$d")" "Remote access   OFF, by the operator's choice"
+d=$(scene edge-future 507 state=off registered=yes tunnel=stopped channels_declared=6 "checked_at=$(at 240)")
+has   "and so does one 4 minutes ahead"                "$(panel "$d")" "Remote access   OFF, by the operator's choice"
+d=$(scene no-stamp 507 state=off registered=yes tunnel=stopped channels_declared=6)
+out=$(panel "$d")
+has   "a file with no checked_at reads STATE NOT READ" "$out" "$NR (last: none)"
+lacks "it does not call it a decision"                "$out" "not a fault"
+d=$(scene bad-stamp 507 state=off registered=yes tunnel=stopped channels_declared=6 "checked_at=now")
+out=$(panel "$d")
+has   "a stamp that is no time (the word 'now') is refused" "$out" "$NR (last: now)"
+lacks "it does not call it a decision"                "$out" "not a fault"
+s=$(at 0)
+d=$(scene unknown-state 507 state=sideways registered=yes tunnel=stopped channels_declared=6 "checked_at=$s")
+has   "a fresh file with an unknown state reads STATE NOT READ" "$(panel "$d")" "$NR (last: $s)"
+d=$(scene switch-silent 507)          # a switch script that leaves no state file
+out=$(panel "$d")
+has   "a switch that leaves no file reads STATE NOT READ" "$out" "$NR (last: none)"
+lacks "it falls back to no OFFLINE text"              "$out" "OFFLINE"
+# The reviewer's reproduction: a three-day-old file, and a switch that fails
+# and leaves it where it stands.
+s=$(at -259200)
+d=$(scene old-left 507 state=off registered=yes tunnel=stopped channels_up=0 channels_declared=6 changed_at=2026-10-06T18:22:05Z "checked_at=$s")
+touch "$d/preseed" "$d/switch-leaves"
+out=$(panel "$d")
+has   "a three-day-old file left by a failing switch is refused" "$out" "$NR (last: $s)"
+lacks "it does not print the old OFF"                 "$out" "not a fault"
 
 echo "── a host without the switch script keeps the v3.70 text ──────────"
 d=$(scene legacy-up 507); touch "$d/no-switch" "$d/unit-active"
@@ -149,8 +236,31 @@ d=$(scene legacy-down 507); touch "$d/no-switch"
 has   "a stopped one reads OFFLINE, as before"      "$(panel "$d")" "status   OFFLINE — check: journalctl -u sigmond-rac-host -n 50"
 d=$(scene legacy-none -); touch "$d/no-switch" "$d/no-toml"
 has   "an unconfigured one reads LAN-only, as before" "$(panel "$d")" "not configured — this station is LAN-only"
-d=$(scene switch-silent 507)          # a switch script that leaves no state file
-has   "a switch that leaves no state falls back to the old text" "$(panel "$d")" "status   OFFLINE"
+# A file that is not executable is no switch.  The state file stands fresh in
+# the run dir, so only the execute test keeps it out of the panel.
+d=$(scene no-exec 507 state=off registered=yes tunnel=stopped channels_up=0 channels_declared=6 "checked_at=$(at 0)")
+touch "$d/no-exec" "$d/preseed" "$d/unit-active"
+out=$(panel "$d")
+has   "a script without its execute bit leaves the v3.70 text"  "$out" "status   online — 6/6 channels up"
+lacks "and the state file plays no part"            "$out" "by the operator's choice"
+lacks "nor does the panel print STATE NOT READ"     "$out" "STATE NOT READ"
+[ ! -e "$d/switch.calls" ] && ok "the panel never ran it" || bad "the panel never ran it" "$(cat "$d/switch.calls")"
+
+echo "── the channel lists do not move ──────────────────────────────────"
+# With the tunnel on, the lists and the audience split are the v3.70 text, byte
+# for byte: compare what follows the status lines, on the same inputs, between
+# the switch branch and the branch every panel ran up to v3.70.
+d=$(scene lists-on 507 state=on registered=yes tunnel=running channels_up=6 channels_declared=6 "checked_at=$(at 0)")
+echo wd-registrar > "$d/marks/rac-registrar"
+on_out=$(panel "$d")
+d=$(scene lists-legacy 507); touch "$d/no-switch" "$d/unit-active"
+echo wd-registrar > "$d/marks/rac-registrar"
+legacy_out=$(panel "$d")
+on_tail=$(printf '%s\n' "$on_out" | tail -n +5)         # past: blank, header, status, to-turn-off
+legacy_tail=$(printf '%s\n' "$legacy_out" | tail -n +4) # past: blank, header, status
+if [ -n "$on_tail" ] && [ "$on_tail" = "$legacy_tail" ]; then ok "the lists and the audience split match v3.70 byte for byte"
+else bad "the lists and the audience split match v3.70 byte for byte" "$(diff <(printf '%s\n' "$legacy_tail") <(printf '%s\n' "$on_tail") | head -5)"; fi
+has   "the on status line keeps the registrar"      "$on_out" "status   6/6 channels up · registrar wd-registrar"
 
 echo "── positive control ───────────────────────────────────────────────"
 # The fixture must reproduce the defect, or the 'ok' lines above prove

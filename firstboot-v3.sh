@@ -2791,20 +2791,43 @@ esac
 #     down   wanted on and not up; this one stays the fault
 # So ask the switch, then read the file it leaves.  A host that carries no
 # switch script yet (pm-align has not brought it) keeps the old two-state
-# text below, unchanged.
+# text below, unchanged.  A host that HAS the switch never falls back to that
+# text: an answer the panel cannot read fresh prints STATE NOT READ instead.
 RAC_MARKS="${RAC_MARKS:-/etc/sigmond-appliance}"
 RAC_TOML="${RAC_TOML:-/etc/sigmond/frpc-host.toml}"
 RAC_SWITCH="${RAC_SWITCH:-/usr/local/sbin/sigmond-rac-switch}"
 RAC_STATE_FILE="${RAC_STATE_FILE:-/run/sigmond/rac-state}"
 RACBLOCK=""
 RACN=$(cat "$RAC_MARKS/rac-number" 2>/dev/null)
-RSTATE=""; RREGD=""; RRUNS=""; RUP=""; RDECL=""; RSINCE=""
+RSTATE=""; RREGD=""; RRUNS=""; RUP=""; RDECL=""; RSINCE=""; RCHECKED=""
 if [ -x "$RAC_SWITCH" ]; then
-    # Bounded: a panel refresh must never hang on anything it asks.
-    timeout 20 "$RAC_SWITCH" status >/dev/null 2>&1
+    # Bounded: a panel refresh must never hang on anything it asks.  -k kills
+    # a switch that ignores TERM.  The switch gets no stdin and not this
+    # script's lock on fd 9, so nothing it leaves behind can wedge a later
+    # refresh.
+    timeout -k 5 20 "$RAC_SWITCH" status </dev/null 9>&- >/dev/null 2>&1
     _rs(){ sed -n "s/^$1=//p" "$RAC_STATE_FILE" 2>/dev/null | head -1; }
     RSTATE=$(_rs state); RREGD=$(_rs registered); RRUNS=$(_rs tunnel)
     RUP=$(_rs channels_up); RDECL=$(_rs channels_declared); RSINCE=$(_rs changed_at)
+    RCHECKED=$(_rs checked_at)
+    # An answer the switch did not just write is no answer.  A call that
+    # hangs, fails, or exits 0 without writing leaves the OLD file standing,
+    # and an old "off" read as current tells the console a lie.  `status`
+    # stamps checked_at at every run; the stamp must parse and lie within 300
+    # seconds of now, either side (the rule the host heartbeat keeps).  The
+    # file is never deleted (the heartbeat reads it too) and never evaluated:
+    # the stamp is matched against its one format, then handed to date alone.
+    _rfresh=no
+    case "$RCHECKED" in
+      [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z)
+        _rthen=$(date -u -d "$RCHECKED" +%s 2>/dev/null)
+        if [ -n "$_rthen" ]; then
+            _rage=$(( $(date -u +%s) - _rthen ))
+            [ "$_rage" -ge -300 ] && [ "$_rage" -le 300 ] && _rfresh=yes
+        fi ;;
+    esac
+    case "$RSTATE" in on|off|down) ;; *) _rfresh=no ;; esac
+    [ "$_rfresh" = yes ] || RSTATE=unread
 fi
 RSRV=""; RTIER=""; RREG=""; RAC_ADMIN=""; RAC_USER=""
 if [ -r "$RAC_TOML" ]; then
@@ -2848,7 +2871,8 @@ if [ -r "$RAC_TOML" ]; then
     # is reassembled from far less.
     # The account names are literals here on purpose: the frp CLIENT IDENTITY
     # was once used as the ssh username, which put `DASI-009@` in front of
-    # every reach (rob caught it on the panel).  Never ${RUSR}.
+    # every reach (rob caught it on the panel).  Never the toml's `user =`
+    # value.
     _racfrag(){   # _racfrag <suffix> <port>  -> one fragment, no newline
         case "$1" in
           *-host-ssh) printf 'ssh -p %s root@%s' "$2" "$RSRV" ;;
@@ -2903,14 +2927,24 @@ case "$RSTATE" in
 "
     ;;
   off)
+    # Off is a decision, not a fault -- unless the tunnel service still runs
+    # (the switch's exit 4, or a unit someone started by hand).  Then this
+    # station can still be reached, and the console must not say "not a fault".
+    _rfault=" — not a fault"
+    _rturn="==> to turn it on, $_rvm  smd remote on"
+    if [ "$RRUNS" = running ]; then
+        _rfault=""
+        _rturn="NOTE: the tunnel service still runs, so this station can still be reached.
+   ==> to close it, $_rvm  smd remote off"
+    fi
     if [ "$RREGD" = yes ]; then
-        RACBLOCK=" Remote access   OFF, by the operator's choice${RSINCE:+ (since $RSINCE)} — not a fault
+        RACBLOCK=" Remote access   OFF, by the operator's choice${RSINCE:+ (since $RSINCE)}${_rfault}
    The registration stays (RAC ${RACN:-?} on ${RSRV:-<no server>}).
-   ==> to turn it on, $_rvm  smd remote on
+   ${_rturn}
 "
     else
         RACBLOCK=" Remote access   off — this station has not registered for it
-   ==> to turn it on, $_rvm  smd remote on
+   ${_rturn}
 "
     fi
     ;;
@@ -2930,9 +2964,19 @@ case "$RSTATE" in
 "
     fi
     ;;
+  unread)
+    # The switch is here and gave no fresh, readable answer.  Say so.  Guess
+    # neither "off" nor "on" from a file nobody just wrote, and list no channel
+    # nobody has shown to be reachable.  Show the stamp, printable bytes only,
+    # so a damaged file cannot spill onto the console.
+    _rlast=$(printf '%s' "$RCHECKED" | tr -cd '[:print:]' | cut -c1-40)
+    RACBLOCK=" Remote access   STATE NOT READ — the switch gave no fresh answer (last: ${_rlast:-none})
+   ==> check: ssh root@${HOSTIP:-<no-ip-yet>} '/usr/local/sbin/sigmond-rac-switch status'
+"
+    ;;
   *)
-    # No switch script on this host, or it left no state: the text every
-    # panel printed up to v3.70.
+    # No executable switch script on this host: the text every panel printed
+    # up to v3.70.
     if [ -n "$RACN" ] && [ -r "$RAC_TOML" ]; then
         # Live state, not a claim: frpc publishes per-proxy status on its
         # local admin API, and that is the only thing that proves the gateway
