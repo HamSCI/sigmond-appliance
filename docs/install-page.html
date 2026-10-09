@@ -117,8 +117,6 @@ in advance, they take two minutes to type. Only the first two are required.</p>
     <td>only if you will run without a network cable<br><small>asked only when the machine has a Wi-Fi radio</small></td><td><span class="fill"></span></td></tr>
 <tr><td>DASI station? Its unit number</td>
     <td>Y, then 3 (for DASI-003)<br><small>only for HamSCI DASI stations</small></td><td><span class="fill"></span></td></tr>
-<tr><td>Remote access</td>
-    <td>Y<br><small>lets your fleet admin reach the station for support; the default</small></td><td><span class="fill"></span></td></tr>
 <tr class="hi"><td><b>PSWS station ID</b></td>
     <td>S000170<br><small>the letter S and six digits, from your PSWS account; Enter skips PSWS</small></td><td><span class="fill"></span></td></tr>
 <tr class="hi"><td><b>GRAPE instrument ID</b></td>
@@ -233,6 +231,10 @@ The decoder VM then installs itself automatically.</div>
   <p>Saying yes to heartbeats lets a dashboard show that your station is alive and
   healthy. It sends a small report every five minutes, outbound only, and opens nothing
   on your machine.</p>
+  <p><b>Remote access comes up by itself.</b> The wizard asks nothing about it: every
+  station registers with the fleet gateway and opens a tunnel, so that your fleet admin
+  can support it. Registering sends two things: the station's name and the host's public
+  key. You hold the switch, and section 6 says how to work it.</p>
 </div>
 
 <div class="step">
@@ -318,7 +320,7 @@ smd sink status     # should now say: site sink: upload</pre>
 <tr><td>No spots on wsprnet or pskreporter</td><td>Expected until you run <span class="mono">smd sink upload</span> (section 4). If <span class="mono">smd sink status</span> already says <span class="mono">upload</span>, check that the antenna is connected, then run <span class="mono">smd status</span> and send its output to your fleet admin.</td></tr>
 <tr><td>"no RX888" or other missing equipment</td><td>The station installs and waits. Plug the RX888 into a <b>blue</b> USB 3 port, straight into the machine with no hub. Then run <span class="mono">sigmond-vm smd status</span> on the host and <span class="mono">sigmond-vm smd adopt &lt;name&gt;</span> with the name it printed. Nothing starts until you ask.</td></tr>
 <tr><td>The receiver shows up, but nothing decodes and the log says <span class="mono">RX888 ADC clock not locked/running</span></td><td>Unplug the USB 3 cable <b>at the RX888</b> and plug it firmly back in. A badly seated plug looks exactly like a missing clock, and a power cycle does not cure it.</td></tr>
-<tr><td>Remote access says FAILED</td><td>The support server may be busy. The station works; turn it on later with <span class="mono">sigmond-setup --reconfigure</span> on the host.</td></tr>
+<tr><td>Remote access says "wanted on, not up"</td><td>The station works. <span class="mono">smd remote status</span> on the recorder names the case on its second line. "has not registered yet" means no gateway has answered; the host tries again every ten minutes.</td></tr>
 </tbody>
 </table>
 </div>
@@ -358,6 +360,14 @@ addresses filled in.</p>
   the recorder stays off.</p>
 </div>
 
+<h3>Turning remote access off and on</h3>
+<p>Remote access starts on. To change that, log in to the recorder and type:</p>
+<pre>smd remote off        turn it off; it stays off across reboots
+smd remote on         turn it on again
+smd remote status     show the state</pre>
+<p>Off stops the tunnel your fleet admin uses and changes nothing else: every upload
+keeps running. The status panel on the machine's screen shows which state holds.</p>
+
 <h3>Register for PSWS uploads</h3>
 <p>If you gave PSWS IDs, log in to the recorder. Its login banner shows this machine's
 public upload key. Paste that key into the PSWS portal for your station
@@ -391,8 +401,9 @@ Only the heartbeat goes out.</li>
 <li>Answer the questions again. The wizard asks for your reporter ID and PSWS IDs afresh,
 and Enter at the PSWS station ID skips PSWS, so have them at hand. Type the <b>new grid
 square</b>. A GPS clock with a fix fills in the grid by itself and may already have
-changed it; check it on the review screen. The wizard keeps your remote-access number and
-the site sink switch as they were, and restarts the recorders itself.</li>
+changed it; check it on the review screen. The wizard keeps your remote-access number,
+the remote-access switch and the site sink switch as they were, and restarts the recorders
+itself.</li>
 <li>On the recorder, check the identity with
 <span class="mono">grep -E 'reporter_id|callsign|grid' /etc/sigmond/site-profile.toml</span>,
 then run <span class="mono">smd sink status</span>. With the reason

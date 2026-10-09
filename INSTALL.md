@@ -49,7 +49,6 @@ missing does not stop the install; you add it later (§7).
 | Antenna description (optional) | `80m dipole @ 40ft` |
 | Wi-Fi network and passphrase (only if no cable; asked only on a machine with Wi-Fi) | `ShackNet` |
 | Is this a DASI station? Its unit number | `Y`, `3` (for DASI-003) |
-| Enable remote access? | `Y` (default, recommended) |
 | PSWS station ID (optional, Enter to skip) | `S000170` |
 | — its GRAPE instrument ID | `171` |
 | — magnetometer instrument number (if any; same station ID) | `84` |
@@ -211,8 +210,23 @@ sigmond-vm smd adopt <name>    # use the name smd status printed; it asks first
 The same two commands add *any* hardware later. The station reports what it
 finds and starts nothing until you ask.
 
-(If the remote-access line says FAILED, don't worry — the support server may be
-busy. Turn it on later with `sigmond-setup --reconfigure`.)
+**Remote access comes up by itself.** The wizard asks nothing about it: every
+station registers with the fleet gateway and opens a tunnel, so that your fleet
+admin can support it. Registering sends two things: the station's name and the
+host's public key. You hold the switch, in the decoder VM (§10 says how to log
+in):
+
+```
+smd remote off        # turn remote access off; it stays off across reboots
+smd remote on         # turn it on again
+smd remote status     # show the state
+```
+
+(If the summary's remote-access line says `wanted on, not up`, don't worry: the
+radio and every upload keep working. If its second line says the station has not
+registered yet, no gateway has answered, and the host tries again every ten
+minutes. The other cases are in
+[remote access](https://github.com/HamSCI/sigmond/blob/main/docs/operator/remote-access.md#7-if-remote-access-does-not-come-up).)
 
 ---
 
@@ -315,6 +329,13 @@ command stay on the station in a held folder and never ship (§9). **One key
 serves the whole machine:** if it uploads for more than one station, register
 the same key on each. (If you restored keys in §4, this is already done.)
 
+**Remote access starts on, and you can turn it off.** Log in to the decoder VM
+and run `smd remote off`. `smd remote on` turns it on again, and
+`smd remote status` shows the state. Off stops the tunnel your fleet admin uses
+and changes nothing else: every upload keeps running, and off stays off across
+reboots. The console panel shows which state holds. More:
+[remote access](https://github.com/HamSCI/sigmond/blob/main/docs/operator/remote-access.md).
+
 ---
 
 ## 11. If something goes wrong
@@ -329,9 +350,10 @@ the same key on each. (If you restored keys in §4, this is already done.)
 | Receiver found, but nothing decodes; the VM log says `RX888 ADC clock not locked/running` | Unplug the USB 3 cable **at the RX888** and plug it firmly back in. A badly seated plug looks exactly like a missing clock, and cycling power does not cure it (AC0G-ND, 2026-10-05) |
 | Stick still in an hour after "REMOVE THE USB STICK NOW" | Remove it, run `poweroff`, then power the machine back on |
 | Typed a wrong answer | From the host: `sigmond-setup --reconfigure` |
-| Remote access shows FAILED | Later, from the host: `sigmond-setup --reconfigure` |
+| Remote access says `wanted on, not up` | The radio and every upload keep working. In the VM, `smd remote status` names the case on its second line. "has not registered yet" needs nothing from you: the host tries again every ten minutes. For the others, see [remote access](https://github.com/HamSCI/sigmond/blob/main/docs/operator/remote-access.md#7-if-remote-access-does-not-come-up) |
+| You want remote access off | In the VM: `smd remote off`. `smd remote on` turns it on again |
 | No spots after 30 minutes | Expected on a new station until you run `smd sink upload` (§9). Log in to the VM and run `smd sink status`. If it says `site sink: off` with the reason `new station: …`, check the station as §9 describes, then run `smd sink upload`. If it says `site sink: off` with any other reason, or `hold (legacy)`, ask your fleet admin. If it says `site sink: upload`: antenna actually connected? Then run `smd status` and send its output to your fleet admin |
-| Anything else | If you enabled remote access, your fleet admin can log in and fix it — just ask |
+| Anything else | Your fleet admin can log in through remote access and fix it — just ask. If you turned remote access off, run `smd remote on` in the VM first |
 
 More symptoms and the decision tree: [operator troubleshooting](https://github.com/HamSCI/sigmond/blob/main/docs/operator/troubleshooting.md).
 
@@ -361,8 +383,8 @@ until the station knows where it stands:
    ids afresh, and pressing Enter at the PSWS station ID skips PSWS, so have
    them at hand. Type the **new grid square**. A station whose GPSDO has a fix
    fills in the grid by itself, and may already have moved the grid; check it
-   on the review screen. The wizard keeps your remote-access number and the
-   site sink switch as they were.
+   on the review screen. The wizard keeps your remote-access number, the
+   remote-access switch and the site sink switch as they were.
 4. Log in to the decoder VM and check the identity:
    `grep -E 'reporter_id|callsign|grid' /etc/sigmond/site-profile.toml`.
    (The station pages keep the grid from the first install.) Then run
