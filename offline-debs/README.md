@@ -10,7 +10,7 @@ Likewise a host with **no Ethernet** cannot install `wpasupplicant` to bring up
 the Wi-Fi it would need to reach apt.
 
 So these ship on the install media and are applied with `dpkg -i` before any
-network is expected to work. 4 MB total — cheap insurance.
+network is expected to work. 7.4 MB total — cheap insurance.
 
 | package | why |
 |---|---|
@@ -20,14 +20,24 @@ network is expected to work. 4 MB total — cheap insurance.
 | `rdnssd` | the daemon form of the same, for ongoing RA changes |
 | `wpasupplicant`, `iw` | Wi-Fi association and scanning. **Neither is in stock PVE** |
 | `btop`, `tmux` | operator tooling on the PM — rob works from tmux and reads per-core load in btop, and a station on an IPv6-only site cannot apt them in. **Neither is in stock PVE**; every dependency of both already is |
+| `sudo` | the remote-access pairing: one account on the PM may run one script as root, by one sudoers line (sigmond `tasks/plan-remote-access.md` section 2). The wizard pairs at install, before any network is assumed. **Not in stock PVE**; every dependency of it already is |
 | the rest | dependency closure of the above that stock PVE lacks |
+
+`sudo` ships as `sudo_1.9.16p2-3+deb13u2_amd64.deb` (Debian 13 trixie, amd64, from
+`deb.debian.org`, fetched with `apt-get download sudo` on 2026-10-09), sha256
+`4f926f8f0704575158a90135713977f98f7d50d185969d9a8a405cdce5e3e50c`.  Its `Depends` are
+`libapparmor1`, `libaudit1`, `libc6`, `libpam0g`, `libselinux1`, `libssl3t64`, `zlib1g`
+and `libpam-modules`; its `Pre-Depends` is `init-system-helpers`.  That every one of them
+stands on a stock PVE 9 host was not checked when the file was fetched, since the fetching
+box is no PVE host.  The nested rig's remote-access check 1 fails unless dpkg reports sudo
+`install ok installed` on a nest built from this media.
 
 ## Refreshing
 
 Computed against a real PVE host, not guessed:
 
 ```bash
-WANT="clatd tayga dnsmasq dnsmasq-base rdnssd ndisc6 wpasupplicant iw btop tmux"
+WANT="clatd tayga dnsmasq dnsmasq-base rdnssd ndisc6 wpasupplicant iw btop tmux sudo"
 apt-cache depends --recurse --no-recommends --no-suggests --no-conflicts \
     --no-breaks --no-replaces --no-enhances $WANT | grep '^[a-z0-9]' | sort -u
 # keep the ones a stock PVE does not already have, then:

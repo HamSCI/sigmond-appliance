@@ -23,6 +23,11 @@
 #             first, then a restart of hs-uploader.  watermarks.db must sit
 #             at the release's schema version with nothing pending, and the
 #             daemon must start after the migrate and stay up.
+#   PHASE E-ter — remote access on a station already in the field: the
+#             updated guest's `smd remote` names the one host command while
+#             unpaired; the new wizard, placed on the old host as pm-align
+#             places it, pairs with that command; and a station whose owner
+#             said No at install stays as it stands.
 #   PHASE F — adopt the release manifest with --allow-superset (the updated
 #             guest is a sanctioned superset of the blessed baseline).
 #   PHASE G — `smd admin manifest restore` back to the blessed SHAs, then a
@@ -86,6 +91,18 @@
 #                                       "invalid choice: 'migrate'"
 #   "is up to date"                     lib/sigmond/commands/uploader.py
 #                                       cmd_uploader_manifest, check mode
+#   "holds no pairing with its Proxmox host", exit 5
+#                                       lib/sigmond/commands/remote.py
+#                                       _not_paired (v3.71)
+#   "sigmond-setup --pair-vm", "--rac-off", "--rac-on", "v3.71"
+#                                       the info() lines of the same function
+#   "paired: the decoder VM can run"    scripts/proxmox/sigmond-wizard.sh,
+#                                       the --pair-vm branch (v3.71); the same
+#                                       branch ends in "another pairing is
+#                                       running; nothing done" (exit 0) or
+#                                       "NOT paired: <reason>" (exit 1)
+#   "Remote access: off" and            the switch script inside the wizard
+#     "never registered"                (print_state), read through smd remote
 #   "pipelines.toml re-rendered by the restored sigmond"
 #                                       bin/smd _restore_rerender_uploader,
 #                                       after every verified restore
@@ -1186,6 +1203,131 @@ EB_A2="$(gx_tok "$GX_OUT" ACTIVE2)"; EB_S2="$(gx_tok "$GX_OUT" START2)"
 say "hs-uploader active, started $(( (EB_S1 - EB_T0) / 1000000 )) s after the manifest step began, and still up 45 s later ✓"
 
 say "PHASE E-bis PASS — watermarks.db at version $EB_VER with nothing pending; hs-uploader restarted after the migrate and stayed up"
+
+# ════════════════════════════════════════════════════════════════════════
+say "════ PHASE E-ter: remote access on a station already in the field ════"
+
+# sigmond tasks/plan-remote-access.md.  `smd update` moved the guest to the
+# target; nothing moved the Proxmox host, which still runs the base image's
+# wizard.  A station in the field sits exactly so between its update and its
+# next pm-align.  Three things must hold:
+#   1. `smd remote` in the guest says what stands in the way and names the one
+#      command that removes it;
+#   2. the target's wizard, placed on the host the way pm-align places it,
+#      pairs the two machines with that one command;
+#   3. the owner of this station said No at install (the rig's own answer), so
+#      remote access must still read off afterwards, with nothing registered.
+# A guest whose smd has no `remote` verb is a target from before v3.71; the
+# phase then says so and checks nothing.
+#
+# Every probe here tells "no answer from the channel" from "the check failed":
+# a guest probe goes through gx_ok, which stops on a broken channel, and reads
+# its facts as KEY:N tokens; a probe on the nested host prints a begin token
+# first and an end token last, and counts only when it printed them.
+gx_ok 120 et0-verb 'o=$(smd remote --help 2>&1); rc=$?; echo "RV:$rc"; echo "INV:$(printf "%s\n" "$o" | grep -c "invalid choice")"' "E-ter: does this smd know remote?"
+ET_RV="$(gx_tok "$GX_OUT" RV)"; ET_INV="$(gx_tok "$GX_OUT" INV)"
+[ -n "$ET_RV" ] && [ -n "$ET_INV" ] || fatal "$GX_OUT" "E-ter: the verb probe returned no answer (not a verdict)"
+if [ "$ET_RV" != 0 ] && [ "$ET_INV" -ge 1 ]; then
+    say "⚠ PHASE E-ter NOT EVALUATED — the target's smd has no 'remote' verb (a target before v3.71)"
+else
+    [ "$ET_RV" = 0 ] || fatal "$GX_OUT" "E-ter: smd remote --help exited $ET_RV without saying 'invalid choice': the verb exists and crashes"
+    # ── 1. unpaired: the guest names the host command ───────────────────
+    gx_ok 120 et1-unpaired 'smd remote status' "E-ter: smd remote status, unpaired"
+    sed 's/^/      /' "$GX_OUT"
+    [ "$GX_RC" -eq 5 ] || fatal "$GX_OUT" "smd remote status on an unpaired station exited $GX_RC, want 5"
+    grep -q 'holds no pairing with its Proxmox host' "$GX_OUT" \
+        || fatal "$GX_OUT" "the unpaired message does not say that the VM holds no pairing"
+    grep -q 'sigmond-setup --pair-vm' "$GX_OUT" \
+        || fatal "$GX_OUT" "the unpaired message does not name the host command"
+    grep -q 'sigmond-setup --rac-off' "$GX_OUT" && grep -q 'sigmond-setup --rac-on' "$GX_OUT" \
+        || fatal "$GX_OUT" "the unpaired message does not name sigmond-setup --rac-off and --rac-on, the two commands an older host already answers"
+    grep -q 'v3\.71' "$GX_OUT" \
+        || fatal "$GX_OUT" "the unpaired message does not say that the host needs v3.71"
+    say "unpaired: smd remote exits 5 and names sigmond-setup --pair-vm, --rac-off and --rac-on ✓"
+
+    # ── 2. the target's wizard on the old host pairs with one command ───
+    # pm-align installs the release's wizard as /usr/local/sbin/sigmond-setup,
+    # with this host's VMID rendered in.  It reads a blessed release, and
+    # nobody has blessed the target yet, so the rig places the same file by
+    # hand: from the guest's own checkout, over the private link.
+    # The pin comes first: no step of this rig may register with a real gateway.
+    $SSHN "echo ET2:begin
+        set -e
+        mkdir -p /etc/sigmond-appliance
+        printf '%s\n' SIGMOND_RAC_SERVER=127.0.0.1 SIGMOND_RAC_REGISTRAR=http://127.0.0.1:35737/register SIGMOND_RAC_TLS=off SIGMOND_RAC_FRPS_PORT=35735 > /etc/sigmond-appliance/rac-endpoint.env
+        grep -qx 'SIGMOND_RAC_SERVER=127.0.0.1' /etc/sigmond-appliance/rac-endpoint.env
+        cp -p /usr/local/sbin/sigmond-setup /root/sigmond-setup.base
+        scp -q -o BatchMode=yes -o ConnectTimeout=10 sigmond@10.99.0.2:/opt/git/sigmond/sigmond/scripts/proxmox/sigmond-wizard.sh /root/sigmond-wizard.target
+        sed -e 's/SIGMOND_VMID:-120/SIGMOND_VMID:-$VMID/g' -e 's/\"SIGMOND_VMID\", \"120\"/\"SIGMOND_VMID\", \"$VMID\"/g' /root/sigmond-wizard.target > /root/sigmond-setup.target
+        bash -n /root/sigmond-setup.target
+        grep -q '^    --pair-vm)' /root/sigmond-setup.target
+        install -m 755 /root/sigmond-setup.target /usr/local/sbin/sigmond-setup
+        echo ET2:placed" > "$WORK/et2-place.out" 2>&1
+    grep -qx 'ET2:begin' "$WORK/et2-place.out" \
+        || fatal "$WORK/et2-place.out" "E-ter: the nested host gave no answer when the target's wizard was placed (ssh failed; not a verdict on the wizard)"
+    grep -qx 'ET2:placed' "$WORK/et2-place.out" \
+        || fatal "$WORK/et2-place.out" "could not place the target's wizard on the nested host (scp from the guest, render, install): the last command that ran is the one that failed"
+    $SSHN "echo ET2S:begin; command -v sudo >/dev/null 2>&1 && echo HADSUDO:1 || echo HADSUDO:0" > "$WORK/et2-sudo.out" 2>&1
+    grep -qx 'ET2S:begin' "$WORK/et2-sudo.out" \
+        || fatal "$WORK/et2-sudo.out" "E-ter: the nested host gave no answer to the sudo probe (ssh failed; not a verdict)"
+    say "the base host $(grep -q 'HADSUDO:1' "$WORK/et2-sudo.out" && echo 'already carries sudo' || echo 'carries no sudo: the pairing must fetch it')"
+    # The wizard's pairing ends in one of three ways, and only the first is a
+    # pairing: exit 0 with the last line `paired: ...`; exit 0 with `another
+    # pairing is running; nothing done` (the re-assertion timer or path, which
+    # the pairing arms before it proves anything, holds the lock and does the
+    # work); exit 1 with `NOT paired: <reason>`.  The second gets one more
+    # try after 20 s.  A `WARN: ...` line may come first.  The wizard's `say`
+    # puts `[wizard] ` in front of each line.
+    ET_PAIRED="paired: the decoder VM can run smd remote on, smd remote off and smd remote status"
+    ET_TRY=0
+    while :; do
+        ET_TRY=$((ET_TRY + 1))
+        $SSHN "SIGMOND_VMID=$VMID timeout 900 /usr/local/sbin/sigmond-setup --pair-vm" > "$WORK/et2-pair.out" 2>&1
+        ET_RC=$?
+        sed 's/^/      /' "$WORK/et2-pair.out" | tail -12
+        ET_LAST="$(grep -v '^[[:space:]]*$' "$WORK/et2-pair.out" | tail -1 | tr -d '\r')"
+        ET_LAST="${ET_LAST#\[wizard\] }"
+        # 255 is ssh's own exit: it never reached the wizard, which exits 0 or 1.
+        [ "$ET_RC" -ne 255 ] || fatal "$WORK/et2-pair.out" "E-ter: ssh to the nested host gave no answer (exit 255): not a verdict on the pairing"
+        [ "$ET_RC" -ne 124 ] || fatal "$WORK/et2-pair.out" "sigmond-setup --pair-vm did not finish within 900 s"
+        if [ "$ET_RC" -eq 0 ] && [ "$ET_LAST" = "$ET_PAIRED" ]; then
+            break
+        elif [ "$ET_RC" -eq 0 ] && [ "$ET_LAST" = "another pairing is running; nothing done" ]; then
+            [ "$ET_TRY" -lt 2 ] || fatal "$WORK/et2-pair.out" "another pairing still held the lock 20 s after the first try: it did not finish, or it never pairs"
+            say "another pairing holds the lock; asking again in 20 s"
+            sleep 20
+        elif [ "$ET_RC" -eq 1 ] && [ "${ET_LAST#NOT paired: }" != "$ET_LAST" ]; then
+            fatal "$WORK/et2-pair.out" "sigmond-setup --pair-vm did not pair a host installed from the base image: $ET_LAST"
+        else
+            fatal "$WORK/et2-pair.out" "sigmond-setup --pair-vm answered neither 'paired:' nor 'NOT paired:' (exit $ET_RC, last line '${ET_LAST:-none}')"
+        fi
+    done
+    say "the target's wizard paired a host installed from $IMGBASE ✓"
+
+    # ── 3. the owner's No still stands ──────────────────────────────────
+    gx_ok 120 et3-status 'smd remote status' "E-ter: smd remote status, paired"
+    sed 's/^/      /' "$GX_OUT"
+    [ "$GX_RC" -eq 0 ] || fatal "$GX_OUT" "smd remote status on the paired station exited $GX_RC, want 0 (off)"
+    LC_ALL=C grep -qx 'Remote access: off' "$GX_OUT" \
+        || fatal "$GX_OUT" "a station whose owner declined at install does not read 'Remote access: off' after pairing"
+    LC_ALL=C grep -q 'never registered' "$GX_OUT" \
+        || fatal "$GX_OUT" "the answer does not say that this station never registered"
+    $SSHN "echo ET3:begin
+        test ! -e /etc/sigmond/frpc-host.toml && echo NOTOML:1 || echo NOTOML:0
+        test ! -e /etc/sigmond-appliance/rac-desired && echo NOWISH:1 || echo NOWISH:0
+        systemctl is-active --quiet sigmond-rac-host && echo NOTUNNEL:0 || echo NOTUNNEL:1
+        systemctl is-enabled --quiet sigmond-rac-register.timer 2>/dev/null && echo NOTIMER:0 || echo NOTIMER:1
+        echo ET3:end" > "$WORK/et3-state.out" 2>&1
+    sed 's/^/      /' "$WORK/et3-state.out"
+    { grep -qx 'ET3:begin' "$WORK/et3-state.out" && grep -qx 'ET3:end' "$WORK/et3-state.out"; } \
+        || fatal "$WORK/et3-state.out" "E-ter: the nested host gave no answer to the state probe (ssh failed; not a verdict)"
+    grep -qx 'NOTOML:1' "$WORK/et3-state.out"   || fatal "$WORK/et3-state.out" "pairing changed the station: it registered (/etc/sigmond/frpc-host.toml exists)"
+    grep -qx 'NOWISH:1' "$WORK/et3-state.out"   || fatal "$WORK/et3-state.out" "pairing changed the station: it recorded a wish (/etc/sigmond-appliance/rac-desired exists)"
+    grep -qx 'NOTUNNEL:1' "$WORK/et3-state.out" || fatal "$WORK/et3-state.out" "pairing changed the station: it started the tunnel (sigmond-rac-host is active)"
+    grep -qx 'NOTIMER:1' "$WORK/et3-state.out"  || fatal "$WORK/et3-state.out" "pairing changed the station: it armed the retry timer (sigmond-rac-register.timer is enabled)"
+    say "paired, and still off: nothing registered, no wish recorded, no timer armed ✓"
+    say "PHASE E-ter PASS — a host from $IMGBASE pairs with one command, and its owner's No still stands"
+fi
 
 # ════════════════════════════════════════════════════════════════════════
 say "════ PHASE F: adopt the blessed manifest (superset-tolerant) ════"

@@ -64,6 +64,56 @@ phase_d_verdict() {
     echo FATAL_NO_METROLOGY; return 1
 }
 # <<< phase_d_verdict
+
+# >>> remote_rig (test-remote-rig-lines.sh loads exactly this block)
+# Two readers for the remote-access checks of Phase D (sigmond
+# tasks/plan-remote-access.md).
+#
+# wizard_answers <racq>: the wizard's answers, one per line, in the order it
+# asks.  racq=1 for a wizard that still asks "Enable remote access? [Y/n]"
+# (v3.70 and earlier: the update rig's base image); racq=0 for one that asks
+# nothing about it.  One answer too many or too few shifts every answer after
+# it, and the wizard then reads a PSWS id as a heartbeat host.
+wizard_answers() {
+    local a=(
+        'N0CALL/T1'          # reporter id
+        'EM00aa'             # grid square
+        'Tier2 test dipole'  # antenna description
+        'n'                  # is this a DASI station?
+    )
+    # v3.70 and earlier asked "Enable remote access? [Y/n]" at this point.
+    [ "$1" = 1 ] && a+=( 'n' )
+    a+=(
+        'S000999'            # PSWS station id
+        '172'                # GRAPE instrument id
+        '84'                 # magnetometer instrument id
+        ''                   # heartbeat: send them? (blank = Y, the default)
+        ''                   # heartbeat: collector host (blank = wd30.wsprdaemon.org)
+        ''                   # heartbeat: collector port (blank = 38222)
+        ''                   # station designator (blank = default from reporter)
+        'Y'                  # apply
+    )
+    printf '%s\n' "${a[@]}"
+}
+# rr_state <file>: on | off | down from the switch's answer, or nothing.  The
+# answer names its state on a line that reads exactly one of three strings.
+# For `smd remote on` that line follows the registration's own lines, so the
+# first line of the answer proves nothing.
+rr_state() {
+    LC_ALL=C awk '
+        $0 == "Remote access: on"                { print "on";   exit }
+        $0 == "Remote access: off"               { print "off";  exit }
+        $0 == "Remote access: wanted on, not up" { print "down"; exit }' "$1" 2>/dev/null
+}
+# rr_tok <KEY> <text>: the value of the first line that reads KEY:value, or
+# nothing.  The probes that run on the nested host print their facts as such
+# lines and end with END:1.  The key is matched as plain text from the start of
+# the line, so a longer key, an indented line or a dot in the key cannot answer
+# for it.  A value may hold colons and spaces ("root:root 755").
+rr_tok() {
+    printf '%s\n' "$2" | LC_ALL=C awk -v k="$1" 'index($0, k ":") == 1 { print substr($0, length(k) + 2); exit }'
+}
+# <<< remote_rig
 KEY="$HOME/appliance/build/applkey"
 # --release builds strip root-ssh-keys from answer-v3.toml on purpose
 # (build-usb-v3.sh RELEASE branch) so the test key never lands on a
@@ -421,21 +471,36 @@ say "guest kernel + hamsci OK; running wizard with piped answers (identity N0CAL
 # wizard change an obvious place to add its answer.  The wizard's rd()
 # guard still aborts loudly on desync (2026-08-11), which is how the
 # breakage surfaced at all rather than producing a mis-configured station.
-WIZARD_ANSWERS=(
-    'N0CALL/T1'          # reporter id
-    'EM00aa'             # grid square
-    'Tier2 test dipole'  # antenna description
-    'n'                  # is this a DASI station?
-    'n'                  # enable remote access (RAC)?
-    'S000999'            # PSWS station id
-    '172'                # GRAPE instrument id
-    '84'                 # magnetometer instrument id
-    ''                   # heartbeat: send them? (blank = Y, the default)
-    ''                   # heartbeat: collector host (blank = wd30.wsprdaemon.org)
-    ''                   # heartbeat: collector port (blank = 38222)
-    ''                   # station designator (blank = default from reporter)
-    'Y'                  # apply
-)
+# From v3.71 the wizard asks nothing about remote access: every install
+# registers and brings the tunnel up.  The update rig runs these phases on the
+# previous blessed image, whose wizard still asks.  So ask the wizard under
+# test which one it is, and answer accordingly (wizard_answers, above).
+# MISSING is its own token: a grep on a file that is not there exits 2, and
+# "no wizard" must not read as "a wizard that does not ask".
+case "$($SSHN "test -r /usr/local/sbin/sigmond-setup || { echo RACQ:MISSING; exit 0; }; grep -q 'Enable remote access?' /usr/local/sbin/sigmond-setup && echo RACQ:YES || echo RACQ:NO" 2>&1)" in
+    *RACQ:YES*) RACQ=1 ;;
+    *RACQ:NO*)  RACQ=0 ;;
+    *) say "FATAL: could not read the host's wizard to decide its answers"; exit 1 ;;
+esac
+if [ "$RACQ" = 1 ] && [ "${SINK_BASE_IMAGE:-0}" != 1 ]; then
+    say "FATAL: the image under test still asks 'Enable remote access?'"
+    say "  only the update rig's base image may; test-update-v3.sh sets SINK_BASE_IMAGE=1 for that run"
+    exit 1
+fi
+# ⛔ PIN THE GATEWAY BEFORE THE WIZARD RUNS.  This nest reaches the internet
+# through qemu's user network, and a v3.71 wizard registers without asking.
+# Unpinned, every run of this rig would register "N0CALL_T1" with the real
+# gateway.  The pin names this host's own loopback, where nothing listens
+# until the stand-in further down starts.  The wizard reads the pin at start,
+# and so does the retry timer.  A wizard from before v3.71 ignores the file.
+# The rig goes on only when the pin reads back: a pin it cannot confirm is a
+# pin it cannot trust, and the next step could register a test station.
+case "$($SSHN "mkdir -p /etc/sigmond-appliance && printf '%s\n' SIGMOND_RAC_SERVER=127.0.0.1 SIGMOND_RAC_REGISTRAR=http://127.0.0.1:35737/register SIGMOND_RAC_TLS=off SIGMOND_RAC_FRPS_PORT=35735 > /etc/sigmond-appliance/rac-endpoint.env && grep -qx 'SIGMOND_RAC_SERVER=127.0.0.1' /etc/sigmond-appliance/rac-endpoint.env && echo PIN:OK" 2>&1)" in
+    *PIN:OK*) ;;
+    *) say "FATAL: could not pin the gateway on the nested host (the pin did not read back)"; exit 1 ;;
+esac
+mapfile -t WIZARD_ANSWERS < <(wizard_answers "$RACQ")
+say "wizard answers: ${#WIZARD_ANSWERS[@]} (remote-access question: $([ "$RACQ" = 1 ] && echo asked || echo not asked))"
 printf '%s\n' "${WIZARD_ANSWERS[@]}" | $SSHN "sigmond-setup" 2>&1 | tail -40
 MARK_OK=0
 for i in $(seq 1 12); do
@@ -1210,11 +1275,371 @@ F70EOF
     fi
 fi
 
+# ── remote access: every install registers, and the operator holds the switch ─
+# sigmond tasks/plan-remote-access.md.  The nest has no gateway, so what it
+# can prove stops short of a running tunnel:
+#   1. an install with no gateway in reach finishes, wants remote access on,
+#      and keeps trying;
+#   2. the decoder VM can ask the host, and only for the three words;
+#   3. a stand-in registrar registers the station;
+#   4. off stops the host's units and stays off across a reboot; on undoes it;
+#   5. the pairing survives a change of the host's sshd key.
+# A tunnel that carries traffic is proven on hardware (AC0G-ND).
+#
+# Every probe tells "the channel gave no answer" from "the check failed".  A
+# probe in the guest goes through gq, which returns 1 when no exit status came
+# back, and the caller then says the channel gave no answer.  A probe on the
+# nested host ends with END:1 and counts only when that token came back: an
+# ssh that died would otherwise read as a station that fails the check.
+RAC_UNCHECKED=""
+if [ "$RACQ" = 1 ]; then
+    say "⚠ REMOTE ACCESS CHECKS NOT EVALUATED — this image's wizard predates v3.71"
+    RAC_UNCHECKED="all of them (this image's wizard still asks 'Enable remote access?')"
+else
+    # gq <timeout> <tag> <snippet>: run the snippet as root in the decoder VM
+    # through qm guest exec.  It travels base64-encoded, so the request holds
+    # ASCII only.  Leaves the output in the file $GQ_OUT and the snippet's
+    # exit status in $GQ_RC; returns 1 when the channel gave no status.
+    # The snippet runs with stdin from /dev/null.  The guest's bash reads this
+    # script from a pipe, and a command inside the snippet that reads stdin (a
+    # bare ssh does) would take the lines after the snippet with it: the status
+    # line would never print, and a working probe would read as "the channel
+    # gave no answer".
+    gq(){
+        local t="$1" raw="$PWD/rr-$2.json" b64
+        GQ_OUT="$PWD/rr-$2.out"; GQ_RC=""
+        b64=$(printf '(\n%s\n) </dev/null > /tmp/rr.out 2>&1\nprintf "RRRC=%%s\\n" "$?"\ncat /tmp/rr.out\n' "$3" | base64 -w0)
+        $SSHN "qm guest exec $VMID --timeout $t -- bash -lc \"echo $b64 | base64 -d | bash\"" > "$raw" 2>&1
+        python3 - "$raw" "$GQ_OUT" <<'PYEOF'
+import json, sys
+raw = open(sys.argv[1], errors="replace").read()
+try:
+    d = json.loads(raw[raw.find("{"):raw.rfind("}") + 1])
+except Exception:
+    d = {}
+open(sys.argv[2], "w").write((d.get("out-data") or "") + (d.get("err-data") or ""))
+PYEOF
+        GQ_RC=$(sed -n 's/^RRRC=\([0-9][0-9]*\)$/\1/p' "$GQ_OUT" | head -1)
+        sed -i '/^RRRC=[0-9][0-9]*$/d' "$GQ_OUT"
+        [ -n "$GQ_RC" ]
+    }
+    rr_fatal(){ say "FATAL: $1"; [ -f "${GQ_OUT:-}" ] && sed 's/^/      /' "$GQ_OUT" | tail -12; exit 1; }
+    # nh_ok <answer>: a probe on the nested host answered, if its END:1 came back.
+    nh_ok(){ printf '%s\n' "$1" | grep -qx 'END:1'; }
+    # remote <word> <tag>: smd remote <word> in the VM; sets RR (on|off|down) and GQ_RC.
+    remote(){
+        gq 240 "$2" "smd remote $1" || rr_fatal "smd remote $1: the guest-exec channel gave no answer (not a verdict)"
+        RR=$(rr_state "$GQ_OUT")
+    }
+    PAIRSSH='ssh -T -i /etc/sigmond/rac-switch.key -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=/etc/sigmond/rac-switch.known_hosts -o GlobalKnownHostsFile=/dev/null -o ConnectTimeout=8 -o LogLevel=ERROR sigmond-remote@10.99.0.1'
+    # The account the panel tells an operator to log in with, and the wizard
+    # gives passwordless sudo (sigmond-wizard.sh, "operator access to the
+    # decoder VM").
+    RR_OPERATOR=sigmond
+
+    say "── remote access 1: no gateway in reach, and the install finished all the same"
+    R1=$($SSHN "echo WISH:\$(cat /etc/sigmond-appliance/rac-desired 2>/dev/null); test -e /etc/sigmond/frpc-host.toml && echo REG:1 || echo REG:0; echo TIMER:\$(systemctl is-enabled sigmond-rac-register.timer 2>&1); command -v sudo >/dev/null && command -v visudo >/dev/null && echo SUDO:1 || echo SUDO:0; visudo -c -q -f /etc/sudoers.d/sigmond-remote >/dev/null 2>&1 && echo SUDOERS:1 || echo SUDOERS:0; echo KEYLINES:\$(grep -c . /var/lib/sigmond-remote/.ssh/authorized_keys 2>/dev/null); grep -c '^restrict,from=\"10.99.0.2\",command=\"sudo -n /usr/local/sbin/sigmond-rac-switch\" ssh-ed25519 ' /var/lib/sigmond-remote/.ssh/authorized_keys 2>/dev/null | sed 's/^/KEYOK:/'; dpkg-query -W -f='\${Status}' sudo 2>/dev/null | grep -q 'install ok installed' && echo SUDOPKG:1 || echo SUDOPKG:0; echo END:1" 2>&1)
+    echo "$R1" | sed 's/^/      /'
+    nh_ok "$R1" || { say "FATAL: the nested host gave no answer to the install probe (ssh failed; not a verdict on remote access)"; exit 1; }
+    echo "$R1" | grep -qx 'WISH:on'      || { say "FATAL: a fresh install does not want remote access on (/etc/sigmond-appliance/rac-desired)"; exit 1; }
+    echo "$R1" | grep -qx 'REG:0'        || { say "FATAL: the nest registered with a gateway — the pin did not hold"; exit 1; }
+    echo "$R1" | grep -qx 'TIMER:enabled' || { say "FATAL: the retry timer is not armed on an unregistered station that wants remote access"; exit 1; }
+    echo "$R1" | grep -qx 'SUDOPKG:1'    || { say "FATAL: sudo is not installed on the host — the stick's offline-debs did not carry or configure it"; exit 1; }
+    echo "$R1" | grep -qx 'SUDO:1'       || { say "FATAL: sudo or visudo missing from the host's PATH"; exit 1; }
+    echo "$R1" | grep -qx 'SUDOERS:1'    || { say "FATAL: /etc/sudoers.d/sigmond-remote missing or refused by visudo"; exit 1; }
+    echo "$R1" | grep -qx 'KEYLINES:1'   || { say "FATAL: the pairing account must hold exactly one key line"; exit 1; }
+    echo "$R1" | grep -qx 'KEYOK:1'      || { say "FATAL: the pairing account's key line lacks restrict, from= or the forced command"; exit 1; }
+
+    # 1a. The retry service leaves one journal line per reason, never one per
+    # try.  The unit sets LogLevelMax=notice and SyslogLevel=notice; this
+    # proves they hold on this systemd.  Two tries against a gateway that does
+    # not answer yield at most the one line that names the reason: none when
+    # the timer already wrote it, and never a line of systemd's own.
+    # (The probe is a function run with stdin from /dev/null: bash reads this
+    # script from ssh's stdin, and a command inside it must not take the rest.)
+    R1A=$($SSHN "bash -s" 2>&1 <<'RR1AEOF'
+main(){
+    T0=$(date '+%Y-%m-%d %H:%M:%S')
+    sleep 1
+    systemctl start sigmond-rac-register.service; echo START1:$?
+    systemctl start sigmond-rac-register.service; echo START2:$?
+    journalctl --sync >/dev/null 2>&1
+    sleep 2
+    journalctl -q --no-pager -u sigmond-rac-register.service --since "$T0" -o cat > /tmp/rr1a.journal 2>&1
+    echo JLINES:$(grep -c . /tmp/rr1a.journal)
+    echo JNOISE:$(grep -c -E 'Started|Finished|Deactivated|Consumed' /tmp/rr1a.journal)
+    sed 's/^/JLINE: /' /tmp/rr1a.journal
+    rm -f /tmp/rr1a.journal
+    echo END:1
+}
+main </dev/null
+RR1AEOF
+)
+    echo "$R1A" | sed 's/^/      /'
+    nh_ok "$R1A" || rr_fatal "the nested host gave no answer to the retry-service probe (ssh failed; not a verdict)"
+    [ "$(rr_tok START1 "$R1A")" = 0 ] && [ "$(rr_tok START2 "$R1A")" = 0 ] \
+        || rr_fatal "systemctl start sigmond-rac-register.service failed (exit $(rr_tok START1 "$R1A") and $(rr_tok START2 "$R1A")): the retry service must end quietly when no gateway answers"
+    R1A_LINES=$(rr_tok JLINES "$R1A"); R1A_NOISE=$(rr_tok JNOISE "$R1A")
+    [ -n "$R1A_LINES" ] && [ -n "$R1A_NOISE" ] || rr_fatal "the retry-service probe returned no journal count (not a verdict)"
+    [ "$R1A_LINES" -le 1 ] || rr_fatal "two tries of the retry service wrote $R1A_LINES journal lines; it must write at most one, for a reason that changed"
+    [ "$R1A_NOISE" = 0 ] || rr_fatal "systemd's own lines (Started, Finished, Deactivated or Consumed) reached the retry service's journal: LogLevelMax=notice did not hold"
+    say "  1a: two tries of the retry service left $R1A_LINES journal line(s), none of systemd's own ✓"
+
+    # 1b. The host's half of the pairing, as files.  The account must not own
+    # the file that holds its key (it could then change its own key), and
+    # sudo must give it one command.
+    R1B=$($SSHN "bash -s" 2>&1 <<'RR1BEOF'
+main(){
+    H=/var/lib/sigmond-remote
+    A=$H/.ssh/authorized_keys
+    echo AKLINES:$({ wc -l < "$A"; } 2>/dev/null)
+    echo AKBEGIN:$(head -1 "$A" 2>/dev/null | grep -c '^restrict,from="')
+    echo AKCMD:$(head -1 "$A" 2>/dev/null | grep -cF 'command="sudo -n /usr/local/sbin/sigmond-rac-switch"')
+    echo HOMEOWN:$(stat -c '%U:%G %a' "$H" 2>/dev/null)
+    echo SSHOWN:$(stat -c '%U:%G %a' "$H/.ssh" 2>/dev/null)
+    echo AKOWN:$(stat -c '%U:%G %a' "$A" 2>/dev/null)
+    sudo -l -U sigmond-remote 2>&1 | sed -n '/may run the following commands/,$p' | tail -n +2 > /tmp/rr1b.sudo
+    echo SUDORULES:$(grep -c . /tmp/rr1b.sudo)
+    echo SUDOPATHS:$(grep -o '/[A-Za-z0-9_./-]*' /tmp/rr1b.sudo | sort -u | paste -sd,)
+    echo SUDONOPW:$(grep -c 'NOPASSWD' /tmp/rr1b.sudo)
+    sed 's/^/SUDOLINE: /' /tmp/rr1b.sudo
+    rm -f /tmp/rr1b.sudo
+    echo END:1
+}
+main </dev/null
+RR1BEOF
+)
+    echo "$R1B" | sed 's/^/      /'
+    nh_ok "$R1B" || rr_fatal "the nested host gave no answer to the pairing-files probe (ssh failed; not a verdict)"
+    [ "$(rr_tok AKLINES "$R1B")" = 1 ] || rr_fatal "authorized_keys of the pairing account must hold exactly one line, got '$(rr_tok AKLINES "$R1B")'"
+    [ "$(rr_tok AKBEGIN "$R1B")" = 1 ] || rr_fatal "the key line does not begin 'restrict,from=\"'"
+    [ "$(rr_tok AKCMD "$R1B")" = 1 ]   || rr_fatal "the key line does not hold command=\"sudo -n /usr/local/sbin/sigmond-rac-switch\""
+    [ "$(rr_tok HOMEOWN "$R1B")" = "root:root 755" ] || rr_fatal "/var/lib/sigmond-remote must read root:root 755 (the account must not own its home), got '$(rr_tok HOMEOWN "$R1B")'"
+    [ "$(rr_tok SSHOWN "$R1B")" = "root:root 755" ]  || rr_fatal "/var/lib/sigmond-remote/.ssh must read root:root 755, got '$(rr_tok SSHOWN "$R1B")'"
+    [ "$(rr_tok AKOWN "$R1B")" = "root:root 644" ]   || rr_fatal "authorized_keys must read root:root 644 (the account must not write its own key file), got '$(rr_tok AKOWN "$R1B")'"
+    [ "$(rr_tok SUDORULES "$R1B")" = 1 ] && [ "$(rr_tok SUDONOPW "$R1B")" = 1 ] \
+        || rr_fatal "sudo -l -U sigmond-remote must list exactly one rule, without a password; it lists '$(rr_tok SUDORULES "$R1B")' rule(s)"
+    [ "$(rr_tok SUDOPATHS "$R1B")" = /usr/local/sbin/sigmond-rac-switch ] \
+        || rr_fatal "sudo -l -U sigmond-remote must name /usr/local/sbin/sigmond-rac-switch and no other command, got '$(rr_tok SUDOPATHS "$R1B")'"
+    say "  1b: one restricted key line, root owns the key file and its directories, sudo allows the one script ✓"
+
+    # 1c. The pairing arms its re-assertion before it proves anything (the
+    # wizard's rac_pair_locked), so on a host with the private link these units
+    # stand armed however the first proof went.  Check 5 depends on them.
+    R1C=$($SSHN "echo PATHACTIVE:\$(systemctl is-active sigmond-rac-pair.path 2>&1); echo PATHENABLED:\$(systemctl is-enabled sigmond-rac-pair.path 2>&1); echo TIMERENABLED:\$(systemctl is-enabled sigmond-rac-pair.timer 2>&1); echo END:1" 2>&1)
+    echo "$R1C" | sed 's/^/      /'
+    nh_ok "$R1C" || rr_fatal "the nested host gave no answer to the re-assertion probe (ssh failed; not a verdict)"
+    [ "$(rr_tok PATHACTIVE "$R1C")" = active ] && [ "$(rr_tok PATHENABLED "$R1C")" = enabled ] \
+        || rr_fatal "sigmond-rac-pair.path is not armed (active '$(rr_tok PATHACTIVE "$R1C")', enabled '$(rr_tok PATHENABLED "$R1C")'): a change of the host's sshd key would not re-assert the pairing"
+    [ "$(rr_tok TIMERENABLED "$R1C")" = enabled ] \
+        || rr_fatal "sigmond-rac-pair.timer is not enabled: nothing re-asserts the pairing after a boot"
+    say "  1c: the pairing's re-assertion path and timer stand armed ✓"
+    say "wish on, not registered, retry timer armed, sudo and the pairing in place ✓"
+
+    say "── remote access 2: the VM asks, and only for the three words"
+    remote status rr2-status
+    [ "$RR" = down ] && [ "$GQ_RC" = 3 ] || rr_fatal "smd remote status: want 'wanted on, not up' and exit 3 on an unregistered station, got '${RR:-nothing}' exit $GQ_RC"
+    RR2_STATE=$RR
+    grep -q 'tries again every 10 minutes' "$GQ_OUT" || rr_fatal "the answer does not say the host keeps trying"
+    gq 60 rr2-fourth "$PAIRSSH restart" || rr_fatal "the refusal probe gave no answer"
+    [ "$GQ_RC" = 2 ] || rr_fatal "a fourth word must be refused with exit 2, got $GQ_RC"
+    gq 60 rr2-extra "$PAIRSSH 'status; id'" || rr_fatal "the refusal probe gave no answer"
+    [ "$GQ_RC" = 2 ] && ! grep -q 'uid=' "$GQ_OUT" || rr_fatal "extra words after 'status' must be refused and must run nothing (exit $GQ_RC)"
+    gq 60 rr2-none "$PAIRSSH </dev/null" || rr_fatal "the refusal probe gave no answer"
+    [ "$GQ_RC" = 2 ] || rr_fatal "a login with no word must be refused with exit 2, got $GQ_RC (did it get a shell?)"
+    gq 60 rr2-key2 "rm -f /tmp/rr-k2 /tmp/rr-k2.pub; ssh-keygen -q -t ed25519 -N '' -f /tmp/rr-k2; ${PAIRSSH/-i \/etc\/sigmond\/rac-switch.key/-i \/tmp\/rr-k2} status; rc=\$?; rm -f /tmp/rr-k2 /tmp/rr-k2.pub; exit \$rc" || rr_fatal "the second-key probe gave no answer"
+    [ "$GQ_RC" = 255 ] && [ -z "$(rr_state "$GQ_OUT")" ] || rr_fatal "a second key must be refused by sshd (exit 255, no state), got exit $GQ_RC"
+
+    # 2a. No terminal.  The key line says `restrict`, which takes the pty away:
+    # ssh -tt asks for one regardless, sshd refuses, and the command runs all
+    # the same.  ssh may log that refusal below the pairing's own
+    # LogLevel=ERROR, so this probe asks for INFO.
+    PAIRSSH_TT="${PAIRSSH/ssh -T /ssh -tt }"
+    PAIRSSH_TT="${PAIRSSH_TT/LogLevel=ERROR/LogLevel=INFO}"
+    gq 60 rr2-pty "$PAIRSSH_TT status" || rr_fatal "the no-terminal probe gave no answer"
+    { [ "$GQ_RC" = 0 ] || [ "$GQ_RC" = 3 ]; } && [ -n "$(rr_state "$GQ_OUT")" ] \
+        || rr_fatal "ssh -tt with the word 'status' must still answer with a state (exit 0 or 3), got exit $GQ_RC and '$(rr_state "$GQ_OUT")'"
+    grep -q 'PTY allocation request failed' "$GQ_OUT" \
+        || rr_fatal "the pairing key was granted a terminal: ssh -tt printed no 'PTY allocation request failed' (is 'restrict' missing from the key line?)"
+    say "  2a: ssh -tt gets no terminal, and the switch still answers ✓"
+
+    # 2b. A variable the VM sends has no effect.  SIGMOND_RAC_RUN_DIR moves the
+    # switch's state directory; the switch must ignore it when it runs for the
+    # pairing.  sshd's AcceptEnv may stop the variable before the switch sees it
+    # (stock sshd accepts LANG and LC_* only); either way nothing may follow it.
+    $SSHN "rm -rf /tmp/rr-env-probe" >/dev/null 2>&1
+    gq 60 rr2-env "export SIGMOND_RAC_RUN_DIR=/tmp/rr-env-probe; ${PAIRSSH/ssh -T /ssh -T -o SendEnv=SIGMOND_RAC_RUN_DIR } status" || rr_fatal "the sent-variable probe gave no answer"
+    [ "$(rr_state "$GQ_OUT")" = "$RR2_STATE" ] \
+        || rr_fatal "with SIGMOND_RAC_RUN_DIR sent, the answer names '$(rr_state "$GQ_OUT")'; plain status named '$RR2_STATE'"
+    R2B=$($SSHN "test -e /tmp/rr-env-probe && echo ENVDIR:1 || echo ENVDIR:0; echo END:1" 2>&1)
+    nh_ok "$R2B" || rr_fatal "the nested host gave no answer to the sent-variable probe (ssh failed; not a verdict)"
+    [ "$(rr_tok ENVDIR "$R2B")" = 0 ] \
+        || rr_fatal "the switch acted on a variable the VM sent: /tmp/rr-env-probe now exists on the host"
+    say "  2b: a sent SIGMOND_RAC_RUN_DIR changed neither the answer nor the host ✓"
+
+    # 2c. The operator reaches the switch without a password.  The pairing key
+    # belongs to root, so smd remote run by a plain account re-runs itself under
+    # sudo, and the operator's passwordless sudo must carry it.  With no
+    # terminal, a password prompt fails at once instead of waiting.
+    gq 120 rr2-operator "su - $RR_OPERATOR -c 'smd remote status </dev/null'" || rr_fatal "the operator probe gave no answer"
+    if grep -Eq 'sudo: (a password is required|a terminal is required|no tty present)|incorrect password|Sorry, try again' "$GQ_OUT"; then
+        rr_fatal "the VM's operator account '$RR_OPERATOR' met a sudo password prompt running smd remote status"
+    fi
+    { [ "$GQ_RC" = 0 ] || [ "$GQ_RC" = 3 ]; } && [ -n "$(rr_state "$GQ_OUT")" ] \
+        || rr_fatal "smd remote status as '$RR_OPERATOR' must end with a state and exit 0 or 3, got exit $GQ_RC and '$(rr_state "$GQ_OUT")'"
+    say "  2c: '$RR_OPERATOR' ran smd remote status with no password: $(rr_state "$GQ_OUT"), exit $GQ_RC ✓"
+
+    # 2d. The login banner.  The pairing plants /etc/update-motd.d/72-sigmond-remote;
+    # it prints the last answer on file, which the status above just left.
+    # run-parts is how a login finds the hook (name, executable bit).  The
+    # regex limits it to this one hook: the other hooks call smd too, and the
+    # guest agent runs one smd per request.
+    gq 60 rr2-motd "run-parts --regex '^72-sigmond-remote\$' /etc/update-motd.d 2>/dev/null" || rr_fatal "the login-banner probe gave no answer"
+    grep -q '^Remote access: ' "$GQ_OUT" \
+        || rr_fatal "run-parts /etc/update-motd.d prints no 'Remote access:' line after a status (is /etc/update-motd.d/72-sigmond-remote missing, not executable or silent?)"
+    ! grep -q 'state not read yet' "$GQ_OUT" \
+        || rr_fatal "the login banner says the state was not read yet, though smd remote status had just run: smd remote motd cannot read the answer status left"
+    grep -q '^Remote access: wanted on, NOT UP' "$GQ_OUT" \
+        || rr_fatal "the login banner does not repeat the last answer (the station is wanted on and not up)"
+    say "  2d: the login banner repeats the last answer ✓"
+    say "status answered; a fourth word, extra words, no word and a second key all refused ✓"
+
+    say "── remote access 3: a stand-in gateway registers the station"
+    # A registrar on :35737 and a bare listener on :35735, on the nested host's
+    # loopback.  The registrar answers as the real one does; the listener only
+    # accepts, so frpc can never log in and no channel ever comes up.
+    $SSHN "cat > /root/rac-standin.py" <<'STANDINEOF'
+import http.server, json, socket, threading
+class H(http.server.BaseHTTPRequestHandler):
+    def do_POST(self):
+        n = int(self.headers.get("Content-Length", "0"))
+        body = json.loads(self.rfile.read(n))
+        open("/root/rac-standin.seen", "a").write(json.dumps(sorted(body)) + "\n")
+        out = json.dumps({"user": "0123456789abcdef", "token": "nestedrigtoken01", "rac": 599,
+                          "server_addr": "127.0.0.1", "server_port": 35735,
+                          "ports": {"vm_ssh": 36399, "vm_web": 46399,
+                                    "host_ssh": 51399, "host_ui": 56399}}).encode()
+        self.send_response(200); self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(out))); self.end_headers(); self.wfile.write(out)
+    def log_message(self, *a): pass
+def frps():
+    s = socket.socket(); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    s.bind(("127.0.0.1", 35735)); s.listen(8)
+    while True:
+        c, _ = s.accept(); c.close()
+threading.Thread(target=frps, daemon=True).start()
+http.server.ThreadingHTTPServer(("127.0.0.1", 35737), H).serve_forever()
+STANDINEOF
+    $SSHN "rm -f /root/rac-standin.seen; systemctl reset-failed rac-standin 2>/dev/null; systemd-run --unit=rac-standin --collect --quiet python3 /root/rac-standin.py && sleep 3 && systemctl is-active --quiet rac-standin" \
+        || { say "FATAL: the stand-in gateway did not start on the nested host"; exit 1; }
+    remote on rr3-on
+    [ "$RR" = down ] && [ "$GQ_RC" = 3 ] || rr_fatal "smd remote on against the stand-in: want 'wanted on, not up' exit 3 (registered, no channel), got '${RR:-nothing}' exit $GQ_RC"
+    R3=$($SSHN "echo RACN:\$(cat /etc/sigmond-appliance/rac-number 2>/dev/null); grep -c '^user = \"0123456789abcdef\"' /etc/sigmond/frpc-host.toml 2>/dev/null | sed 's/^/TOML:/'; grep -c '^name = ' /etc/sigmond/frpc-host.toml 2>/dev/null | sed 's/^/PROXIES:/'; echo UNIT:\$(systemctl is-enabled sigmond-rac-host 2>&1); echo TIMER:\$(systemctl is-enabled sigmond-rac-register.timer 2>&1); echo SEEN:\$(cat /root/rac-standin.seen 2>/dev/null | sort -u | tr -d ' '); echo END:1" 2>&1)
+    echo "$R3" | sed 's/^/      /'
+    nh_ok "$R3" || { say "FATAL: the nested host gave no answer to the registration probe (ssh failed; not a verdict)"; exit 1; }
+    echo "$R3" | grep -qx 'RACN:599'      || { say "FATAL: the registration's RAC number did not reach /etc/sigmond-appliance/rac-number"; exit 1; }
+    echo "$R3" | grep -qx 'TOML:1'        || { say "FATAL: frpc-host.toml does not carry the registered account"; exit 1; }
+    echo "$R3" | grep -qx 'PROXIES:6'     || { say "FATAL: frpc-host.toml does not declare six channels"; exit 1; }
+    echo "$R3" | grep -qx 'UNIT:enabled'  || { say "FATAL: sigmond-rac-host is not enabled after smd remote on"; exit 1; }
+    echo "$R3" | grep -qx 'TIMER:disabled' || { say "FATAL: the retry timer is still armed after the station registered"; exit 1; }
+    echo "$R3" | grep -qx 'SEEN:\["pubkey","site"\]' || { say "FATAL: registration sent something besides the station's name and the host's public key"; exit 1; }
+    say "registered through the stand-in: RAC 599, six channels declared, name and key sent and nothing else ✓"
+
+    say "── remote access 4: off stops the host's units and survives a reboot"
+    remote off rr4-off
+    [ "$RR" = off ] && [ "$GQ_RC" = 0 ] || rr_fatal "smd remote off: want 'off' exit 0, got '${RR:-nothing}' exit $GQ_RC"
+    rac_units(){ $SSHN "echo WISH:\$(cat /etc/sigmond-appliance/rac-desired 2>/dev/null); echo BY:\$(awk '{print \$3}' /etc/sigmond-appliance/rac-changed 2>/dev/null); echo UNIT:\$(systemctl is-enabled sigmond-rac-host 2>&1)/\$(systemctl is-active sigmond-rac-host 2>&1); echo SOCK:\$(systemctl is-enabled sigmond-vm-ssh-relay.socket 2>&1)/\$(systemctl is-active sigmond-vm-ssh-relay.socket 2>&1); test -s /etc/sigmond/frpc-host.toml && echo TOMLKEPT:1 || echo TOMLKEPT:0; echo END:1" 2>&1; }
+    R4=$(rac_units); echo "$R4" | sed 's/^/      /'
+    nh_ok "$R4" || { say "FATAL: the nested host gave no answer to the unit probe after smd remote off (ssh failed; not a verdict)"; exit 1; }
+    echo "$R4" | grep -qx 'WISH:off' && echo "$R4" | grep -qx 'BY:vm' \
+        || { say "FATAL: the host did not record the wish off, asked from the VM"; exit 1; }
+    echo "$R4" | grep -qx 'UNIT:disabled/inactive' || { say "FATAL: sigmond-rac-host still enabled or running after smd remote off"; exit 1; }
+    echo "$R4" | grep -qx 'SOCK:disabled/inactive' || { say "FATAL: a relay socket still enabled or listening after smd remote off"; exit 1; }
+    echo "$R4" | grep -qx 'TOMLKEPT:1' || { say "FATAL: smd remote off removed the registration"; exit 1; }
+    say "rebooting the nested host: the switch must still read off afterwards"
+    # Wait for a NEW boot, not for ssh: a host that is still shutting down
+    # answers ssh too, and the checks below would then run against the old boot.
+    BOOT0=$($SSHN "cat /proc/sys/kernel/random/boot_id" 2>/dev/null)
+    [ -n "$BOOT0" ] || { say "FATAL: could not read the nested host's boot id before the reboot (ssh gave no answer)"; exit 1; }
+    $SSHN "systemctl stop rac-standin 2>/dev/null; reboot" >/dev/null 2>&1
+    sleep 20
+    BOOT1=""
+    for i in $(seq 1 90); do
+        BOOT1=$($SSHN "cat /proc/sys/kernel/random/boot_id" 2>/dev/null)
+        [ -n "$BOOT1" ] && [ "$BOOT1" != "$BOOT0" ] && break
+        sleep 5
+    done
+    { [ -n "$BOOT1" ] && [ "$BOOT1" != "$BOOT0" ]; } || { say "FATAL: nested host did not come back from the reboot (boot id now '${BOOT1:-unreadable}', before '$BOOT0')"; exit 1; }
+    for i in $(seq 1 30); do $SSHN "qm status $VMID 2>/dev/null | grep -q running" 2>/dev/null && break; sleep 10; done
+    AOK=0; for i in $(seq 1 40); do if $SSHN "qm agent $VMID ping" >/dev/null 2>&1; then AOK=$((AOK+1)); [ "$AOK" -ge 2 ] && break; sleep 3; else AOK=0; sleep 10; fi; done
+    [ "$AOK" -ge 2 ] || { say "FATAL: guest agent never answered after the reboot"; exit 1; }
+    R4=$(rac_units); echo "$R4" | sed 's/^/      /'
+    nh_ok "$R4" || { say "FATAL: the nested host gave no answer to the unit probe after the reboot (ssh failed; not a verdict)"; exit 1; }
+    echo "$R4" | grep -qx 'UNIT:disabled/inactive' && echo "$R4" | grep -qx 'WISH:off' \
+        || { say "FATAL: remote access did not stay off across a reboot"; exit 1; }
+    # A ping is not a ready agent (see the password-hash check earlier in this
+    # phase): the first guest-exec after a boot can time out.  So a missing
+    # answer is tried again, and only an answer that is wrong counts.
+    RRTRY=""; RRCH=0
+    for i in $(seq 1 12); do
+        if gq 240 rr4-status "smd remote status"; then RRCH=1; RRTRY="$(rr_state "$GQ_OUT")/$GQ_RC"; [ "$RRTRY" = off/0 ] && break; fi
+        sleep 10
+    done
+    [ "$RRCH" = 1 ] || rr_fatal "smd remote status after the reboot: the guest-exec channel gave no answer in 12 tries (not a verdict)"
+    [ "$RRTRY" = off/0 ] || rr_fatal "smd remote status after the reboot: want 'off' exit 0, got $RRTRY"
+    # sigmond-issue takes a lock and skips a run while another holds it, so a
+    # skipped run leaves the old panel: try again before judging.
+    PANEL=""
+    for i in $(seq 1 6); do
+        PANEL=$($SSHN "SIGMOND_VMID=$VMID /usr/local/sbin/sigmond-issue >/dev/null 2>&1; grep -q \"OFF, by the operator's choice\" /etc/issue && echo PANEL:offchoice || echo PANEL:other; grep -q 'STATE NOT READ' /etc/issue && echo NOTREAD:1 || echo NOTREAD:0; grep -q 'OFFLINE' /etc/issue && echo OFFLINE:1 || echo OFFLINE:0; echo END:1" 2>&1)
+        [ "$(rr_tok PANEL "$PANEL")" = offchoice ] && break
+        sleep 5
+    done
+    echo "$PANEL" | sed 's/^/      /'
+    nh_ok "$PANEL" || { say "FATAL: the nested host gave no answer to the console-panel probe (ssh failed; not a verdict)"; exit 1; }
+    [ "$(rr_tok NOTREAD "$PANEL")" = 0 ] || { say "FATAL: the console panel prints STATE NOT READ: the switch left no fresh state file"; exit 1; }
+    [ "$(rr_tok OFFLINE "$PANEL")" = 0 ] || { say "FATAL: the console panel prints the pre-v3.71 OFFLINE text for a deliberate off"; exit 1; }
+    [ "$(rr_tok PANEL "$PANEL")" = offchoice ] || { say "FATAL: the console panel does not show a deliberate off as the operator's choice"; exit 1; }
+    say "off held across the reboot, and the panel calls it the operator's choice ✓"
+    $SSHN "systemd-run --unit=rac-standin --collect --quiet python3 /root/rac-standin.py && sleep 3" >/dev/null 2>&1
+    remote on rr4-on
+    [ "$RR" = down ] && [ "$GQ_RC" = 3 ] || rr_fatal "smd remote on after the reboot: want 'wanted on, not up' exit 3, got '${RR:-nothing}' exit $GQ_RC"
+    R4=$(rac_units)
+    nh_ok "$R4" || { say "FATAL: the nested host gave no answer to the unit probe after smd remote on (ssh failed; not a verdict)"; exit 1; }
+    echo "$R4" | grep -qx 'WISH:on' && echo "$R4" | grep -q '^UNIT:enabled/' && echo "$R4" | grep -q '^SOCK:enabled/' \
+        || { say "FATAL: smd remote on did not enable the host's units again"; echo "$R4" | sed 's/^/      /'; exit 1; }
+    say "on enabled the tunnel and the relays again ✓"
+
+    say "── remote access 5: the pairing survives a change of the host's sshd key"
+    # What an identity restore does (AC0G-B4, 2026-10-01): the host's sshd key
+    # changes under a VM that pinned the old one.  The host must re-assert the
+    # pairing by itself; nobody types anything.
+    $SSHN "rm -f /etc/ssh/ssh_host_ed25519_key /etc/ssh/ssh_host_ed25519_key.pub; ssh-keygen -q -t ed25519 -N '' -f /etc/ssh/ssh_host_ed25519_key && systemctl restart ssh" \
+        || { say "FATAL: could not replace the nested host's sshd key"; exit 1; }
+    RRTRY=""; RRCH=0; for i in $(seq 1 18); do
+        if gq 240 rr5-status "smd remote status"; then
+            RRCH=1
+            RRTRY="$(rr_state "$GQ_OUT")/$GQ_RC"
+            case "$RRTRY" in down/3|on/0|off/0) break ;; esac
+        fi
+        sleep 10
+    done
+    [ "$RRCH" = 1 ] || rr_fatal "three minutes after the host's sshd key changed, the guest-exec channel never gave an answer (not a verdict)"
+    case "$RRTRY" in
+        down/3|on/0|off/0) say "the host re-asserted the pairing after its sshd key changed ($RRTRY) ✓" ;;
+        *) rr_fatal "three minutes after the host's sshd key changed, smd remote status still fails ($RRTRY)" ;;
+    esac
+    $SSHN "systemctl stop rac-standin 2>/dev/null; true"
+fi
+
 # What the site sink checks left unchecked, said once more beside the verdict.
 # The PHASE D PASS line below stays exactly as it was: test-update-v3.sh and
 # bless-release.sh match it.
 if [ -n "${SINK_UNCHECKED:-}" ]; then
     say "⚠ SITE SINK CHECKS NOT EVALUATED: $SINK_UNCHECKED"
+fi
+if [ -n "${RAC_UNCHECKED:-}" ]; then
+    say "⚠ REMOTE ACCESS CHECKS NOT EVALUATED: $RAC_UNCHECKED"
 fi
 
 say "PHASE D PASS — NESTED TEST COMPLETE"
