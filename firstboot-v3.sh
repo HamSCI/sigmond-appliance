@@ -2770,6 +2770,7 @@ case "$_h" in
           && PWLINE="hamsci-sigmond   <-- image default, CHANGE IT" ;;
 esac
 
+# >>> rac_block (test-panel-remote.sh loads exactly this block)
 # Remote access (RAC).  The panel used to show LAN addresses only, so an
 # operator standing at the console could not tell whether the station had
 # reached its gateway, which number it got, or WHICH gateway it registered
@@ -2779,19 +2780,37 @@ esac
 # live tunnel in /etc/sigmond/frpc-host.toml (root-only, and this runs as
 # root).  Ports are READ from that file, never recomputed from the
 # base+RAC scheme, so the panel cannot drift from the real tunnel.
+#
+# ⛔ THREE STATES, NOT TWO (sigmond tasks/plan-remote-access.md section 4).
+# Until v3.70 this block printed "OFFLINE — check: journalctl -u
+# sigmond-rac-host" whenever the unit did not run.  An operator who had
+# turned remote access off on purpose then read a fault on the console, and
+# so did whoever came to chase it.  The switch script knows the difference:
+#     on     the tunnel runs; the channels follow
+#     off    the operator holds it off; say since when, and how to turn it on
+#     down   wanted on and not up; this one stays the fault
+# So ask the switch, then read the file it leaves.  A host that carries no
+# switch script yet (pm-align has not brought it) keeps the old two-state
+# text below, unchanged.
+RAC_MARKS="${RAC_MARKS:-/etc/sigmond-appliance}"
+RAC_TOML="${RAC_TOML:-/etc/sigmond/frpc-host.toml}"
+RAC_SWITCH="${RAC_SWITCH:-/usr/local/sbin/sigmond-rac-switch}"
+RAC_STATE_FILE="${RAC_STATE_FILE:-/run/sigmond/rac-state}"
 RACBLOCK=""
-RACN=$(cat /etc/sigmond-appliance/rac-number 2>/dev/null)
-if [ -n "$RACN" ] && [ -r /etc/sigmond/frpc-host.toml ]; then
-    RSRV=$(awk -F'"' '/^serverAddr/{print $2; exit}' /etc/sigmond/frpc-host.toml)
-    # ⚠ This is the frp CLIENT IDENTITY (e.g. DASI-009), not an SSH account.
-    # The panel used to print it as the ssh username on both RAC lines, so the
-    # console offered `ssh -p 51029 DASI-009@vpn.hamsci.org` -- which cannot
-    # work, on the one line an operator needs when the VM is unreachable.  It
-    # is kept only for display/diagnostics; the logins are root (Proxmox host)
-    # and hamsci (decoder VM), exactly as the local sections above say.
-    RUSR=$(awk -F'"' '/^user *=/{print $2; exit}' /etc/sigmond/frpc-host.toml)
-    RTIER=$(cat /etc/sigmond-appliance/rac-tier 2>/dev/null)
-    RREG=$(cat /etc/sigmond-appliance/rac-registrar 2>/dev/null)
+RACN=$(cat "$RAC_MARKS/rac-number" 2>/dev/null)
+RSTATE=""; RREGD=""; RRUNS=""; RUP=""; RDECL=""; RSINCE=""
+if [ -x "$RAC_SWITCH" ]; then
+    # Bounded: a panel refresh must never hang on anything it asks.
+    timeout 20 "$RAC_SWITCH" status >/dev/null 2>&1
+    _rs(){ sed -n "s/^$1=//p" "$RAC_STATE_FILE" 2>/dev/null | head -1; }
+    RSTATE=$(_rs state); RREGD=$(_rs registered); RRUNS=$(_rs tunnel)
+    RUP=$(_rs channels_up); RDECL=$(_rs channels_declared); RSINCE=$(_rs changed_at)
+fi
+RSRV=""; RTIER=""; RREG=""; RAC_ADMIN=""; RAC_USER=""
+if [ -r "$RAC_TOML" ]; then
+    RSRV=$(awk -F'"' '/^serverAddr/{print $2; exit}' "$RAC_TOML")
+    RTIER=$(cat "$RAC_MARKS/rac-tier" 2>/dev/null)
+    RREG=$(cat "$RAC_MARKS/rac-registrar" 2>/dev/null)
     # ── every declared channel, grouped by WHO CAN REACH IT ────────────────
     # ⛔ The old parser recognised exactly four suffixes and printed exactly
     # four lines.  A station that declares six channels showed "6/6 channels
@@ -2858,46 +2877,96 @@ if [ -n "$RACN" ] && [ -r /etc/sigmond/frpc-host.toml ]; then
 $(awk -F'"' '/^name *=/{n=$2}
              /^remotePort *=/{split($0,a,"="); gsub(/[ \t]/,"",a[2]);
                               if (n != "") print n, a[2]; n=""}' \
-         /etc/sigmond/frpc-host.toml)
+         "$RAC_TOML")
 RACEOF
-    # Live state, not a claim: frpc publishes per-proxy status on its local
-    # admin API, and that is the only thing that proves the gateway accepted
-    # the channels.  Fall back to the unit state if the API is not up.
-    RSTAT="OFFLINE — check: journalctl -u sigmond-rac-host -n 50"
-    if systemctl is-active --quiet sigmond-rac-host 2>/dev/null; then
-        _run=$(curl -s --max-time 3 http://127.0.0.1:7500/api/status 2>/dev/null \
-                 | grep -o '"status":"running"' | wc -l | tr -d ' ')
-        # Count the channels this station ACTUALLY declares, never a literal.
-        # It was hardcoded to 4 and the station now ships 6, so a fully
-        # healthy host advertised "6/4 channels up" (rob, 2026-09-21).
-        _decl=$(grep -c '^name *=' /etc/sigmond/frpc-host.toml 2>/dev/null)
-        [ "${_decl:-0}" -gt 0 ] || _decl=$_run
-        if [ "${_run:-0}" -gt 0 ]; then RSTAT="online — $_run/$_decl channels up"
-        else RSTAT="service running, no channel accepted yet"; fi
-    fi
-    # The audience split is the one thing here that MUST survive condensing:
-    # host ssh/UI are full control of the machine and are never published,
-    # while the VM channels are per-person grants.  Shorter wording, same wall.
-    RACBLOCK="
- Remote access   RAC $RACN on ${RSRV:-<no server>}${RTIER:+  ($RTIER)}
-   status   $RSTAT${RREG:+ · registrar $RREG}${RAC_ADMIN:+
+fi
+# This host has no keyboard, so every line below reads as something to type
+# on ANOTHER computer.  The switch lives in the decoder VM.
+_rvm="log in to the decoder VM (ssh -p 2222 sigmond@${HOSTIP:-<no-ip-yet>}) and type:"
+# The channel lists.  The audience split is the one thing here that MUST
+# survive condensing: host ssh/UI are full control of the machine and are
+# never published, while the VM channels are per-person grants.
+_rchannels="${RAC_ADMIN:+
 
    ADMINISTRATORS ONLY — full control of this machine, never publish:
      $RAC_ADMIN}${RAC_USER:+
 
    HamSCI users — private by default, NOT public; none is public just because the hostname is.
    Each needs a WireGuard config for ${RSRV:-the gateway}:
-     $RAC_USER}
+     $RAC_USER}"
+case "$RSTATE" in
+  on)
+    RACBLOCK="
+ Remote access   ON — RAC ${RACN:-?} on ${RSRV:-<no server>}${RTIER:+  ($RTIER)}
+   status   $RUP/$RDECL channels up${RREG:+ · registrar $RREG}
+   to turn it off, $_rvm  smd remote off${_rchannels}
 "
-elif [ -n "$RACN" ]; then
-    RACBLOCK=" Remote access  RAC $RACN assigned, but /etc/sigmond/frpc-host.toml is missing
+    ;;
+  off)
+    if [ "$RREGD" = yes ]; then
+        RACBLOCK=" Remote access   OFF, by the operator's choice${RSINCE:+ (since $RSINCE)} — not a fault
+   The registration stays (RAC ${RACN:-?} on ${RSRV:-<no server>}).
+   ==> to turn it on, $_rvm  smd remote on
+"
+    else
+        RACBLOCK=" Remote access   off — this station has not registered for it
+   ==> to turn it on, $_rvm  smd remote on
+"
+    fi
+    ;;
+  down)
+    if [ "$RREGD" != yes ]; then
+        RACBLOCK=" Remote access   WANTED ON, NOT REGISTERED YET — no gateway has answered
+   This host tries again every 10 minutes and brings the tunnel up by itself.
+   To stop it trying, $_rvm  smd remote off
+"
+    elif [ "$RRUNS" = running ]; then
+        RACBLOCK=" Remote access   WANTED ON, BUT NOT UP — RAC ${RACN:-?} on ${RSRV:-<no server>}: 0/$RDECL channels accepted
+   ==> check: ssh root@${HOSTIP:-<no-ip-yet>} 'journalctl -u sigmond-rac-host -n 50'
+"
+    else
+        RACBLOCK=" Remote access   WANTED ON, BUT NOT UP — the tunnel service does not run (RAC ${RACN:-?})
+   ==> check: ssh root@${HOSTIP:-<no-ip-yet>} 'journalctl -u sigmond-rac-host -n 50'
+"
+    fi
+    ;;
+  *)
+    # No switch script on this host, or it left no state: the text every
+    # panel printed up to v3.70.
+    if [ -n "$RACN" ] && [ -r "$RAC_TOML" ]; then
+        # Live state, not a claim: frpc publishes per-proxy status on its
+        # local admin API, and that is the only thing that proves the gateway
+        # accepted the channels.  Fall back to the unit state if the API is
+        # not up.
+        RSTAT="OFFLINE — check: journalctl -u sigmond-rac-host -n 50"
+        if systemctl is-active --quiet sigmond-rac-host 2>/dev/null; then
+            _run=$(curl -s --max-time 3 http://127.0.0.1:7500/api/status 2>/dev/null \
+                     | grep -o '"status":"running"' | wc -l | tr -d ' ')
+            # Count the channels this station ACTUALLY declares, never a
+            # literal.  It was hardcoded to 4 and the station now ships 6, so
+            # a fully healthy host advertised "6/4 channels up" (rob,
+            # 2026-09-21).
+            _decl=$(grep -c '^name *=' "$RAC_TOML" 2>/dev/null)
+            [ "${_decl:-0}" -gt 0 ] || _decl=$_run
+            if [ "${_run:-0}" -gt 0 ]; then RSTAT="online — $_run/$_decl channels up"
+            else RSTAT="service running, no channel accepted yet"; fi
+        fi
+        RACBLOCK="
+ Remote access   RAC $RACN on ${RSRV:-<no server>}${RTIER:+  ($RTIER)}
+   status   $RSTAT${RREG:+ · registrar $RREG}${_rchannels}
+"
+    elif [ -n "$RACN" ]; then
+        RACBLOCK=" Remote access  RAC $RACN assigned, but /etc/sigmond/frpc-host.toml is missing
    ==> the tunnel is NOT configured; rerun: sigmond-setup --reconfigure
 "
-else
-    RACBLOCK=" Remote access  not configured — this station is LAN-only
+    else
+        RACBLOCK=" Remote access  not configured — this station is LAN-only
    ==> to enable off-site access: sigmond-setup --reconfigure
 "
-fi
+    fi
+    ;;
+esac
+# <<< rac_block
 
 # A host with no usable address must not render a panel that looks normal.
 # The addresses below would all be the installer's unreachable fallback, and
