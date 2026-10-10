@@ -22,12 +22,17 @@
 # An ssh that died prints no END:1, and the rig must call that "no answer", not
 # "the station fails the check".
 #
+# rr_khkey reads the host's key out of the VM's rac-switch.known_hosts, as the
+# guest agent hands the file back.  A profile script in the guest may print a
+# line of its own first, so the key comes from the line whose second field
+# names the key type, never from "line one".
+#
 #   usage: ./test-remote-rig-lines.sh [path/to/test-nested-v3.sh]
 set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"
 SRC="${1:-$HERE/test-nested-v3.sh}"
 eval "$(sed -n '/^# >>> remote_rig/,/^# <<< remote_rig/p' "$SRC")"
-for f in wizard_answers rr_state rr_tok nh_ok; do
+for f in wizard_answers rr_state rr_tok nh_ok rr_khkey; do
     type "$f" >/dev/null 2>&1 || { echo "FAIL: $f not found between the remote_rig markers in $SRC"; exit 1; }
 done
 T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
@@ -110,6 +115,19 @@ chk "END:10 is not END:1"                           "$(nh_ok 'END:10' && echo ye
 chk "an indented END:1 is not the token"            "$(nh_ok '  END:1' && echo yes || echo no)" no
 chk "END:1 inside a longer line is not the token"   "$(nh_ok 'JLINE: END:1' && echo yes || echo no)" no
 
+# ── rr_khkey ────────────────────────────────────────────────────────────
+kh(){ printf '%s\n' "$@" > "$T/kh"; rr_khkey "$T/kh"; }
+chk "the key of a plain known_hosts line"           "$(kh '10.99.0.1 ssh-ed25519 AAAAnew')" AAAAnew
+chk "a line printed ahead of the file costs nothing" "$(kh 'welcome to the decoder' '10.99.0.1 ssh-ed25519 AAAAnew')" AAAAnew
+chk "a comment after the key is not the key"        "$(kh '10.99.0.1 ssh-ed25519 AAAAnew root@pm')" AAAAnew
+chk "the first matching line wins"                  "$(kh '10.99.0.1 ssh-ed25519 AAAAone' '10.99.0.1 ssh-ed25519 AAAAtwo')" AAAAone
+chk "a line of another key type names no key"       "$(kh '10.99.0.1 ssh-rsa AAAArsa')" ""
+chk "an empty answer names no key"                  "$(: > "$T/kh"; rr_khkey "$T/kh")" ""
+chk "a missing file names no key"                   "$(rr_khkey "$T/absent")" ""
+# Control: the reader this one replaced takes the third word of the first line.
+chk "control: a first-line reader takes a word of the stray line" \
+    "$(printf '%s\n' 'welcome to the decoder' '10.99.0.1 ssh-ed25519 AAAAnew' | awk 'NR==1{print $3}')" the
+
 # Positive control: the fixture must defeat the reader this one replaced, or
 # the 'ok' above proves nothing.  A reader that trusts the first line finds no
 # state in the answer of an `on` that registered first.
@@ -119,5 +137,5 @@ case "$(head -1 "$T/a")" in
     *) echo "  ok   control: a first-line reader finds no state in the same answer" ;;
 esac
 
-[ "$fail" = 0 ] && echo "PASS: wizard_answers, rr_state, rr_tok, nh_ok" || echo "FAILED: wizard_answers, rr_state, rr_tok, nh_ok"
+[ "$fail" = 0 ] && echo "PASS: wizard_answers, rr_state, rr_tok, nh_ok, rr_khkey" || echo "FAILED: wizard_answers, rr_state, rr_tok, nh_ok, rr_khkey"
 exit "$fail"

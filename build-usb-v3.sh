@@ -464,7 +464,7 @@ WSEED=""
 # the IPv4 mirrors needs the CLAT, the CLAT is clatd, and installing clatd needs
 # apt.  A host with no Ethernet has the same problem with wpasupplicant.  So the
 # packages ride on the stick and firstboot applies them with dpkg before any
-# network is expected to work.  ~7.4 MB (sudo among them).  See offline-debs/README.md.
+# network is expected to work.  ~7.5 MB (sudo among them).  See offline-debs/README.md.
 _DEBSRC=""
 [ -d "$RIG_ROOT/v3/offline-debs" ] && _DEBSRC="$RIG_ROOT/v3/offline-debs"
 [ -z "$_DEBSRC" ] && [ -d "$REPO/offline-debs" ] && _DEBSRC="$REPO/offline-debs"

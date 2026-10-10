@@ -66,7 +66,7 @@ phase_d_verdict() {
 # <<< phase_d_verdict
 
 # >>> remote_rig (test-remote-rig-lines.sh loads exactly this block)
-# Two readers for the remote-access checks of Phase D (sigmond
+# The readers for the remote-access checks of Phase D (sigmond
 # tasks/plan-remote-access.md).
 #
 # wizard_answers <racq>: the wizard's answers, one per line, in the order it
@@ -118,6 +118,13 @@ rr_tok() {
 # answer", never "the station fails the check".
 nh_ok() {
     printf '%s\n' "$1" | grep -qx 'END:1'
+}
+# rr_khkey <file>: the host key in the VM's rac-switch.known_hosts, as a guest
+# probe handed the file back; nothing when it holds none.  The key comes from
+# the first line whose second field reads ssh-ed25519: a profile script in the
+# guest may print a line of its own ahead of the file's.
+rr_khkey() {
+    LC_ALL=C awk '$2 == "ssh-ed25519" { print $3; exit }' "$1" 2>/dev/null
 }
 # <<< remote_rig
 KEY="$HOME/appliance/build/applkey"
@@ -1719,7 +1726,7 @@ RR3BEOF
     # skipped run leaves the old panel: try again before judging.
     PANEL=""
     for i in $(seq 1 6); do
-        PANEL=$($SSHN "SIGMOND_VMID=$VMID /usr/local/sbin/sigmond-issue >/dev/null 2>&1; grep -q \"OFF, by the operator's choice\" /etc/issue && echo PANEL:offchoice || echo PANEL:other; grep -q 'STATE NOT READ' /etc/issue && echo NOTREAD:1 || echo NOTREAD:0; grep -q 'OFFLINE' /etc/issue && echo OFFLINE:1 || echo OFFLINE:0; echo END:1" 2>&1)
+        PANEL=$($SSHN "SIGMOND_VMID=$VMID /usr/local/sbin/sigmond-issue >/dev/null 2>&1; grep -q \"OFF, by the operator's choice\" /etc/issue && echo PANEL:offchoice || echo PANEL:other; grep -q 'STATE NOT READ' /etc/issue && echo NOTREAD:1 || echo NOTREAD:0; grep -q 'OFFLINE' /etc/issue && echo OFFLINE:1 || echo OFFLINE:0; head -1 /etc/sigmond-appliance/rac-pairing 2>/dev/null | grep -q '^paired ' && echo PAIRREC:1 || echo PAIRREC:0; grep -q '==> to turn it on, log in to the decoder VM (ssh -p 2222 sigmond@.*) and type:  smd remote on' /etc/issue && echo VMCMD:1 || echo VMCMD:0; grep -q 'sigmond-setup --rac-o' /etc/issue && echo HOSTCMD:1 || echo HOSTCMD:0; echo END:1" 2>&1)
         [ "$(rr_tok PANEL "$PANEL")" = offchoice ] && break
         sleep 5
     done
@@ -1728,7 +1735,16 @@ RR3BEOF
     [ "$(rr_tok NOTREAD "$PANEL")" = 0 ] || { say "FATAL: the console panel prints STATE NOT READ: the switch left no fresh state file"; exit 1; }
     [ "$(rr_tok OFFLINE "$PANEL")" = 0 ] || { say "FATAL: the console panel prints the pre-v3.71 OFFLINE text for a deliberate off"; exit 1; }
     [ "$(rr_tok PANEL "$PANEL")" = offchoice ] || { say "FATAL: the console panel does not show a deliberate off as the operator's choice"; exit 1; }
+    # The VM has just worked the switch twice through the pairing (off, then
+    # status after the reboot), so the wizard's pairing must have recorded
+    # `paired` (sigmond-wizard.sh, rac_pair_record), and the panel must then send
+    # the reader to the decoder VM for `smd remote on`.  Without that record the
+    # panel names the host's own switch.
+    [ "$(rr_tok PAIRREC "$PANEL")" = 1 ] || { say "FATAL: /etc/sigmond-appliance/rac-pairing does not begin 'paired ' on a station whose VM works the switch"; $SSHN "cat /etc/sigmond-appliance/rac-pairing" 2>&1 | sed 's/^/      /'; exit 1; }
+    [ "$(rr_tok VMCMD "$PANEL")" = 1 ]   || { say "FATAL: the console panel of a paired station, in the off state, does not tell the reader to log in to the decoder VM and type smd remote on"; $SSHN "grep -A4 'Remote access' /etc/issue" 2>&1 | sed 's/^/      /'; exit 1; }
+    [ "$(rr_tok HOSTCMD "$PANEL")" = 0 ] || { say "FATAL: the console panel of a paired station names the host's own switch (sigmond-setup --rac-on or --rac-off)"; exit 1; }
     say "off held across the reboot, and the panel calls it the operator's choice ✓"
+    say "the pairing stands recorded as paired, and the panel names the decoder VM and smd remote on ✓"
     $SSHN "systemd-run --unit=rac-standin --collect --quiet python3 /root/rac-standin.py && sleep 3" >/dev/null 2>&1
     remote on rr4-on
     [ "$RR" = down ] && [ "$GQ_RC" = 3 ] || rr_fatal "smd remote on after the reboot: want 'wanted on, not up' exit 3, got '${RR:-nothing}' exit $GQ_RC"
@@ -1775,7 +1791,9 @@ main </dev/null
 RR5AEOF
 )
     echo "$R5A" | sed 's/^/      /'
-    nh_ok "$R5A" || rr_hfatal "the nested host gave no answer when the rig held the pairing timer (ssh failed; not a verdict)" "$R5A"
+    # A dead ssh says nothing about whether the stop went through, so the timer
+    # is started again before the rig gives up here as well.
+    nh_ok "$R5A" || { rr5_timer_back; rr_hfatal "the nested host gave no answer when the rig held the pairing timer (ssh failed; not a verdict)" "$R5A"; }
     if [ "$(rr_tok STOPRC "$R5A")" != 0 ] || [ "$(rr_tok TIMERNOW "$R5A")" = active ]; then
         rr5_timer_back
         rr_hfatal "the rig could not stop sigmond-rac-pair.timer (stop exit '$(rr_tok STOPRC "$R5A")', state '$(rr_tok TIMERNOW "$R5A")'); this is the rig's own step, not the station's" "$R5A"
@@ -1825,7 +1843,7 @@ RR5SWAPEOF
     for i in $(seq 1 18); do
         if gq 30 rr5-kh "cat /etc/sigmond/rac-switch.known_hosts"; then
             R5_CH=1
-            R5_KH=$(awk 'NR==1{print $3}' "$GQ_OUT")
+            R5_KH=$(rr_khkey "$GQ_OUT")
             [ "$R5_KH" = "$R5_NEW" ] && break
         fi
         sleep 10

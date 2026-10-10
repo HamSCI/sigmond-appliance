@@ -10,7 +10,7 @@ Likewise a host with **no Ethernet** cannot install `wpasupplicant` to bring up
 the Wi-Fi it would need to reach apt.
 
 So these ship on the install media and are applied with `dpkg -i` before any
-network is expected to work. 7.4 MB total — cheap insurance.
+network is expected to work. About 7.5 MB in all — cheap insurance.
 
 | package | why |
 |---|---|
