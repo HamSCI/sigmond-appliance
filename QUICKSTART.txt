@@ -193,8 +193,9 @@ The console panel lists every address and login with your real values.
 
   Proxmox web GUI   https://<host-ip>:8006
   Host login        ssh root@<host-ip>
-  Decoder VM login  ssh sigmond@<vm-ip>   (also hamsci@)
-                    or, through the host:  ssh -p 2222 sigmond@<host-ip>
+  Decoder VM login  ssh -p 2222 sigmond@<host-ip>   (also hamsci@)
+                    old layout (VM on your own network, no private link
+                    to the host):  ssh sigmond@<vm-ip>
   Live receiver     http://<host-ip>:8081
   Station pages     http://<host-ip>:8000
   Magnetometer      http://<host-ip>:8082

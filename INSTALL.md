@@ -318,7 +318,7 @@ SSH stays off on the VM.
 | Where | How |
 |---|---|
 | Proxmox host (the machine itself) | `ssh root@<host address>` or browse `https://<host address>:8006` |
-| Decoder VM (the radio) | `ssh -p 2222 sigmond@<host address>` (relayed by the host), or `ssh sigmond@<VM address>` (also `hamsci@`) |
+| Decoder VM (the radio) | `ssh -p 2222 sigmond@<host address>` (relayed by the host; also `hamsci@`). On a station with the old layout, where the VM sits on your own network with no private link to the host: `ssh sigmond@<VM address>` |
 
 Change it: run `passwd` on the host, and in the VM.
 
