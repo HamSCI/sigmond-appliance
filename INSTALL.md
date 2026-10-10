@@ -222,11 +222,13 @@ smd remote on         # turn it on again
 smd remote status     # show the state
 ```
 
-(If the summary's remote-access line says `wanted on, not up`, don't worry: the
-radio and every upload keep working. If its second line says the station has not
-registered yet, no gateway has answered, and the host tries again every ten
-minutes. The other cases are in
-[remote access](https://github.com/HamSCI/sigmond/blob/main/docs/operator/remote-access.md#7-if-remote-access-does-not-come-up).)
+(If the summary's `RAC:` line says `wanted on, not up`, don't worry: remote
+access touches neither the radio nor any upload. If its second line says the
+station has not registered yet, no gateway has answered, and the host tries
+again every ten minutes. The other cases are in
+[remote access](https://github.com/HamSCI/sigmond/blob/main/docs/operator/remote-access.md#7-if-remote-access-does-not-come-up).
+In rare cases the line reads `FAILED: …` instead. Such a line names its own next
+step.)
 
 ---
 

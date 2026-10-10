@@ -63,10 +63,19 @@ for d in INSTALL.md docs/install-page.html; do
     fi
 done
 
-# A document that quotes the state `wanted on, not up` quotes a line that
-# `smd remote status` prints.  The check needs the sigmond checkout beside
-# this one; without it the check says so and passes.
+# Every document names the state `wanted on, not up`, the state that `smd
+# remote status` prints.  Naming another state would send the operator after a
+# line that no screen shows.
+for d in $DOCS; do
+    plain "$HERE/$d" "$T/plain"
+    if grep -q 'wanted on, not up' "$T/plain"; then echo "  ok   $d names the state wanted on, not up"
+    else echo "  FAIL $d: does not name the state 'wanted on, not up' (the state smd remote status prints)"; fail=1; fi
+done
+
+# The sigmond checkout beside this one prints those words and holds the timer
+# the documents quote.  Without the checkout these checks say so and pass.
 SMD_REMOTE="$HERE/../sigmond/lib/sigmond/commands/remote.py"
+SMD_WIZARD="$HERE/../sigmond/scripts/proxmox/sigmond-wizard.sh"
 if [ -f "$SMD_REMOTE" ]; then
     if grep -q "'Remote access: wanted on, not up'" "$SMD_REMOTE"; then
         echo "  ok   the state the documents quote (wanted on, not up) is one smd remote prints"
@@ -75,6 +84,19 @@ if [ -f "$SMD_REMOTE" ]; then
     fi
 else
     echo "  skip the state the documents quote: no sigmond checkout beside this one"
+fi
+# "The host tries again every ten minutes" repeats the retry timer's interval.
+if [ -f "$SMD_WIZARD" ]; then
+    n=$(sed -n "/sigmond-rac-register.timer <<'RACREGTMREOF'/,/^RACREGTMREOF/s/^OnUnitInactiveSec=\([0-9]*\)min\$/\1/p" "$SMD_WIZARD" | head -1)
+    case "$n" in 5) w=five;; 10) w=ten;; 15) w=fifteen;; 20) w=twenty;; 30) w=thirty;; *) w="${n:-no-timer}";; esac
+    for d in $DOCS; do
+        plain "$HERE/$d" "$T/plain"
+        got=$(grep -oE 'tries again every [a-z0-9-]+ minutes' "$T/plain" | sort -u)
+        if [ "$got" = "tries again every $w minutes" ]; then echo "  ok   $d: the retry interval ($w minutes) is the timer's"
+        else echo "  FAIL $d: says [${got:-nothing}] about the retry interval; the host's retry timer reads ${n:-no value} minutes (sigmond-wizard.sh, sigmond-rac-register.timer)"; fail=1; fi
+    done
+else
+    echo "  skip the retry interval: no sigmond checkout beside this one"
 fi
 
 # Positive control: the documents of the last release whose wizard asked must
