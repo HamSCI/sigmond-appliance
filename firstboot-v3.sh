@@ -2914,6 +2914,28 @@ fi
 # This host has no keyboard, so every line below reads as something to type
 # on ANOTHER computer.  The switch lives in the decoder VM.
 _rvm="log in to the decoder VM (ssh -p 2222 sigmond@${HOSTIP:-<no-ip-yet>}) and type:"
+# ⛔ NAME THE VM'S COMMAND ONLY WHERE IT WORKS.  `smd remote` reaches this host
+# through the pairing of the two machines.  A host with the old layout (the VM
+# on the LAN, no private link) forwards nothing on port 2222 and can never
+# pair; after a pairing that failed, `smd remote` answers "holds no pairing"
+# and exits 5.  Telling that reader to log in to the VM and type `smd remote
+# on` sends them to a command that cannot work.
+# The wizard's pairing records its outcome in one line (sigmond-wizard.sh,
+# rac_pair_record):   paired <UTC>   or   not-paired <UTC> <reason>
+# Only a first word `paired` earns the VM's command.  No file, not-paired or
+# anything else gets the host's own switch, which works on every host.
+RAC_PAIRING="${RAC_PAIRING:-$RAC_MARKS/rac-pairing}"
+_rpaired=no
+case "$(head -1 "$RAC_PAIRING" 2>/dev/null)" in "paired "*|paired) _rpaired=yes ;; esac
+# _rhow <on|off> : the whole way to turn it on or off, for a reader at another
+# computer.  Every "to turn it ..." line below comes from here.
+_rhow(){
+    if [ "$_rpaired" = yes ]; then
+        printf '%s  smd remote %s' "$_rvm" "$1"
+    else
+        printf "type on another computer:  ssh root@%s 'sigmond-setup --rac-%s'" "${HOSTIP:-<no-ip-yet>}" "$1"
+    fi
+}
 # The channel lists.  The audience split is the one thing here that MUST
 # survive condensing: host ssh/UI are full control of the machine and are
 # never published, while the VM channels are per-person grants.
@@ -2930,7 +2952,7 @@ case "$RSTATE" in
     RACBLOCK="
  Remote access   ON — RAC ${RACN:-?} on ${RSRV:-<no server>}${RTIER:+  ($RTIER)}
    status   $RUP/$RDECL channels up${RREG:+ · registrar $RREG}
-   to turn it off, $_rvm  smd remote off${_rchannels}
+   to turn it off, $(_rhow off)${_rchannels}
 "
     ;;
   off)
@@ -2938,11 +2960,11 @@ case "$RSTATE" in
     # (the switch's exit 4, or a unit someone started by hand).  Then this
     # station can still be reached, and the console must not say "not a fault".
     _rfault=" — not a fault"
-    _rturn="==> to turn it on, $_rvm  smd remote on"
+    _rturn="==> to turn it on, $(_rhow on)"
     if [ "$RRUNS" = running ]; then
         _rfault=""
         _rturn="NOTE: the tunnel service still runs, so this station can still be reached.
-   ==> to close it, $_rvm  smd remote off"
+   ==> to close it, $(_rhow off)"
     fi
     if [ "$RREGD" = yes ]; then
         RACBLOCK=" Remote access   OFF, by the operator's choice${RSINCE:+ (since $RSINCE)}${_rfault}
@@ -2957,9 +2979,12 @@ case "$RSTATE" in
     ;;
   down)
     if [ "$RREGD" != yes ]; then
+        # `off` never touches the retry timer: the host still registers when a
+        # gateway answers, and then leaves the tunnel down.  So this line
+        # promises a tunnel that stays down, never a host that stops trying.
         RACBLOCK=" Remote access   WANTED ON, NOT REGISTERED YET — no gateway has answered
    This host tries again every 10 minutes and brings the tunnel up by itself.
-   To stop it trying, $_rvm  smd remote off
+   To keep the tunnel down once the station registers, $(_rhow off)
 "
     elif [ "$RRUNS" = running ]; then
         RACBLOCK=" Remote access   WANTED ON, BUT NOT UP — RAC ${RACN:-?} on ${RSRV:-<no server>}: 0/$RDECL channels accepted

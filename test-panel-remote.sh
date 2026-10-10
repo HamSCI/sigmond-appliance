@@ -63,7 +63,9 @@ TOML
 # switch script), no-exec (the script is there without its execute bit),
 # switch-leaves (the script exits 1 and writes nothing), preseed (the state
 # file already stands in the run dir before the panel asks), no-toml,
-# unit-active (for the text of v3.70 and before).
+# unit-active (for the text of v3.70 and before).  marks/rac-pairing holds
+# the outcome the wizard's pairing recorded; scene() writes `paired`, and
+# unpaired() below replaces or removes it.
 # $BLOCK names the block to run; the control below points it at a mutant.
 # The stub switch records its arguments (switch.calls) and what it inherited
 # (switch.env); the stub timeout records its own (timeout.calls).  The panel
@@ -103,8 +105,24 @@ scene(){   # scene <name> <rac-number|-> [state lines...]
     mkdir -p "$d/marks"
     [ "$n" = - ] || { echo "$n" > "$d/marks/rac-number"; echo "wsprdaemon (secure)" > "$d/marks/rac-tier"; }
     [ $# -gt 0 ] && printf '%s\n' "$@" > "$d/state"
+    # The two machines have paired, as on every station the wizard finished.
+    echo "paired 2026-10-09T18:20:00Z" > "$d/marks/rac-pairing"
     echo "$d"
 }
+# unpaired <scene dir> <how> : what stands where the pairing's outcome belongs.
+#   none     no file: the wizard's pairing never ran on this host
+#   failed   the last pairing failed
+#   <text>   that text, as the file's whole content
+unpaired(){
+    case "$2" in
+        none)   rm -f "$1/marks/rac-pairing" ;;
+        failed) echo "not-paired 2026-10-09T18:20:00Z the guest agent in VM 100 does not answer" > "$1/marks/rac-pairing" ;;
+        *)      printf '%s' "$2" > "$1/marks/rac-pairing" ;;
+    esac
+}
+VMLINE="log in to the decoder VM (ssh -p 2222 sigmond@192.168.1.50) and type:"
+HOSTON="type on another computer:  ssh root@192.168.1.50 'sigmond-setup --rac-on'"
+HOSTOFF="type on another computer:  ssh root@192.168.1.50 'sigmond-setup --rac-off'"
 
 echo "── on: the tunnel runs, and the panel says how to turn it off ─────"
 d=$(scene on 507 state=on registered=yes tunnel=running channels_up=6 channels_declared=6 changed_at=2026-10-09T18:22:05Z "checked_at=$(at 0)")
@@ -174,6 +192,63 @@ out=$(panel "$d")
 has   "an unregistered station says so"             "$out" "WANTED ON, NOT REGISTERED YET — no gateway has answered"
 has   "and says the host keeps trying"              "$out" "tries again every 10 minutes"
 lacks "it does not send the reader to the wizard"   "$out" "sigmond-setup --reconfigure"
+# `off` never touches the retry timer: the host registers when a gateway
+# answers, and then stays off.  The panel must promise that and no more.
+has   "it says what off does for such a station"    "$out" "   To keep the tunnel down once the station registers, $VMLINE  smd remote off"
+lacks "it does not promise that off stops the retries" "$out" "stop it trying"
+
+echo "── the VM's command only where a pairing stands ───────────────────"
+# `smd remote` reaches the host through the pairing.  A host with the old
+# layout has no private link and can never pair; a pairing that failed leaves
+# the VM answering "holds no pairing".  There the panel names the host's own
+# switch, which works on every host.  One line of the wizard's decides:
+# marks/rac-pairing, first word `paired`.
+states=(
+ "u-on|507|state=on registered=yes tunnel=running channels_up=6 channels_declared=6|to turn it off, |off"
+ "u-off|507|state=off registered=yes tunnel=stopped channels_up=0 channels_declared=6 changed_at=2026-10-09T18:22:05Z|==> to turn it on, |on"
+ "u-off-never|-|state=off registered=no tunnel=stopped wish_source=units|==> to turn it on, |on"
+ "u-off-open|507|state=off registered=yes tunnel=running channels_up=6 channels_declared=6|==> to close it, |off"
+ "u-down-unreg|-|state=down registered=no tunnel=stopped|To keep the tunnel down once the station registers, |off"
+)
+for how in none failed; do
+    for row in "${states[@]}"; do
+        IFS='|' read -r name racn lines lead word <<<"$row"
+        # shellcheck disable=SC2086
+        d=$(scene "$name-$how" "$racn" $lines "checked_at=$(at 0)")
+        [ "$racn" = - ] && touch "$d/no-toml"
+        unpaired "$d" "$how"
+        out=$(panel "$d")
+        [ "$word" = on ] && want="$HOSTON" || want="$HOSTOFF"
+        has   "$name, pairing $how: the host's own switch, as a whole command" "$out" "${lead}${want}"
+        lacks "$name, pairing $how: no smd remote"                              "$out" "smd remote"
+        lacks "$name, pairing $how: no login to the decoder VM"                 "$out" "log in to the decoder VM"
+    done
+done
+# The same five states on a paired station name the VM's command and never the host's.
+for row in "${states[@]}"; do
+    IFS='|' read -r name racn lines lead word <<<"$row"
+    # shellcheck disable=SC2086
+    d=$(scene "$name-paired" "$racn" $lines "checked_at=$(at 0)")
+    [ "$racn" = - ] && touch "$d/no-toml"
+    out=$(panel "$d")
+    has   "$name, paired: the VM's command"            "$out" "${lead}${VMLINE}  smd remote $word"
+    lacks "$name, paired: not the host's own switch"   "$out" "sigmond-setup --rac-"
+done
+# Only the first word `paired` earns the VM's command.
+for text in "" "paired" "pairedX 2026-10-09T18:20:00Z" "  paired 2026-10-09T18:20:00Z" "PAIRED 2026-10-09T18:20:00Z" \
+            "not-paired 2026-10-09T18:20:00Z paired once before" $'\npaired 2026-10-09T18:20:00Z'; do
+    d=$(scene "word-$(printf '%s' "$text" | cksum | cut -d' ' -f1)" 507 state=off registered=yes tunnel=stopped channels_declared=6 "checked_at=$(at 0)")
+    unpaired "$d" "$text"
+    out=$(panel "$d")
+    if [ "$text" = paired ]; then has "the word 'paired' alone counts as paired" "$out" "$VMLINE  smd remote on"
+    else has "a file reading '$(printf '%s' "$text" | head -c 24 | tr '\n' '/')' is no pairing" "$out" "$HOSTON"; fi
+done
+# The fault lines that name no switch stay as they are, paired or not.
+d=$(scene u-down-stopped 507 state=down registered=yes tunnel=stopped channels_up=0 channels_declared=6 "checked_at=$(at 0)")
+unpaired "$d" none
+out=$(panel "$d")
+has   "a stopped tunnel on an unpaired host keeps its check line" "$out" "==> check: ssh root@192.168.1.50 'journalctl -u sigmond-rac-host -n 50'"
+lacks "and names no switch"                          "$out" "sigmond-setup --rac-"
 
 echo "── a file the switch did not just write is never shown as current ─"
 # `status` stamps checked_at at every run.  A call that hangs, fails, or
@@ -236,6 +311,16 @@ d=$(scene legacy-down 507); touch "$d/no-switch"
 has   "a stopped one reads OFFLINE, as before"      "$(panel "$d")" "status   OFFLINE — check: journalctl -u sigmond-rac-host -n 50"
 d=$(scene legacy-none -); touch "$d/no-switch" "$d/no-toml"
 has   "an unconfigured one reads LAN-only, as before" "$(panel "$d")" "not configured — this station is LAN-only"
+# The pairing's record plays no part in that text: byte for byte the same with
+# a `paired` file, a `not-paired` one and none.
+for name in legacy-up legacy-down legacy-none; do
+    with=$(panel "$T/$name")
+    unpaired "$T/$name" failed; failed=$(panel "$T/$name")
+    unpaired "$T/$name" none;   without=$(panel "$T/$name")
+    if [ -n "$with" ] && [ "$with" = "$failed" ] && [ "$with" = "$without" ]; then ok "$name: the v3.70 text does not read the pairing's record"
+    else bad "$name: the v3.70 text does not read the pairing's record" "$(diff <(printf '%s\n' "$with") <(printf '%s\n' "$without") | head -4)"; fi
+    lacks "$name: it names neither switch"           "$with" "sigmond-setup --rac-"
+done
 # A file that is not executable is no switch.  The state file stands fresh in
 # the run dir, so only the execute test keeps it out of the panel.
 d=$(scene no-exec 507 state=off registered=yes tunnel=stopped channels_up=0 channels_declared=6 "checked_at=$(at 0)")
@@ -288,6 +373,19 @@ else
         *"by the operator's choice"*) bad "control: a block that ignores the switch fails the off check" "it still passed" ;;
         *OFFLINE*) ok "control: a block that ignores the switch prints OFFLINE for a deliberate off" ;;
         *) bad "control: a block that ignores the switch fails the off check" "unexpected: $out" ;;
+    esac
+fi
+
+# And the pairing checks must be able to fail: against a block that takes every
+# host for a paired one, an unpaired scene still prints the VM's command.
+sed 's/^_rpaired=no$/_rpaired=yes/' "$T/block.sh" > "$T/block.mut2"
+if cmp -s "$T/block.sh" "$T/block.mut2"; then
+    bad "control: the pairing mutation applies" "the block no longer starts from _rpaired=no"
+else
+    out=$(BLOCK="$T/block.mut2" panel "$T/u-off-none")
+    case "$out" in
+        *"smd remote on"*) ok "control: a block that takes every host for paired names the VM's command on an unpaired one" ;;
+        *) bad "control: a block that takes every host for paired fails the unpaired check" "unexpected: $out" ;;
     esac
 fi
 
