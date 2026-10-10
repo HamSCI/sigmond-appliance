@@ -15,6 +15,14 @@
 # every blessed image, bless-release.sh gate 7) and QUICKSTART.txt, which
 # rides the stick.
 #
+# The host has no keyboard of its own once the install ends, so the switch the
+# documents teach is the VM's.  They may name the host's own switch
+# (sigmond-setup --rac-off, --rac-on) in two forms only, the two in which a
+# reader can type it: as a whole command for another computer (ssh root@<host>
+# '...'), which is what the console panel prints on a station that has not
+# paired; or after the document has said how a keyboard at the station reaches a
+# login on the host.
+#
 #   usage: ./test-instructions-remote.sh
 #          CONTROL_REF=<git ref> names the release whose documents must FAIL
 #          these checks (default v3.70, the last one whose wizard asked).
@@ -32,16 +40,56 @@ plain(){
     sed -e 's/<[^>]*>/ /g' -e 's/&[A-Za-z]*;/ /g' "$1" | tr '\n\t' '  ' | tr -s ' ' > "$2"
 }
 
+# raw <file> <out>: the file as one line, tags and placeholders kept.  plain()
+# takes `<VM address>` and `<host-ip>` for tags and drops them, so a check that
+# reads an address reads this form.
+raw(){
+    tr '\n\t' '  ' < "$1" | tr -s ' ' > "$2"
+}
+
+# before <file> <needle> <n>: for every place the needle stands in the file's
+# one line, the n characters ahead of it and the needle itself, one per line.
+# (awk and index(), not `grep -Eo '.{0,n}needle'`: grep takes minutes over a
+# bounded repeat that long on a line of this size.)
+before(){
+    awk -v needle="$2" -v n="$3" '{
+        off = 0; s = $0
+        while ((i = index(s, needle)) > 0) {
+            pos = off + i
+            start = pos - n; if (start < 1) start = 1
+            print substr($0, start, pos - start + length(needle))
+            off = pos + length(needle) - 1
+            s = substr($0, off + 1)
+        }
+    }' "$1"
+}
+
 # findings <file>: one line per thing wrong with it; nothing when it is right.
 findings(){
-    local f="$T/plain"
+    local f="$T/plain" r="$T/raw" who where
     plain "$1" "$f"
+    raw "$1" "$r"
     grep -q 'smd remote off' "$f"    || echo "does not name the command that turns remote access off (smd remote off)"
     grep -q 'smd remote on' "$f"     || echo "does not name the command that turns it on (smd remote on)"
     grep -qi 'enable remote access' "$f" && echo "still lists the wizard's old question (Enable remote access?)"
     grep -Eq 'Remote access +Y' "$f"  && echo "still lists remote access as an answer to prepare"
     grep -Eqi 'remote.access[^.|<]*(says|shows) FAILED' "$f" && echo "still describes the old FAILED line"
-    grep -q 'sigmond-setup --rac-o' "$f" && echo "sends the operator to the host for the switch (sigmond-setup --rac-on/--rac-off); the host has no keyboard"
+    # The host's own switch, only where the reader can type it (see the head of this file).
+    before "$r" "sigmond-setup --rac-o" 400 \
+        | grep -Evq "login on the host|ssh root@[^']{1,40}'sigmond-setup --rac-o\$" \
+        && echo "names the host's own switch (sigmond-setup --rac-on/--rac-off) without a way to type it: neither as ssh root@<host> '...' nor after saying how to reach a login on the host"
+    # The VM's own address reaches nothing from the operator's network on a
+    # station with the private link.  It may stand as an ssh target only beside
+    # the words "old layout".
+    for who in sigmond hamsci; do
+        for where in '<VM address>' '<vm-ip>' '&lt;recorder&gt;'; do
+            before "$r" "$who@$where" 200
+        done
+    done | grep -vqi 'old layout' \
+        && echo "gives the VM's own address as an ssh target without naming the old layout"
+    # The keyboard: the documents once called the console read-only.  A keyboard
+    # at the station types into the VM, and that reaches a login on the host.
+    grep -qi 'console is read-only' "$f" && echo "still calls the console read-only"
     return 0
 }
 
@@ -61,6 +109,32 @@ for d in INSTALL.md docs/install-page.html; do
     else
         echo "  FAIL $d: does not say that remote access comes up by itself and sends the station's name and the host's public key"; fail=1
     fi
+done
+
+# What a keyboard at the station still does, and what the panel prints on a
+# station whose two machines have not paired.  Both read out of firstboot-v3.sh,
+# which draws the panel and installs the split console.
+FB="$HERE/firstboot-v3.sh"
+grep -q 'KEYBOARD WORKS HERE — press Enter for a login to THIS host' "$FB" \
+    && grep -q 'TYPE THE PROXMOX HOST ROOT PASSWORD' "$FB" \
+    && echo "  ok   firstboot: the panel's first line offers a login on the host, and the screen asks for its root password" \
+    || { echo "  FAIL firstboot-v3.sh no longer prints the keyboard line, or the password prompt, that the documents repeat"; fail=1; }
+grep -qF "printf \"type on another computer:  ssh root@%s 'sigmond-setup --rac-%s'\"" "$FB" \
+    && echo "  ok   firstboot: the panel prints the host's own switch as ssh root@<host> '...' on a station that has not paired" \
+    || { echo "  FAIL firstboot-v3.sh no longer prints the unpaired instruction the documents repeat"; fail=1; }
+for d in $DOCS; do
+    plain "$HERE/$d" "$T/plain"; raw "$HERE/$d" "$T/raw"
+    miss=""
+    grep -q 'press Enter for a login to THIS host' "$T/plain" || miss="$miss; does not quote the panel's line (press Enter for a login to THIS host)"
+    grep -q 'login on the host' "$T/plain"   || miss="$miss; does not say that the keyboard reaches a login on the host"
+    grep -qi 'nothing shows while you type' "$T/plain" || miss="$miss; does not say that the password does not show"
+    for c in 'sigmond-setup --rac-off' 'sigmond-setup --rac-on' 'sigmond-setup --pair-vm'; do
+        grep -q -- "$c" "$T/plain" || miss="$miss; does not name $c"
+    done
+    grep -Eq "ssh root@[^']{1,40}'sigmond-setup --rac-off'" "$T/raw" || miss="$miss; does not give the line the panel prints on a station that has not paired"
+    grep -qi 'not paired' "$T/plain" || miss="$miss; does not say when the panel prints that line (the two machines have not paired)"
+    if [ -z "$miss" ]; then echo "  ok   $d says what a keyboard at the station does, and what an unpaired station's panel prints"
+    else fail=1; echo "  FAIL $d${miss#;}"; fi
 done
 
 # Every document names the state `wanted on, not up`, the state that `smd
@@ -109,6 +183,20 @@ for d in $DOCS; do
     if [ -n "$(findings "$T/control")" ]; then echo "  ok   control: $d at $CONTROL_REF fails these checks"
     else echo "  FAIL control: $d at $CONTROL_REF passes; these checks cannot tell old instructions from new"; fail=1; fi
 done
+
+# The two guards on what a reader can type must be able to fail.  Each mutant is
+# INSTALL.md with one sentence added.
+mutant(){   # mutant <name> <sentence> <words the finding must hold>
+    { cat "$HERE/INSTALL.md"; printf '\n%s\n' "$2"; } > "$T/mutant.md"
+    if findings "$T/mutant.md" | grep -q -- "$3"; then echo "  ok   control: $1"
+    else echo "  FAIL control: $1: the checks passed a document that says: $2"; fail=1; fi
+}
+mutant "a bare ssh to the VM's own address is caught" \
+       'Log in to the decoder VM with `ssh sigmond@<VM address>` from your laptop.' "without naming the old layout"
+mutant "the host's own switch with no way to type it is caught" \
+       'To turn remote access off, run `sigmond-setup --rac-off` on the Proxmox machine.' "without a way to type it"
+mutant "the old words about the console are caught" \
+       'The panel says the console is read-only.' "read-only"
 
 [ "$fail" = 0 ] && echo "PASS: the installation documents name the remote-access switch" \
                 || echo "FAILED: the installation documents and the remote-access switch"

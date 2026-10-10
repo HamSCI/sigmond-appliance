@@ -166,10 +166,15 @@ on a fresh machine that can take tens of minutes.
   It asks for the stick a SECOND time
         Expected — the first boot installs the system, the second loads
         the recorder.
-  The keyboard stops working at the end
-        Normal.  The USB controllers now belong to the VM; the panel says
-        the console is read-only.  Use ssh or a web page from another
-        computer.
+  The keyboard no longer types into the host
+        Normal.  The USB controllers now belong to the VM, so a keyboard
+        on the station types into the VM.  The panel's first line says
+        what it still does:  press Enter for a login to THIS host.
+        Press Enter, then type the host's root password when the screen
+        asks; nothing shows while you type it.  With that login on the
+        host you can type   sigmond-setup --rac-off ,
+        sigmond-setup --rac-on   and   sigmond-setup --pair-vm .
+        For everything else use ssh or a web page from another computer.
   "no RX888" or other missing equipment
         The station installs and waits.  Plug the device in, then on the
         VM:  smd status   and   smd adopt <name>.  Nothing starts until
@@ -178,6 +183,10 @@ on a fresh machine that can take tens of minutes.
         The station works.  In the VM:  smd remote status   names the case.
         "has not registered yet" means no gateway has answered; the host
         tries again every ten minutes.
+  The panel says  ssh root@<host-ip> 'sigmond-setup --rac-off'  where
+  this sheet says  smd remote off
+        The VM and the host have not paired yet.  Type the panel's line
+        from another computer; it works the same switch.
   "INSTALL CANNOT CONTINUE NORMALLY: ..."
         No working network.  The title says which case (no cable detected /
         port connected but nothing answered / no address offered), and the

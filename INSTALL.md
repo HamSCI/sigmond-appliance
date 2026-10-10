@@ -248,11 +248,17 @@ back on.** That full power-off also resets the RX888, which it needs.
 While the console panel says **STATION IS STILL BUILDING**, leave it alone; on a
 fresh machine that can take tens of minutes.
 
-⚠ **After this the keyboard on the station computer may go dead. That is normal
-and correct** — the USB ports now belong to the radio, and the panel says the
-console is read-only. From here on you use the station from another computer.
-The panel lists every address and login; disconnect the monitor and keyboard
-whenever you like.
+⚠ **After this the keyboard no longer types into the host itself. That is normal
+and correct.** The USB ports now belong to the decoder VM, so a keyboard plugged
+into the station types into the VM. The station still carries that typing to a
+login on the host, and the panel's first line says so:
+`KEYBOARD WORKS HERE — press Enter for a login to THIS host`. Press Enter, then
+type the host's root password when the screen asks for it. Nothing shows while
+you type the password. With that login on the host you can type
+`sigmond-setup --rac-off`, `sigmond-setup --rac-on` and
+`sigmond-setup --pair-vm` (§10 says what they do). For everything else, use the
+station from another computer. The panel lists every address and login;
+disconnect the monitor and keyboard whenever you like.
 
 ---
 
@@ -338,6 +344,18 @@ and changes nothing else: every upload keeps running, and off stays off across
 reboots. The console panel shows which state holds. More:
 [remote access](https://github.com/HamSCI/sigmond/blob/main/docs/operator/remote-access.md).
 
+**The host works the same switch.** With a login on the host,
+`sigmond-setup --rac-off` and `sigmond-setup --rac-on` do what `smd remote off`
+and `smd remote on` do. `smd remote` itself works once the VM and the host have
+paired, and the wizard pairs them at install. Its summary then carries a
+`Switch:` line that begins `paired:`. If that line begins `NOT PAIRED`, the two
+have not paired, and the console panel then names the host's own switch as a
+line to type on another computer:
+`ssh root@<host address> 'sigmond-setup --rac-off'` (or `--rac-on`). The host
+tries the pairing again after every boot.
+`sigmond-setup --pair-vm`, typed with a login on the host, tries it at once.
+More: [remote access §8](https://github.com/HamSCI/sigmond/blob/main/docs/operator/remote-access.md#8-a-station-installed-before-v371).
+
 ---
 
 ## 11. If something goes wrong
@@ -354,6 +372,7 @@ reboots. The console panel shows which state holds. More:
 | Typed a wrong answer | From the host: `sigmond-setup --reconfigure` |
 | Remote access says `wanted on, not up` | The radio and every upload keep working. In the VM, `smd remote status` names the case on its second line. "has not registered yet" needs nothing from you: the host tries again every ten minutes. For the others, see [remote access](https://github.com/HamSCI/sigmond/blob/main/docs/operator/remote-access.md#7-if-remote-access-does-not-come-up) |
 | You want remote access off | In the VM: `smd remote off`. `smd remote on` turns it on again |
+| The panel prints `ssh root@<host address> 'sigmond-setup --rac-off'` where this guide says `smd remote off` | The VM and the host have not paired (§10). Type the panel's line from another computer; it works the same switch |
 | No spots after 30 minutes | Expected on a new station until you run `smd sink upload` (§9). Log in to the VM and run `smd sink status`. If it says `site sink: off` with the reason `new station: …`, check the station as §9 describes, then run `smd sink upload`. If it says `site sink: off` with any other reason, or `hold (legacy)`, ask your fleet admin. If it says `site sink: upload`: antenna actually connected? Then run `smd status` and send its output to your fleet admin |
 | Anything else | Your fleet admin can log in through remote access and fix it — just ask. If you turned remote access off, run `smd remote on` in the VM first |
 
