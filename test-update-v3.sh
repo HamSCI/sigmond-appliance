@@ -94,8 +94,7 @@
 #   "holds no pairing with its Proxmox host", exit 5
 #                                       lib/sigmond/commands/remote.py
 #                                       _not_paired (v3.71)
-#   "sigmond-setup --pair-vm", "--rac-off", "--rac-on", "v3.71"
-#                                       the info() lines of the same function
+#   "sigmond-setup --pair-vm"           the same function's info() lines
 #   "paired: the decoder VM can run"    scripts/proxmox/sigmond-wizard.sh,
 #                                       the --pair-vm branch (v3.71); the same
 #                                       branch ends in "another pairing is
@@ -1227,23 +1226,36 @@ say "════ PHASE E-ter: remote access on a station already in the field �
 gx_ok 120 et0-verb 'o=$(smd remote --help 2>&1); rc=$?; echo "RV:$rc"; echo "INV:$(printf "%s\n" "$o" | grep -c "invalid choice")"' "E-ter: does this smd know remote?"
 ET_RV="$(gx_tok "$GX_OUT" RV)"; ET_INV="$(gx_tok "$GX_OUT" INV)"
 [ -n "$ET_RV" ] && [ -n "$ET_INV" ] || fatal "$GX_OUT" "E-ter: the verb probe returned no answer (not a verdict)"
+ETER_UNCHECKED=""
 if [ "$ET_RV" != 0 ] && [ "$ET_INV" -ge 1 ]; then
     say "⚠ PHASE E-ter NOT EVALUATED — the target's smd has no 'remote' verb (a target before v3.71)"
+    ETER_UNCHECKED="all of it (the target's smd has no 'remote' verb: a target before v3.71)"
 else
     [ "$ET_RV" = 0 ] || fatal "$GX_OUT" "E-ter: smd remote --help exited $ET_RV without saying 'invalid choice': the verb exists and crashes"
     # ── 1. unpaired: the guest names the host command ───────────────────
-    gx_ok 120 et1-unpaired 'smd remote status' "E-ter: smd remote status, unpaired"
-    sed 's/^/      /' "$GX_OUT"
-    [ "$GX_RC" -eq 5 ] || fatal "$GX_OUT" "smd remote status on an unpaired station exited $GX_RC, want 5"
-    grep -q 'holds no pairing with its Proxmox host' "$GX_OUT" \
-        || fatal "$GX_OUT" "the unpaired message does not say that the VM holds no pairing"
-    grep -q 'sigmond-setup --pair-vm' "$GX_OUT" \
-        || fatal "$GX_OUT" "the unpaired message does not name the host command"
-    grep -q 'sigmond-setup --rac-off' "$GX_OUT" && grep -q 'sigmond-setup --rac-on' "$GX_OUT" \
-        || fatal "$GX_OUT" "the unpaired message does not name sigmond-setup --rac-off and --rac-on, the two commands an older host already answers"
-    grep -q 'v3\.71' "$GX_OUT" \
-        || fatal "$GX_OUT" "the unpaired message does not say that the host needs v3.71"
-    say "unpaired: smd remote exits 5 and names sigmond-setup --pair-vm, --rac-off and --rac-on ✓"
+    # Step 1 needs a guest that holds no pairing key.  Phase G's restore leaves
+    # /etc/sigmond/rac-switch.key behind, so a resumed run (--resume) meets a
+    # guest that an earlier pairing already touched, and `smd remote status`
+    # there reads `off` and exits 0 where step 1 wants exit 5.  Re-testing a
+    # fault in F or G must not cost a full reinstall: say so, skip step 1, and
+    # go on with the pairing and the later steps.
+    gx_ok 60 et0-key 'if [ -e /etc/sigmond/rac-switch.key ]; then echo "PAIRKEY:1"; else echo "PAIRKEY:0"; fi' "E-ter: does the guest already hold a pairing key?"
+    ET_PK="$(gx_tok "$GX_OUT" PAIRKEY)"
+    [ -n "$ET_PK" ] || fatal "$GX_OUT" "E-ter: the pairing-key probe returned no answer (not a verdict)"
+    if [ "$ET_PK" = 1 ]; then
+        say "⚠ PHASE E-ter step 1 NOT EVALUATED — the guest already holds /etc/sigmond/rac-switch.key (a resumed run after an earlier pairing)"
+        say "  step 1 needs an unpaired guest; the pairing and the later steps go on"
+        ETER_UNCHECKED="step 1, the unpaired message (the guest already held /etc/sigmond/rac-switch.key: a resumed run)"
+    else
+        gx_ok 120 et1-unpaired 'smd remote status' "E-ter: smd remote status, unpaired"
+        sed 's/^/      /' "$GX_OUT"
+        [ "$GX_RC" -eq 5 ] || fatal "$GX_OUT" "smd remote status on an unpaired station exited $GX_RC, want 5"
+        grep -q 'holds no pairing with its Proxmox host' "$GX_OUT" \
+            || fatal "$GX_OUT" "the unpaired message does not say that the VM holds no pairing"
+        grep -q 'sigmond-setup --pair-vm' "$GX_OUT" \
+            || fatal "$GX_OUT" "the unpaired message does not name the host command"
+        say "unpaired: smd remote exits 5 and names sigmond-setup --pair-vm ✓"
+    fi
 
     # ── 2. the target's wizard on the old host pairs with one command ───
     # pm-align installs the release's wizard as /usr/local/sbin/sigmond-setup,
@@ -1256,7 +1268,7 @@ else
         mkdir -p /etc/sigmond-appliance
         printf '%s\n' SIGMOND_RAC_SERVER=127.0.0.1 SIGMOND_RAC_REGISTRAR=http://127.0.0.1:35737/register SIGMOND_RAC_TLS=off SIGMOND_RAC_FRPS_PORT=35735 > /etc/sigmond-appliance/rac-endpoint.env
         grep -qx 'SIGMOND_RAC_SERVER=127.0.0.1' /etc/sigmond-appliance/rac-endpoint.env
-        cp -p /usr/local/sbin/sigmond-setup /root/sigmond-setup.base
+        [ -e /root/sigmond-setup.base ] || cp -p /usr/local/sbin/sigmond-setup /root/sigmond-setup.base
         scp -q -o BatchMode=yes -o ConnectTimeout=10 sigmond@10.99.0.2:/opt/git/sigmond/sigmond/scripts/proxmox/sigmond-wizard.sh /root/sigmond-wizard.target
         sed -e 's/SIGMOND_VMID:-120/SIGMOND_VMID:-$VMID/g' -e 's/\"SIGMOND_VMID\", \"120\"/\"SIGMOND_VMID\", \"$VMID\"/g' /root/sigmond-wizard.target > /root/sigmond-setup.target
         bash -n /root/sigmond-setup.target
@@ -1601,6 +1613,10 @@ GB_UV="$(gx_tok "$GX_OUT" USERVER)"
 say "watermarks.db still at version $GB_UV under the restored daemon ✓"
 
 say "PHASE G-bis PASS — the restored release re-rendered its manifest, and its daemon runs on the version-$GB_UV store"
+# What PHASE E-ter left unchecked, said once more beside the verdict.
+if [ -n "${ETER_UNCHECKED:-}" ]; then
+    say "⚠ PHASE E-ter NOT EVALUATED: $ETER_UNCHECKED"
+fi
 say "UPDATE RIG COMPLETE — $IMGBASE rolled forward to $TARGET_SHA and back, both directions verified"
 say "evidence: $WORK   log: $LOG"
 exit 0

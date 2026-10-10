@@ -1791,19 +1791,26 @@ if [ -d /mnt/sig-media/offline-debs ] && ls /mnt/sig-media/offline-debs/*.deb >/
                 | awk '$NF=="unpacked"{print $1}' | tr '\n' ' ')
     if [ -n "$_unpacked" ]; then
         say "⛔ offline packages LEFT UNCONFIGURED:$_unpacked"
-        say "  the payload is missing one of their dependencies. An unpacked"
-        say "  wpasupplicant breaks ifupdown2 on EVERY interface, so removing"
-        say "  its hooks now rather than leaving the host unable to bring up"
-        say "  vmbr1 (which is how the decoder VM reaches anything)."
-        rm -f /etc/network/if-pre-up.d/wpasupplicant /etc/network/if-up.d/wpasupplicant \
-              /etc/network/if-down.d/wpasupplicant /etc/network/if-post-down.d/wpasupplicant 2>/dev/null
+        say "  the payload is missing one of their dependencies."
+        # The four hooks belong to wpasupplicant and go with wpasupplicant
+        # alone.  Any other package left unpacked (sudo, say) must not take a
+        # Wi-Fi-only station's hooks away while its wpasupplicant stands
+        # configured.  _unpacked holds whole names, each followed by a space.
+        case " $_unpacked " in
+            *" wpasupplicant "*)
+                say "  An unpacked wpasupplicant breaks ifupdown2 on EVERY interface, so removing"
+                say "  its hooks now rather than leaving the host unable to bring up"
+                say "  vmbr1 (which is how the decoder VM reaches anything)."
+                rm -f /etc/network/if-pre-up.d/wpasupplicant /etc/network/if-up.d/wpasupplicant \
+                      /etc/network/if-down.d/wpasupplicant /etc/network/if-post-down.d/wpasupplicant 2>/dev/null ;;
+        esac
     fi
     _missing=""
-    for _b in clatd tayga dnsmasq rdisc6 wpa_supplicant iw btop tmux; do
+    for _b in clatd tayga dnsmasq rdisc6 wpa_supplicant iw btop tmux sudo; do
         command -v "$_b" >/dev/null 2>&1 || _missing="$_missing $_b"
     done
     if [ -z "$_missing" ] && [ -z "$_unpacked" ]; then
-        say "offline packages: $_nd .deb applied and configured — clatd, tayga, dnsmasq, rdisc6, wpa_supplicant, iw, btop, tmux all present"
+        say "offline packages: $_nd .deb applied and configured — clatd, tayga, dnsmasq, rdisc6, wpa_supplicant, iw, btop, tmux, sudo all present"
     else
         say "⚠ offline packages: applied $_nd .deb; missing binaries:${_missing:- none}"
         say "  an IPv6-only or Wi-Fi-only site may NOT come up; see $LOG"

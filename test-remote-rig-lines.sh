@@ -18,12 +18,16 @@
 # on the nested host print their facts as such lines and end with END:1; a
 # value may hold colons and spaces ("root:root 755").
 #
+# nh_ok says whether such a probe answered at all: its END:1 line came back.
+# An ssh that died prints no END:1, and the rig must call that "no answer", not
+# "the station fails the check".
+#
 #   usage: ./test-remote-rig-lines.sh [path/to/test-nested-v3.sh]
 set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"
 SRC="${1:-$HERE/test-nested-v3.sh}"
 eval "$(sed -n '/^# >>> remote_rig/,/^# <<< remote_rig/p' "$SRC")"
-for f in wizard_answers rr_state rr_tok; do
+for f in wizard_answers rr_state rr_tok nh_ok; do
     type "$f" >/dev/null 2>&1 || { echo "FAIL: $f not found between the remote_rig markers in $SRC"; exit 1; }
 done
 T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
@@ -96,6 +100,16 @@ chk "no text at all reads empty"                    "$(rr_tok END "")" ""
 # A key with a regex metacharacter must be taken literally.
 chk "a dot in the key is not a wildcard"            "$(rr_tok 'A.LINES' "$PROBE")" ""
 
+# ── nh_ok ───────────────────────────────────────────────────────────────
+chk "a probe that ended with END:1 answered"        "$(nh_ok $'WISH:on\nEND:1' && echo yes || echo no)" yes
+chk "END:1 alone is an answer"                      "$(nh_ok 'END:1' && echo yes || echo no)" yes
+chk "an ssh error is no answer"                     "$(nh_ok 'ssh: connect to host 127.0.0.1 port 5561: Connection refused' && echo yes || echo no)" no
+chk "tokens without END:1 are no answer"            "$(nh_ok $'WISH:on\nREG:0' && echo yes || echo no)" no
+chk "an empty answer is no answer"                  "$(nh_ok '' && echo yes || echo no)" no
+chk "END:10 is not END:1"                           "$(nh_ok 'END:10' && echo yes || echo no)" no
+chk "an indented END:1 is not the token"            "$(nh_ok '  END:1' && echo yes || echo no)" no
+chk "END:1 inside a longer line is not the token"   "$(nh_ok 'JLINE: END:1' && echo yes || echo no)" no
+
 # Positive control: the fixture must defeat the reader this one replaced, or
 # the 'ok' above proves nothing.  A reader that trusts the first line finds no
 # state in the answer of an `on` that registered first.
@@ -105,5 +119,5 @@ case "$(head -1 "$T/a")" in
     *) echo "  ok   control: a first-line reader finds no state in the same answer" ;;
 esac
 
-[ "$fail" = 0 ] && echo "PASS: wizard_answers, rr_state" || echo "FAILED: wizard_answers, rr_state"
+[ "$fail" = 0 ] && echo "PASS: wizard_answers, rr_state, rr_tok, nh_ok" || echo "FAILED: wizard_answers, rr_state, rr_tok, nh_ok"
 exit "$fail"
