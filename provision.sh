@@ -16,7 +16,12 @@ cd /opt/git/sigmond/sigmond
 # agent's unit already exists.  Installed after, the template shipped with no
 # cap and every fresh station's first `smd doctor` read qga-dropin-stale
 # (v3.71 pre-tag hunt A).
-sudo apt-get install -y -qq qemu-guest-agent >/dev/null && echo "### qemu-guest-agent installed"
+if sudo apt-get install -y -qq qemu-guest-agent >/dev/null; then
+    echo "### qemu-guest-agent installed"
+else
+    echo "### FATAL: apt could not install qemu-guest-agent"
+    exit 1
+fi
 echo "### sigmond @ $(git rev-parse --short HEAD); running install.sh ..."
 SIGMOND_SKIP_PROXMOX_PROMPT=1 ./install.sh
 QGA_DROPIN=/etc/systemd/system/qemu-guest-agent.service.d/50-sigmond-selfheal.conf
