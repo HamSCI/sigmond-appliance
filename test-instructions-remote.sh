@@ -75,7 +75,11 @@ findings(){
     grep -Eq 'Remote access +Y' "$f"  && echo "still lists remote access as an answer to prepare"
     grep -Eqi 'remote.access[^.|<]*(says|shows) FAILED' "$f" && echo "still describes the old FAILED line"
     # The host's own switch, only where the reader can type it (see the head of this file).
+    # The context ends at the last sentence end before the command, so the
+    # sentence that names the command must itself give the way to type it; a
+    # "login on the host" two sentences earlier does not carry a bare command.
     before "$r" "sigmond-setup --rac-o" 400 \
+        | sed -E 's/^.*[.!?] +//' \
         | grep -Evq "login on the host|ssh root@[^']{1,40}'sigmond-setup --rac-o\$" \
         && echo "names the host's own switch (sigmond-setup --rac-on/--rac-off) without a way to type it: neither as ssh root@<host> '...' nor after saying how to reach a login on the host"
     # The VM's own address reaches nothing from the operator's network on a
@@ -135,6 +139,26 @@ for d in $DOCS; do
     grep -qi 'not paired' "$T/plain" || miss="$miss; does not say when the panel prints that line (the two machines have not paired)"
     if [ -z "$miss" ]; then echo "  ok   $d says what a keyboard at the station does, and what an unpaired station's panel prints"
     else fail=1; echo "  FAIL $d${miss#;}"; fi
+done
+
+# The two panel lines the documents repeat for the bring-up and the guest
+# agent.  Each is the first line of its BRINGUP="..." text in firstboot-v3.sh,
+# cut to the words an operator can match: from the marker to the line's end or
+# the first comma, colon or period.  A changed word in the panel fails here.
+panel_words(){   # panel_words <fixed text that starts the line's words>
+    sed -n 's/^ *BRINGUP=" [.!>]* *//p' "$FB" | grep -F -- "$1" | head -1 \
+        | sed -E 's/[,:.].*$//; s/ +$//'
+}
+for need in 'bring-up ran WITHOUT the radio' 'guest agent does not answer'; do
+    w=$(panel_words "$need" | grep -o -F -- "$need")
+    if [ -z "$w" ]; then
+        echo "  FAIL firstboot-v3.sh: no BRINGUP line holds [$need], which the documents quote"; fail=1; continue
+    fi
+    for d in $DOCS; do
+        plain "$HERE/$d" "$T/plain"
+        if grep -q -F -- "$w" "$T/plain"; then echo "  ok   $d quotes the panel's [$w]"
+        else echo "  FAIL $d: does not quote the panel's line [$w]"; fail=1; fi
+    done
 done
 
 # Every document names the state `wanted on, not up`, the state that `smd

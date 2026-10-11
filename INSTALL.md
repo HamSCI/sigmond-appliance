@@ -349,10 +349,12 @@ reboots. The console panel shows which state holds. More:
 and `smd remote on` do. `smd remote` itself works once the VM and the host have
 paired, and the wizard pairs them at install. Its summary then carries a
 `Switch:` line that begins `paired:`. If that line begins `NOT PAIRED`, the two
-have not paired, and the console panel then names the host's own switch as a
-line to type on another computer:
-`ssh root@<host address> 'sigmond-setup --rac-off'` (or `--rac-on`). The host
-tries the pairing again after every boot.
+have not paired, or the host's last check of the pairing failed. The console
+panel then names the host's own switch as a line to type on another computer:
+`ssh root@<host address> 'sigmond-setup --rac-off'` (or `--rac-on`). Once the
+host holds its switch files, its private link to the VM and a readable sshd key,
+it tries the pairing again four minutes after every boot, every six hours after
+that, and whenever its sshd key changes.
 `sigmond-setup --pair-vm`, typed with a login on the host, tries it at once.
 More: [remote access §8](https://github.com/HamSCI/sigmond/blob/main/docs/operator/remote-access.md#8-a-station-installed-before-v371).
 
@@ -372,7 +374,9 @@ More: [remote access §8](https://github.com/HamSCI/sigmond/blob/main/docs/opera
 | Typed a wrong answer | From the host: `sigmond-setup --reconfigure` |
 | Remote access says `wanted on, not up` | The radio and every upload keep working. In the VM, `smd remote status` names the case on its second line. "has not registered yet" needs nothing from you: the host tries again every ten minutes. For the others, see [remote access](https://github.com/HamSCI/sigmond/blob/main/docs/operator/remote-access.md#7-if-remote-access-does-not-come-up) |
 | You want remote access off | In the VM: `smd remote off`. `smd remote on` turns it on again |
-| The panel prints `ssh root@<host address> 'sigmond-setup --rac-off'` where this guide says `smd remote off` | The VM and the host have not paired (§10). Type the panel's line from another computer; it works the same switch |
+| The panel prints `ssh root@<host address> 'sigmond-setup --rac-off'` where this guide says `smd remote off` | The VM and the host have not paired, or the host's last check of the pairing failed (§10). Type the panel's line from another computer; it works the same switch |
+| The panel prints `bring-up ran WITHOUT the radio` | No SDR stood on the USB bus when bring-up ran. Plug the SDR in. Bring-up finishes by itself, and nothing else needs your hands |
+| The panel prints `guest agent does not answer` | The host cannot ask the decoder VM anything for the moment. The radio and the uploads go on. The panel tries a reset at every refresh, every five minutes. When the line stays for more than ten minutes while the VM runs, tell your fleet admin |
 | No spots after 30 minutes | Expected on a new station until you run `smd sink upload` (§9). Log in to the VM and run `smd sink status`. If it says `site sink: off` with the reason `new station: …`, check the station as §9 describes, then run `smd sink upload`. If it says `site sink: off` with any other reason, or `hold (legacy)`, ask your fleet admin. If it says `site sink: upload`: antenna actually connected? Then run `smd status` and send its output to your fleet admin |
 | Anything else | Your fleet admin can log in through remote access and fix it — just ask. If you turned remote access off, run `smd remote on` in the VM first |
 

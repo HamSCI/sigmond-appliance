@@ -185,8 +185,17 @@ on a fresh machine that can take tens of minutes.
         tries again every ten minutes.
   The panel says  ssh root@<host-ip> 'sigmond-setup --rac-off'  where
   this sheet says  smd remote off
-        The VM and the host have not paired yet.  Type the panel's line
-        from another computer; it works the same switch.
+        The VM and the host have not paired yet, or the host's last
+        check of the pairing failed.  Type the panel's line from
+        another computer; it works the same switch.
+  The panel says  bring-up ran WITHOUT the radio
+        No SDR stood on the USB bus.  Plug the SDR in.  Bring-up
+        finishes by itself; nothing else needs your hands.
+  The panel says  guest agent does not answer
+        The host cannot ask the VM anything for the moment.  The radio
+        and the uploads go on.  The panel tries a reset every five
+        minutes.  If the line stays more than ten minutes while the VM
+        runs, tell your fleet admin.
   "INSTALL CANNOT CONTINUE NORMALLY: ..."
         No working network.  The title says which case (no cable detected /
         port connected but nothing answered / no address offered), and the
