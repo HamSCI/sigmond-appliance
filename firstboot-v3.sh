@@ -2589,6 +2589,40 @@ HOSTIP=$(cur_ip vmbr0)
     | awk '{print $4}' | cut -d/ -f1 | head -1)
 [ -n "$HOSTIP" ] || HOSTIP=$(hostname -I 2>/dev/null | tr ' ' '\n' \
     | grep -vE '^(10\.99\.0\.|127\.|192\.0\.0\.|fe80:)' | head -1)
+# >>> agent_block (test-panel-agent.sh loads exactly this block)
+# -- the guest agent: ASCII only, and one reset before any verdict ----------
+# NO BYTE ABOVE 0x7F MAY CROSS TO THE GUEST AGENT.  Proxmox (PVE 9.1.1,
+# qemu-server 9.0.30) writes a request that holds non-ASCII characters SHORT:
+# as many bytes as the request has characters, so the closing bytes never
+# arrive.  About one time in six the agent's parser then waits for them for
+# good: it keeps its PID, reads every later request and answers none.  Up to
+# v3.70 this panel sent such a request every five minutes (a grep for two
+# box-drawing patterns), and that request never once ran.  Build such bytes
+# INSIDE the guest (printf with octal escapes), as the status request below
+# does.  test-panel-agent.sh fails on any byte above 0x7F in a request.
+#
+# qga_reset <vmid> : one 0xFF byte and a sync request down the agent's socket.
+# The byte resets the agent's parser; the QGA protocol defines it and Proxmox
+# never sends it.  Returns 0 when the agent answered the sync.  The same bytes
+# stand in sigmond-wizard.sh, pm-align.py and pm-heartbeat.py.
+QGA_DIR="${SIGMOND_QGA_DIR:-/var/run/qemu-server}"
+QGA_NOTE="${SIGMOND_QGA_NOTE:-/run/sigmond/qga-reset}"
+qga_reset(){
+    timeout 10 python3 -c 'import socket,sys
+s=socket.socket(socket.AF_UNIX); s.settimeout(4)
+try:
+    s.connect(sys.argv[2]+"/"+sys.argv[1]+".qga")
+    s.sendall(b"\xff"+b"{\"execute\":\"guest-sync-delimited\",\"arguments\":{\"id\":4242}}\n")
+    sys.exit(0 if b"4242" in s.recv(4096) else 1)
+except Exception:
+    sys.exit(1)' "$1" "$QGA_DIR" >/dev/null 2>&1 </dev/null
+}
+# One line, replaced each time: when the last reset brought the agent back,
+# and who sent it.  pm-heartbeat.py reports from it.
+qga_note_reset(){
+    mkdir -p "$(dirname "$QGA_NOTE")" 2>/dev/null
+    printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$1" > "$QGA_NOTE" 2>/dev/null
+}
 VMIP=""; VMNOTE=""
 for i in 1 2 3 4 5 6; do
   # Print the VM address THIS HOST can actually reach.  Taking whichever
@@ -2643,6 +2677,15 @@ if cands:
     cands.sort(key=lambda ip: 0 if is_local(ip) else 1)
     print(cands[0])' 2>/dev/null)
   [ -n "$VMIP" ] && break
+  # ONE RESET BEFORE ANY VERDICT.  A first try that brought nothing and a ping
+  # that fails: the agent may stand deaf.  Reset its parser once; when it
+  # answers, record that and ask again at once.
+  if [ "$i" = 1 ] && ! timeout 10 qm agent "$VMID" ping >/dev/null 2>&1 </dev/null; then
+      if qga_reset "$VMID"; then
+          qga_note_reset panel
+          continue
+      fi
+  fi
   sleep 10
 done
 # Agent-free fallback: a wedged qemu-guest-agent (seen after any guest-exec
@@ -2661,28 +2704,42 @@ if [ -z "$VMIP" ]; then
   # v3.62, 2026-09-30).  Carry it as a separate label.
   [ -n "$VMIP" ] && VMNOTE=" (address via ARP — guest agent not answering)"
 fi
-# ── is the station still BUILDING? ─────────────────────────────────────────
-# ⛔ "still installing" and "broken" looked identical from outside, and that
-# cost real time three times on 2026-09-20/21: the panel printed a ka9q-web
-# URL that could not answer yet, the dashboard showed the channel down, and
-# the only place the truth existed was firstrun-bringup.log inside the VM --
-# reachable solely by someone with shell on this host AND a responsive guest
-# agent.  rob concluded twice that a healthy station was broken; so did I.
+# -- where does bring-up stand? ---------------------------------------------
+# ONE request, ASCII only, answers four questions: the bring-up unit's state,
+# the result its marker records (sigmond-firstrun-bringup writes ok, retry,
+# awaiting-sdr or gave-up; a marker from before results reads as ok), the
+# state of ka9q-web, and the last step in the log.  The unit reads `inactive`
+# whenever it does not run, finished or not: only the marker tells those
+# apart.  The step line comes back stripped to printable ASCII, because the
+# agent's output reaches this host double-encoded.
 #
-# So say it here, where the operator is already looking.  A short agent
-# timeout on purpose: during bring-up the VM is saturated building venvs and
-# the agent often will not answer, and "VM busy" is itself the answer.
+# A silent agent says NOTHING about bring-up.  This comment used to explain
+# the silence as "the VM is saturated building venvs"; from 2026-09-27 to
+# 2026-10-08 that explanation hid a deaf agent on three stations.
 BRINGUP=""
 _bu=$(timeout 12 qm guest exec "$VMID" --timeout 8 -- /bin/bash -c \
-        'systemctl is-active sigmond-firstrun-bringup 2>/dev/null; \
-         sed "s/\x1b\[[0-9;]*m//g" /var/log/sigmond/firstrun-bringup.log 2>/dev/null \
-           | grep -E "^───|» " | tail -1 | cut -c1-58' 2>/dev/null \
+        'u=$(systemctl is-active sigmond-firstrun-bringup 2>/dev/null); r=none; \
+         m=/var/lib/sigmond/.firstrun-bringup-done; \
+         if [ -e "$m" ]; then r=$(sed -n "s/^result=//p" "$m" 2>/dev/null | head -1); r=${r:-ok}; fi; \
+         w=$(systemctl is-active ka9q-web 2>/dev/null); \
+         s=$(sed "s/\x1b\[[0-9;]*m//g" /var/log/sigmond/firstrun-bringup.log 2>/dev/null \
+               | LC_ALL=C grep -E "$(printf "^\342\224\200\342\224\200\342\224\200|\302\273 ")" | tail -1 \
+               | LC_ALL=C tr -cd "\40-\176" | sed "s/^ *//; s/ *$//" | cut -c1-58); \
+         printf "unit=%s\nresult=%s\nweb=%s\nstep=%s\n" "${u:-unknown}" "$r" "${w:-unknown}" "$s"' \
+        2>/dev/null </dev/null \
       | python3 -c 'import json,sys
 try: print((json.load(sys.stdin).get("out-data") or "").strip())
 except Exception: pass' 2>/dev/null)
-case "$_bu" in
-    activating*)
-        _stage=$(printf '%s' "$_bu" | tail -1)
+_buf(){ printf '%s\n' "$_bu" | sed -n "s/^$1=//p" | head -1; }
+_unit=$(_buf unit); _res=$(_buf result); _web=$(_buf web); _stage=$(_buf step)
+_bulog=" !!   check:  sigmond-vm   then:  tail -30 /var/log/sigmond/firstrun-bringup.log"
+case "$_unit" in
+    "")
+        BRINGUP=" .. the decoder VM's guest agent does not answer, so this panel cannot
+ ..   read where bring-up stands.  That silence says nothing about a build.
+"
+        ;;
+    activating)
         BRINGUP=" >> STATION IS STILL BUILDING -- this is normal, not a fault.
  >>   First-run bring-up is RUNNING (clones, builds ~25 components; tens of
  >>   minutes on a cold box).  ka9q-web and station-web start near the END,
@@ -2691,21 +2748,37 @@ case "$_bu" in
  >>   watch it:  qm guest exec $VMID -- tail -5 /var/log/sigmond/firstrun-bringup.log
 "
         ;;
-    failed*|inactive*)
-        # inactive is the normal finished state too, so only shout when the
-        # marker says it ran and the services it should have started are not up.
-        if ! qm guest exec "$VMID" --timeout 8 -- /bin/bash -c \
-               'systemctl is-active ka9q-web >/dev/null' >/dev/null 2>&1; then
-            BRINGUP=" !! BRING-UP FINISHED BUT ka9q-web IS NOT RUNNING
- !!   check:  qm guest exec $VMID -- tail -30 /var/log/sigmond/firstrun-bringup.log
- !!   re-run: qm guest exec $VMID -- smd bringup dasi2
+    failed)
+        BRINGUP=" !! BRING-UP WAS STOPPED BEFORE IT FINISHED (its 90-minute limit, or a kill)
+$_bulog
 "
-        fi
         ;;
-    "")
-        BRINGUP=" .. decoder VM guest agent did not answer (it is often saturated
- ..   while the station builds) -- bring-up state unknown from here.
+    *)
+        case "$_res" in
+            none) : ;;      # bring-up has not run yet: nothing to say
+            retry)
+                BRINGUP=" !! BRING-UP FAILED -- it tries again when the decoder VM next boots
+$_bulog
+ !!   (the last lines of that log name the command that runs it by hand)
 "
+                ;;
+            awaiting-sdr)
+                BRINGUP=" .. bring-up ran WITHOUT the radio: no SDR stood on the USB bus.
+ ..   It finishes by itself when the SDR appears.
+"
+                ;;
+            gave-up)
+                BRINGUP=" !! BRING-UP FAILED THREE TIMES and has stopped trying
+$_bulog
+ !!   (the last lines of that log name the commands that finish it by hand)
+"
+                ;;
+            *)
+                [ "$_web" = active ] || BRINGUP=" !! BRING-UP FINISHED BUT ka9q-web IS NOT RUNNING
+$_bulog
+"
+                ;;
+        esac
         ;;
 esac
 
@@ -2719,10 +2792,11 @@ esac
 # install transcript.  Re-checked on every refresh and removed once the SDR
 # actually turns up, so it cannot linger as a stale scare.
 RXWARN=""
-if [ -f /etc/sigmond-appliance/.rx888-needs-powercycle ]; then
-    if qm guest exec "$VMID" -- /usr/bin/lsusb 2>/dev/null \
+RXMARK="${SIGMOND_RX888_MARK:-/etc/sigmond-appliance/.rx888-needs-powercycle}"
+if [ -f "$RXMARK" ]; then
+    if timeout 25 qm guest exec "$VMID" --timeout 15 -- /usr/bin/lsusb 2>/dev/null </dev/null \
          | grep -qiE '04b4:00(f[013]|bc)|f4b3:0100'; then
-        rm -f /etc/sigmond-appliance/.rx888-needs-powercycle
+        rm -f "$RXMARK"
     else
         RXWARN=" !! RX888 NOT VISIBLE TO THE DECODER VM
  !!   The SDR was handed to the VM part-way through its USB start-up and
@@ -2735,6 +2809,7 @@ if [ -f /etc/sigmond-appliance/.rx888-needs-powercycle ]; then
 "
     fi
 fi
+# <<< agent_block
 
 # libc crypt via perl, NOT openssl passwd: Debian roots are yescrypt ($y$),
 # which openssl cannot compute — v3.25 said "the password you set at
