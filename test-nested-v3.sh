@@ -174,13 +174,25 @@ QGAEOF
 # rest for good.  The other times the agent drops the NEXT request and
 # recovers, so one lost ping proves nothing: deaf means three pings in a row
 # without an answer.  DEAF holds the try that did it, or 0 when none of the
-# tries did.  The panel's and the heartbeat's timers stand still from here
+# tries did.  The panel's, the heartbeat's and the pairing's timers stand still from here
 # until qga_probe_heal has run, so that the rig's own refresh does the healing.
 qga_probe_deafen() {
     cat <<'QGAEOF'
 VMID="$1"; TRIES="${2:-40}"
 N="${QGA_NOTE:-/run/sigmond/qga-reset}"
-systemctl stop sigmond-issue.timer pm-heartbeat.timer >/dev/null 2>&1
+# Three things on the host heal a deaf agent: the panel, the heartbeat and the
+# pairing.  Hold all three still, and wait out a run already going (the
+# pairing's timer, started again by remote-access check 5, fires one), or that
+# run heals the agent first and the note names it, not the panel.
+systemctl stop sigmond-issue.timer pm-heartbeat.timer sigmond-rac-pair.timer sigmond-rac-pair.path >/dev/null 2>&1
+for w in $(seq 1 90); do
+    busy=0
+    for u in sigmond-issue.service pm-heartbeat.service sigmond-rac-pair.service; do
+        case "$(systemctl is-active "$u" 2>/dev/null)" in activating|active|reloading|deactivating) busy=1 ;; esac
+    done
+    [ "$busy" = 0 ] && break
+    sleep 1
+done
 rm -f "$N" "$N.seen"
 poison=$(printf 'true # \342\224\200\342\224\200\342\224\200 \302\273')
 deaf=0
@@ -199,7 +211,7 @@ QGAEOF
 }
 # qga_probe_heal: one panel refresh, then one ping.  HEARS:1 when the agent
 # answers; NOTE holds the line the reset left; PANELSILENT:1 when the panel
-# still says that the agent does not answer.  Both timers start again here,
+# still says that the agent does not answer.  All the timers start again here,
 # whatever the refresh did.
 qga_probe_heal() {
     cat <<'QGAEOF'
@@ -207,7 +219,7 @@ VMID="$1"
 P="${QGA_PANEL:-/usr/local/sbin/sigmond-issue}"
 I="${QGA_ISSUE:-/etc/issue}"
 N="${QGA_NOTE:-/run/sigmond/qga-reset}"
-trap 'systemctl start sigmond-issue.timer pm-heartbeat.timer >/dev/null 2>&1' EXIT
+trap 'systemctl start sigmond-issue.timer pm-heartbeat.timer sigmond-rac-pair.timer sigmond-rac-pair.path >/dev/null 2>&1' EXIT
 SIGMOND_VMID="$VMID" "$P" >/dev/null 2>&1
 if timeout 10 qm agent "$VMID" ping >/dev/null 2>&1; then echo HEARS:1; else echo HEARS:0; fi
 if [ -e "$N" ]; then echo "NOTE:$(head -1 "$N")"; else echo "NOTE:none"; fi

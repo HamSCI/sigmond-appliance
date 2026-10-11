@@ -44,13 +44,21 @@ case "$1" in
                 printf '{\n   "exitcode" : 3,\n   "exited" : 1,\n   "out-data" : "%s\\n"\n}\n' "$(cat "$D/unit" 2>/dev/null)" ;;
             *)
                 n=$(( $(cat "$D/count" 2>/dev/null || echo 0) + 1 )); echo "$n" > "$D/count"
-                printf '%s\0' "$@" > "$D/poison.$n"
+                printf '%s\0' "$@" > "$D/poison.$n"; echo poison >> "$D/order"
                 if [ "$n" = "$(cat "$D/deaf-at" 2>/dev/null)" ]; then : > "$D/deaf"; else : > "$D/lose-next"; fi ;;
         esac ;;
 esac
 EOF
 cat > "$T/bin/systemctl" <<'EOF'
 #!/bin/bash
+# is-active answers "active" while $D/busy.<unit> counts down, then
+# "inactive"; it goes to $D/order, every other call to systemctl.calls.
+if [ "$1" = is-active ]; then
+    echo "is-active $2" >> "$D/order"
+    n=$(cat "$D/busy.$2" 2>/dev/null || echo 0)
+    if [ "$n" -gt 0 ]; then echo $((n-1)) > "$D/busy.$2"; echo active; else echo inactive; fi
+    exit 0
+fi
 echo "$*" >> "$D/systemctl.calls"
 EOF
 printf '#!/bin/bash\nshift; exec "$@"\n' > "$T/bin/timeout"
@@ -102,9 +110,16 @@ has   "the third request deafens: DEAF:3"             "$out" "DEAF:3"
 [ "$(cat "$T/d1/count")" = 3 ] && ok "it stops at the request that did it" || bad "it stops at the request that did it" "$(cat "$T/d1/count")"
 LC_ALL=C grep -q -P '[^\x00-\x7F]' "$T/d1/poison.1" && ok "the request holds bytes above 0x7F (else it deafens nothing)" \
     || bad "the request holds bytes above 0x7F" "$(tr '\0' ' ' < "$T/d1/poison.1")"
-[ "$(tr '\n' '|' < "$T/d1/systemctl.calls")" = "stop sigmond-issue.timer pm-heartbeat.timer|" ] \
-    && ok "both timers stop, and stay stopped for the heal" \
-    || bad "both timers stop, and stay stopped" "$(tr '\n' '|' < "$T/d1/systemctl.calls")"
+[ "$(tr '\n' '|' < "$T/d1/systemctl.calls")" = "stop sigmond-issue.timer pm-heartbeat.timer sigmond-rac-pair.timer sigmond-rac-pair.path|" ] \
+    && ok "the panel's, the heartbeat's and the pairing's units stop, and stay stopped for the heal" \
+    || bad "the panel's, the heartbeat's and the pairing's units stop, and stay stopped" "$(tr '\n' '|' < "$T/d1/systemctl.calls")"
+mkdir -p "$T/d3"; echo 1 > "$T/d3/deaf-at"; echo 4 > "$T/d3/busy.sigmond-rac-pair.service"
+run d3 qga_probe_deafen 5 >/dev/null
+first=$(grep -n '^poison$' "$T/d3/order" | head -1 | cut -d: -f1)
+last=$(grep -n 'is-active sigmond-rac-pair.service' "$T/d3/order" | tail -1 | cut -d: -f1)
+[ "$(cat "$T/d3/busy.sigmond-rac-pair.service")" = 0 ] && [ -n "$first" ] && [ "${last:-0}" -lt "$first" ] \
+    && ok "a pairing run already going ends before the first request" \
+    || bad "a pairing run already going ends before the first request" "busy=$(cat "$T/d3/busy.sigmond-rac-pair.service") order=$(tr '\n' '|' < "$T/d3/order")"
 [ ! -e "$T/d1/qga-reset" ] && [ ! -e "$T/d1/qga-reset.seen" ] && ok "an earlier reset's line is cleared first" || bad "an earlier reset's line is cleared first" "still there"
 mkdir -p "$T/d2"; echo 99 > "$T/d2/deaf-at"
 out=$(run d2 qga_probe_deafen 5)
@@ -130,8 +145,8 @@ has   "the agent's raw reply comes back in hex"       "$out" "RESETHEX:$(printf 
 has   "a refresh that heals: HEARS:1"                 "$out" "HEARS:1"
 has   "the reset's line names the panel"              "$out" "NOTE:2026-10-10T03:00:00Z panel"
 has   "the panel no longer says the agent is silent"  "$out" "PANELSILENT:0"
-[ "$(tr '\n' '|' < "$T/h1/systemctl.calls")" = "start sigmond-issue.timer pm-heartbeat.timer|" ] \
-    && ok "both timers start again" || bad "both timers start again" "$(tr '\n' '|' < "$T/h1/systemctl.calls")"
+[ "$(tr '\n' '|' < "$T/h1/systemctl.calls")" = "start sigmond-issue.timer pm-heartbeat.timer sigmond-rac-pair.timer sigmond-rac-pair.path|" ] \
+    && ok "all four units start again" || bad "all four units start again" "$(tr '\n' '|' < "$T/h1/systemctl.calls")"
 mkdir -p "$T/h2"; : > "$T/h2/deaf"; echo " .. the decoder VM's guest agent does not answer, so" > "$T/h2/issue.txt"
 out=$(run h2 qga_probe_heal)
 has   "a refresh that does not heal: HEARS:0"         "$out" "HEARS:0"
