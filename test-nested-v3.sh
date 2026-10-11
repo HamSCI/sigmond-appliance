@@ -127,6 +127,125 @@ rr_khkey() {
     LC_ALL=C awk '$2 == "ssh-ed25519" { print $3; exit }' "$1" 2>/dev/null
 }
 # <<< remote_rig
+
+# >>> qga_rig (test-qga-rig-lines.sh loads exactly this block)
+# The guest-agent checks of Phase D (sigmond tasks/plan-guest-agent-requests.md).
+#
+# Each function below prints a script for the NESTED HOST; the rig pipes it to
+# `$SSHN "bash -s <vmid>"`.  A script prints its facts as KEY:value lines and
+# ends with END:1, so that rr_tok and nh_ok (the remote_rig block) can read
+# them.  The scripts read three names from the environment, for the hermetic
+# test alone: QGA_PANEL (the panel script), QGA_ISSUE (the file it paints) and
+# QGA_NOTE (the line a reset leaves).
+#
+# qga_probe_panel: has this image's panel the fix?  PANELFIX:1 when the panel
+# script carries the reset; 0 for a panel from before v3.71.
+qga_probe_panel() {
+    cat <<'QGAEOF'
+P="${QGA_PANEL:-/usr/local/sbin/sigmond-issue}"
+grep -q 'qga_reset' "$P" 2>/dev/null && echo PANELFIX:1 || echo PANELFIX:0
+echo END:1
+QGAEOF
+}
+# qga_probe_refresh: twelve panel refreshes, one ping after each.  The panel's
+# own timer stands still meanwhile, because a refresh that finds another one
+# running does nothing.  SILENT counts the pings that got no answer; NOTE
+# holds the line a reset left, or "none".
+qga_probe_refresh() {
+    cat <<'QGAEOF'
+VMID="$1"
+P="${QGA_PANEL:-/usr/local/sbin/sigmond-issue}"
+N="${QGA_NOTE:-/run/sigmond/qga-reset}"
+systemctl stop sigmond-issue.timer >/dev/null 2>&1
+trap 'systemctl start sigmond-issue.timer >/dev/null 2>&1' EXIT
+n=0
+for i in 1 2 3 4 5 6 7 8 9 10 11 12; do
+    SIGMOND_VMID="$VMID" "$P" >/dev/null 2>&1
+    timeout 10 qm agent "$VMID" ping >/dev/null 2>&1 || n=$((n+1))
+done
+echo "SILENT:$n"
+if [ -e "$N" ]; then echo "NOTE:$(head -1 "$N")"; else echo "NOTE:none"; fi
+echo END:1
+QGAEOF
+}
+# qga_probe_deafen: send the request the panel of v3.70 sent, a command that
+# holds box-drawing bytes, until the agent stands deaf.  Proxmox writes such a
+# request short; about one time in six the agent's parser then waits for the
+# rest for good.  The other times the agent drops the NEXT request and
+# recovers, so one lost ping proves nothing: deaf means three pings in a row
+# without an answer.  DEAF holds the try that did it, or 0 when none of the
+# tries did.  The panel's and the heartbeat's timers stand still from here
+# until qga_probe_heal has run, so that the rig's own refresh does the healing.
+qga_probe_deafen() {
+    cat <<'QGAEOF'
+VMID="$1"; TRIES="${2:-40}"
+N="${QGA_NOTE:-/run/sigmond/qga-reset}"
+systemctl stop sigmond-issue.timer pm-heartbeat.timer >/dev/null 2>&1
+rm -f "$N" "$N.seen"
+poison=$(printf 'true # \342\224\200\342\224\200\342\224\200 \302\273')
+deaf=0
+for i in $(seq 1 "$TRIES"); do
+    timeout 15 qm guest exec "$VMID" --timeout 5 -- /bin/bash -c "$poison" >/dev/null 2>&1
+    s=0
+    for j in 1 2 3; do
+        sleep 2
+        timeout 10 qm agent "$VMID" ping >/dev/null 2>&1 || s=$((s+1))
+    done
+    if [ "$s" = 3 ]; then deaf=$i; break; fi
+done
+echo "DEAF:$deaf"
+echo END:1
+QGAEOF
+}
+# qga_probe_heal: one panel refresh, then one ping.  HEARS:1 when the agent
+# answers; NOTE holds the line the reset left; PANELSILENT:1 when the panel
+# still says that the agent does not answer.  Both timers start again here,
+# whatever the refresh did.
+qga_probe_heal() {
+    cat <<'QGAEOF'
+VMID="$1"
+P="${QGA_PANEL:-/usr/local/sbin/sigmond-issue}"
+I="${QGA_ISSUE:-/etc/issue}"
+N="${QGA_NOTE:-/run/sigmond/qga-reset}"
+trap 'systemctl start sigmond-issue.timer pm-heartbeat.timer >/dev/null 2>&1' EXIT
+SIGMOND_VMID="$VMID" "$P" >/dev/null 2>&1
+if timeout 10 qm agent "$VMID" ping >/dev/null 2>&1; then echo HEARS:1; else echo HEARS:0; fi
+if [ -e "$N" ]; then echo "NOTE:$(head -1 "$N")"; else echo "NOTE:none"; fi
+grep -q 'guest agent does not answer' "$I" 2>/dev/null && echo PANELSILENT:1 || echo PANELSILENT:0
+echo END:1
+QGAEOF
+}
+# qga_probe_bringup: one panel refresh, then what its bring-up line says, one
+# token per sentence the panel can print.  UNIT holds the state of the
+# bring-up unit before and after the refresh, joined by a slash, so that the
+# rig judges the BUILDING token only when the unit ran through the whole
+# refresh.
+qga_probe_bringup() {
+    cat <<'QGAEOF'
+VMID="$1"
+P="${QGA_PANEL:-/usr/local/sbin/sigmond-issue}"
+I="${QGA_ISSUE:-/etc/issue}"
+unit(){ timeout 20 qm guest exec "$VMID" --timeout 10 -- /bin/systemctl is-active sigmond-firstrun-bringup 2>/dev/null \
+          | grep -oE '"out-data" *: *"[a-z]+' | grep -oE '[a-z]+$' | head -1; }
+u1=$(unit)
+SIGMOND_VMID="$VMID" "$P" >/dev/null 2>&1
+u2=$(unit)
+echo "UNIT:${u1:-none}/${u2:-none}"
+t(){ grep -q "$2" "$I" 2>/dev/null && echo "$1:1" || echo "$1:0"; }
+t BUILDING 'STATION IS STILL BUILDING'
+t NOWEB    'BRING-UP FINISHED BUT ka9q-web IS NOT RUNNING'
+t NOSDR    'bring-up ran WITHOUT the radio'
+t RETRY    'BRING-UP FAILED -- it tries again'
+t GAVEUP   'BRING-UP FAILED THREE TIMES'
+t STOPPED  'BRING-UP WAS STOPPED BEFORE IT FINISHED'
+t SILENT   'guest agent does not answer'
+echo END:1
+QGAEOF
+}
+# qga_fatal <message> <answer>: a guest-agent check failed; shows the answer
+# of the probe that the verdict rests on.
+qga_fatal(){ say "FATAL: $1"; [ -n "${2:-}" ] && printf '%s\n' "$2" | sed 's/^/      /' | tail -14; exit 1; }
+# <<< qga_rig
 KEY="$HOME/appliance/build/applkey"
 # --release builds strip root-ssh-keys from answer-v3.toml on purpose
 # (build-usb-v3.sh RELEASE branch) so the test key never lands on a
@@ -955,14 +1074,47 @@ esac
 # lifecycle lock ✓" is trivially true of a bring-up that ran for five seconds
 # and got nowhere -- a pass that means nothing.  So establish COMPLETION
 # first, and make every claim conditional on it.
+# ── the guest agent, part 1: does this image's panel carry the fix? ─────────
+# Asked once, before bring-up, because the first check must run WHILE the
+# station builds.  An image from before v3.71 (the update rig's base) carries
+# no parser reset; every guest-agent check then says so and judges nothing.
+QGA_PF=$(qga_probe_panel | $SSHN "bash -s" 2>&1)
+QGA_PANELFIX=$(rr_tok PANELFIX "$QGA_PF")
+QGA_BUILD=""; QGA_UNCHECKED=""
+if [ "${QGA_PANELFIX:-0}" != 1 ]; then
+    say "⚠ GUEST-AGENT CHECKS NOT EVALUATED — this image's panel predates v3.71"
+    QGA_UNCHECKED="all of them (this image's panel carries no parser reset)"
+fi
+
 say "waiting for first-run bring-up to COMPLETE (its marker), up to ${BRINGUP_WAIT_MIN:-25} min"
 _done=0
 for _i in $(seq 1 $(( ${BRINGUP_WAIT_MIN:-25} * 4 )) ); do
     $SSHN "qm guest exec $VMID --timeout 30 -- /bin/bash -c 'test -e /var/lib/sigmond/.firstrun-bringup-done'" 2>/dev/null \
         | grep -q '"exitcode" : 0' && { _done=1; break; }
+    # Thirty seconds into the wait, once: one panel refresh while bring-up
+    # runs, and what the panel then says (judged below the loop).
+    if [ "$_i" = 2 ] && [ "${QGA_PANELFIX:-0}" = 1 ]; then
+        QGA_BUILD=$(qga_probe_bringup | $SSHN "bash -s $VMID" 2>&1)
+    fi
     [ $(( _i % 8 )) -eq 0 ] && say "  … still bringing up ($(( _i / 4 )) min)"
     sleep 15
 done
+
+# ── the guest agent, part 2: what the panel said while the station built ───
+# Judged only when the bring-up unit ran through the whole refresh: a unit
+# that ended meanwhile leaves the panel free to say either thing.
+if [ "${QGA_PANELFIX:-0}" = 1 ]; then
+    if nh_ok "$QGA_BUILD" && [ "$(rr_tok UNIT "$QGA_BUILD")" = activating/activating ]; then
+        [ "$(rr_tok BUILDING "$QGA_BUILD")" = 1 ] \
+            || qga_fatal "bring-up ran through a whole panel refresh, and the panel did not say STATION IS STILL BUILDING: its status request does not run, or its answer is not read" "$QGA_BUILD"
+        [ "$(rr_tok NOWEB "$QGA_BUILD")" = 0 ] \
+            || qga_fatal "the panel raised BRING-UP FINISHED BUT ka9q-web IS NOT RUNNING while bring-up still ran" "$QGA_BUILD"
+        say "while the station built, the panel said so and raised no alarm ✓"
+    else
+        say "⚠ the panel's line DURING bring-up was not evaluated (the unit read '$(rr_tok UNIT "$QGA_BUILD")' around the refresh, not activating/activating)"
+        QGA_UNCHECKED="${QGA_UNCHECKED:+$QGA_UNCHECKED; }the panel's line during bring-up"
+    fi
+fi
 
 if [ "$_done" != 1 ]; then
     # NOT a FATAL: the nested guest has no RX888 and is slower than iron, so a
@@ -1874,6 +2026,79 @@ RR5SWAPEOF
     $SSHN "systemctl stop rac-standin 2>/dev/null; true"
 fi
 
+# ── the guest agent, part 3: no request deafens it, one reset heals it ─────
+# sigmond tasks/plan-guest-agent-requests.md section 5.  Up to v3.70 the
+# console panel sent the decoder VM a request that Proxmox wrote short, and
+# about one time in six the guest agent then stood deaf for good.  Three
+# things must hold on an image that carries the fix:
+#   1. twelve panel refreshes leave the agent answering every ping;
+#   2. an agent the rig deafens on purpose hears again after ONE refresh, and
+#      the panel leaves the line the heartbeat reports from;
+#   3. after bring-up the panel's line follows the marker's result, and the
+#      false alarm of v3.70 does not show.
+if [ "${QGA_PANELFIX:-0}" = 1 ]; then
+    Q1=$(qga_probe_refresh | $SSHN "bash -s $VMID" 2>&1)
+    nh_ok "$Q1" || qga_fatal "guest agent, twelve panel refreshes: the nested host gave no answer (not a verdict)" "$Q1"
+    [ "$(rr_tok SILENT "$Q1")" = 0 ] \
+        || qga_fatal "after twelve panel refreshes, $(rr_tok SILENT "$Q1") of twelve pings got no answer from the guest agent: a request of the panel still deafens it" "$Q1"
+    say "twelve panel refreshes, twelve pings answered ✓"
+    [ "$(rr_tok NOTE "$Q1")" = none ] \
+        || say "NOTE: a parser reset stands on record ($(rr_tok NOTE "$Q1")). One at boot proves little; one at any other time names a cause"
+
+    Q2=$(qga_probe_deafen | $SSHN "bash -s $VMID 30" 2>&1)
+    QDEAF=$(rr_tok DEAF "$Q2")
+    # The heal runs whatever the deafening answered: it also starts the two
+    # timers that the deafening stopped.
+    Q3=$(qga_probe_heal | $SSHN "bash -s $VMID" 2>&1)
+    if ! nh_ok "$Q2" || ! nh_ok "$Q3"; then
+        $SSHN "systemctl start sigmond-issue.timer pm-heartbeat.timer" >/dev/null 2>&1
+        qga_fatal "guest agent, deafen and heal: the nested host gave no answer (not a verdict)" "$Q2
+$Q3"
+    fi
+    if [ "${QDEAF:-0}" = 0 ]; then
+        say "⚠ thirty non-ASCII requests left the guest agent hearing: the heal was NOT proven in this run"
+        QGA_UNCHECKED="${QGA_UNCHECKED:+$QGA_UNCHECKED; }the heal (the rig could not deafen the agent)"
+    else
+        [ "$(rr_tok HEARS "$Q3")" = 1 ] \
+            || qga_fatal "the guest agent stood deaf (after request $QDEAF), and one panel refresh did not bring it back" "$Q3"
+        case "$(rr_tok NOTE "$Q3")" in
+            *" panel") ;;
+            *) qga_fatal "the panel healed the agent and left no line of its own in /run/sigmond/qga-reset (read: '$(rr_tok NOTE "$Q3")'): the host's heartbeat can then report no reset" "$Q3" ;;
+        esac
+        [ "$(rr_tok PANELSILENT "$Q3")" = 0 ] \
+            || qga_fatal "the panel healed the agent and still says that it does not answer" "$Q3"
+        say "a guest agent deafened on purpose (request $QDEAF) heard again after one panel refresh ✓"
+    fi
+
+    QRES=$($SSHN "qm guest exec $VMID --timeout 30 -- /bin/bash -c 'sed -n s/^result=//p /var/lib/sigmond/.firstrun-bringup-done 2>/dev/null | head -1'" 2>/dev/null \
+            | grep -o '"out-data" *: *"[a-z-]*' | grep -o '[a-z-]*$' | head -1)
+    Q4=$(qga_probe_bringup | $SSHN "bash -s $VMID" 2>&1)
+    nh_ok "$Q4" || qga_fatal "guest agent, the panel's bring-up line: the nested host gave no answer (not a verdict)" "$Q4"
+    [ "$(rr_tok SILENT "$Q4")" = 0 ] \
+        || qga_fatal "after the heal, the panel says once more that the guest agent does not answer" "$Q4"
+    case "${QRES:-none}" in
+        awaiting-sdr)
+            [ "$(rr_tok NOSDR "$Q4")" = 1 ] && [ "$(rr_tok NOWEB "$Q4")" = 0 ] && [ "$(rr_tok BUILDING "$Q4")" = 0 ] \
+                || qga_fatal "bring-up ended awaiting-sdr; the panel must say that it ran without the radio, and must not say BUILDING or raise the ka9q-web alarm" "$Q4"
+            say "bring-up ended without the radio, and the panel says exactly that ✓" ;;
+        ok)
+            [ "$(rr_tok BUILDING "$Q4")" = 0 ] && [ "$(rr_tok NOSDR "$Q4")" = 0 ] \
+                || qga_fatal "bring-up ended ok; the panel must say neither BUILDING nor that it ran without the radio" "$Q4"
+            say "bring-up ended ok; the panel's ka9q-web alarm reads $(rr_tok NOWEB "$Q4") ✓" ;;
+        retry)
+            [ "$(rr_tok RETRY "$Q4")" = 1 ] && [ "$(rr_tok NOWEB "$Q4")" = 0 ] \
+                || qga_fatal "bring-up ended retry; the panel must say that it tries again, and must not say that bring-up finished" "$Q4"
+            say "bring-up ended retry, and the panel says that it tries again ✓" ;;
+        gave-up)
+            [ "$(rr_tok GAVEUP "$Q4")" = 1 ] \
+                || qga_fatal "bring-up ended gave-up; the panel must say that it stopped trying" "$Q4"
+            say "bring-up gave up, and the panel says so ✓" ;;
+        *)
+            say "⚠ the panel's line AFTER bring-up was not evaluated (the marker's result read '${QRES:-none}')"
+            QGA_UNCHECKED="${QGA_UNCHECKED:+$QGA_UNCHECKED; }the panel's line after bring-up" ;;
+    esac
+fi
+
 # What the site sink checks left unchecked, said once more beside the verdict.
 # The PHASE D PASS line below stays exactly as it was: test-update-v3.sh and
 # bless-release.sh match it.
@@ -1882,6 +2107,9 @@ if [ -n "${SINK_UNCHECKED:-}" ]; then
 fi
 if [ -n "${RAC_UNCHECKED:-}" ]; then
     say "⚠ REMOTE ACCESS CHECKS NOT EVALUATED: $RAC_UNCHECKED"
+fi
+if [ -n "${QGA_UNCHECKED:-}" ]; then
+    say "⚠ GUEST-AGENT CHECKS NOT EVALUATED: $QGA_UNCHECKED"
 fi
 
 say "PHASE D PASS — NESTED TEST COMPLETE"
