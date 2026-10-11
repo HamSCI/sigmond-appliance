@@ -149,7 +149,7 @@ panel_words(){   # panel_words <fixed text that starts the line's words>
     sed -n 's/^ *BRINGUP=" [.!>]* *//p' "$FB" | grep -F -- "$1" | head -1 \
         | sed -E 's/[,:.].*$//; s/ +$//'
 }
-for need in 'bring-up ran WITHOUT the radio' 'guest agent does not answer'; do
+for need in 'bring-up ran WITHOUT the radio' "the decoder VM's guest agent does not answer"; do
     w=$(panel_words "$need" | grep -o -F -- "$need")
     if [ -z "$w" ]; then
         echo "  FAIL firstboot-v3.sh: no BRINGUP line holds [$need], which the documents quote"; fail=1; continue

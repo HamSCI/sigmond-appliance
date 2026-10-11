@@ -323,7 +323,7 @@ smd sink status     # should now say: site sink: upload</pre>
 <tr><td>Remote access says "wanted on, not up"</td><td>The station works. <span class="mono">smd remote status</span> on the recorder names the case on its second line. "has not registered yet" means no gateway has answered; the host tries again every ten minutes.</td></tr>
 <tr><td>The screen says <span class="mono">ssh root@&lt;host&gt; 'sigmond-setup --rac-off'</span> where this page says <span class="mono">smd remote off</span></td><td>The recorder and the host have not paired yet, or the host's last check of the pairing failed. Type the screen's line from another computer; it works the same switch.</td></tr>
 <tr><td>The screen says <span class="mono">bring-up ran WITHOUT the radio</span></td><td>No SDR stood on the USB bus when the build ran. Plug the SDR in. The build finishes by itself, and nothing else needs your hands.</td></tr>
-<tr><td>The screen says <span class="mono">guest agent does not answer</span></td><td>The host cannot ask the recorder anything for the moment. The radio and the uploads go on. The screen tries a reset every five minutes. If the line stays for more than ten minutes while the recorder runs, tell your fleet admin.</td></tr>
+<tr><td>The screen says <span class="mono">the decoder VM's guest agent does not answer</span></td><td>The host cannot ask the recorder anything for the moment. The radio and the uploads go on. The screen tries a reset every five minutes. If the line stays for more than ten minutes while the recorder runs, tell your fleet admin.</td></tr>
 </tbody>
 </table>
 </div>

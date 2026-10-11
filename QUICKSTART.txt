@@ -191,7 +191,7 @@ on a fresh machine that can take tens of minutes.
   The panel says  bring-up ran WITHOUT the radio
         No SDR stood on the USB bus.  Plug the SDR in.  Bring-up
         finishes by itself; nothing else needs your hands.
-  The panel says  guest agent does not answer
+  The panel says  the decoder VM's guest agent does not answer
         The host cannot ask the VM anything for the moment.  The radio
         and the uploads go on.  The panel tries a reset every five
         minutes.  If the line stays more than ten minutes while the VM
