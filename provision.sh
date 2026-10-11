@@ -11,9 +11,21 @@ if [ ! -d /opt/git/sigmond/sigmond/.git ]; then
     git clone https://github.com/HamSCI/sigmond /opt/git/sigmond/sigmond
 fi
 cd /opt/git/sigmond/sigmond
+# The guest agent goes in BEFORE install.sh: install.sh writes the agent's
+# memory-cap drop-in (MemoryMax=128M, OOMPolicy=continue) only where the
+# agent's unit already exists.  Installed after, the template shipped with no
+# cap and every fresh station's first `smd doctor` read qga-dropin-stale
+# (v3.71 pre-tag hunt A).
+sudo apt-get install -y -qq qemu-guest-agent >/dev/null && echo "### qemu-guest-agent installed"
 echo "### sigmond @ $(git rev-parse --short HEAD); running install.sh ..."
 SIGMOND_SKIP_PROXMOX_PROMPT=1 ./install.sh
-sudo apt-get install -y -qq qemu-guest-agent >/dev/null 2>&1 && echo "### qemu-guest-agent installed"
+QGA_DROPIN=/etc/systemd/system/qemu-guest-agent.service.d/50-sigmond-selfheal.conf
+if grep -q '^MemoryMax=128M' "$QGA_DROPIN" 2>/dev/null; then
+    echo "### qemu-guest-agent drop-in present ($QGA_DROPIN)"
+else
+    echo "### FATAL: install.sh left no qemu-guest-agent drop-in at $QGA_DROPIN"
+    exit 1
+fi
 sudo apt-get install -y -qq btop tmux >/dev/null 2>&1 && echo "### operator utils installed (btop tmux)"
 # Health-check prerequisites.  sigmond's install.sh declares these too, but the
 # image states them explicitly so its contents do not depend on installer

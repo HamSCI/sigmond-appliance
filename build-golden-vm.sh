@@ -150,7 +150,14 @@ $SCP wisdomf-ryzen5825u build@127.0.0.1:wisdomf
 $SCP wisdom-radiod-plans-ryzen5825u build@127.0.0.1:wisdom-radiod-plans
 say "stage 1: bootstrap (clone HamSCI/sigmond + install.sh)"
 $SSH "chmod +x provision*.sh && setsid ./provision.sh </dev/null >/dev/null 2>&1 &"
-for i in $(seq 1 120); do $SSH "grep -q 'BOOTSTRAP DONE' provision.log" 2>/dev/null && break; sleep 15; done
+for i in $(seq 1 120); do
+    $SSH "grep -q 'BOOTSTRAP DONE' provision.log" 2>/dev/null && break
+    $SSH "grep -q '^### FATAL' provision.log" 2>/dev/null && break
+    sleep 15
+done
+if $SSH "grep -q '^### FATAL' provision.log" 2>/dev/null; then
+    say "FATAL: stage1 refused:"; $SSH "grep '^### FATAL' provision.log; tail -20 provision.log"; exit 1
+fi
 $SSH "grep -q 'BOOTSTRAP DONE' provision.log" || { say "FATAL: stage1 timeout"; $SSH "tail -20 provision.log"; exit 1; }
 say "stage 1 done: $($SSH "grep '###' provision.log | tail -3")"
 
