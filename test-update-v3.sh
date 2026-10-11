@@ -873,7 +873,16 @@ excerpt "$WORK/doctor-pre.txt" 20
 
 # ── the update itself, through the production channel ───────────────────
 say "── smd update --apply (this is the channel that crashed on runuser/PATH)"
-gx_ok 3600 e3-update-apply 'smd update --apply' "smd update --apply"
+# ⛔ NOT INSIDE THE GUEST AGENT'S OWN CGROUP.  sigmond caps
+# qemu-guest-agent.service at MemoryMax=128M, and that cap covers every
+# process a `qm guest exec` starts.  An update that moves several components
+# runs install.sh, uv sync and maybe a native build; it passed here only
+# because those runs moved little.  An operator runs `smd update --apply`
+# from an ssh session, which no such cap covers.  A transient unit gives the
+# command the environment the agent gave it -- a child of PID 1, then
+# `bash -l` -- so the runuser/PATH check above still means what it meant.
+# `systemd-run --wait` hands back smd's own exit, so HELD (3) still reads 3.
+gx_ok 3600 e3-update-apply "systemd-run --quiet --wait --pipe --collect --unit=rig-update-apply /bin/bash -lc 'smd update --apply'" "smd update --apply"
 UPD_RC="$GX_RC"
 say "── full smd update --apply output ──"
 cat "$WORK/e3-update-apply.out"
@@ -1449,7 +1458,10 @@ GB_T0="$(gx_tok "$GX_OUT" MONO)"
 # (OOMPolicy=stop), and the agent restarted under this very call.  An operator
 # runs a restore from an ssh session, which no such cap covers.  So the rig
 # gives this one command a transient unit of its own; every other command still
-# goes through the agent as before.
+# goes through the agent as before.  From v3.71 the drop-in also sets
+# OOMPolicy=continue, so a killed child no longer takes the agent down; the
+# restore keeps its unit all the same, since a killed restore would still
+# fail this phase.
 gx_ok 1800 g3-restore-apply "systemd-run --quiet --wait --pipe --collect --unit=rig-restore-apply /bin/bash -lc 'smd admin manifest restore $GMANIFEST --apply $NOFETCH'" "manifest restore --apply"
 sed 's/^/      /' "$WORK/g3-restore-apply.out"
 [ "$GX_RC" -eq 0 ] || fatal "$WORK/g3-restore-apply.out" "smd admin manifest restore --apply $NOFETCH exited $GX_RC — the rollback path is broken, which is worse than the forward path being broken"
