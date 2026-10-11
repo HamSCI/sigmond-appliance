@@ -134,9 +134,9 @@ rr_khkey() {
 # Each function below prints a script for the NESTED HOST; the rig pipes it to
 # `$SSHN "bash -s <vmid>"`.  A script prints its facts as KEY:value lines and
 # ends with END:1, so that rr_tok and nh_ok (the remote_rig block) can read
-# them.  The scripts read three names from the environment, for the hermetic
-# test alone: QGA_PANEL (the panel script), QGA_ISSUE (the file it paints) and
-# QGA_NOTE (the line a reset leaves).
+# them.  The scripts read four names from the environment, for the hermetic
+# test alone: QGA_PANEL (the panel script), QGA_ISSUE (the file it paints),
+# QGA_NOTE (the line a reset leaves) and QGA_DIR (the agents' sockets).
 #
 # qga_probe_panel: has this image's panel the fix?  PANELFIX:1 when the panel
 # script carries the reset; 0 for a panel from before v3.71.
@@ -212,6 +212,23 @@ SIGMOND_VMID="$VMID" "$P" >/dev/null 2>&1
 if timeout 10 qm agent "$VMID" ping >/dev/null 2>&1; then echo HEARS:1; else echo HEARS:0; fi
 if [ -e "$N" ]; then echo "NOTE:$(head -1 "$N")"; else echo "NOTE:none"; fi
 grep -q 'guest agent does not answer' "$I" 2>/dev/null && echo PANELSILENT:1 || echo PANELSILENT:0
+# RESETHEX: the raw bytes the agent sends back to one more parser reset, in
+# hex, read until 4242 arrives or 4 seconds pass; "none" when it sends nothing.
+# The rig prints it once, so that a real run measures what the agent sends.
+HEX=$(timeout 10 python3 -c 'import socket,sys,time
+s=socket.socket(socket.AF_UNIX); end=time.monotonic()+4; got=b""
+try:
+    s.settimeout(4); s.connect(sys.argv[1]+"/"+sys.argv[2]+".qga")
+    s.sendall(b"\xff"+b"{\"execute\":\"guest-sync-delimited\",\"arguments\":{\"id\":4242}}\n")
+    while b"4242" not in got:
+        left=end-time.monotonic()
+        if left<=0: break
+        s.settimeout(left); d=s.recv(4096)
+        if not d: break
+        got+=d
+except Exception: pass
+print(got.hex() if got else "none")' "${QGA_DIR:-/var/run/qemu-server}" "$VMID" 2>/dev/null </dev/null)
+echo "RESETHEX:${HEX:-none}"
 echo END:1
 QGAEOF
 }
@@ -2068,6 +2085,7 @@ $Q3"
         [ "$(rr_tok PANELSILENT "$Q3")" = 0 ] \
             || qga_fatal "the panel healed the agent and still says that it does not answer" "$Q3"
         say "a guest agent deafened on purpose (request $QDEAF) heard again after one panel refresh ✓"
+        say "NOTE: the agent's raw reply to one more parser reset, in hex: $(rr_tok RESETHEX "$Q3")"
     fi
 
     QRES=$($SSHN "qm guest exec $VMID --timeout 30 -- /bin/bash -c 'sed -n s/^result=//p /var/lib/sigmond/.firstrun-bringup-done 2>/dev/null | head -1'" 2>/dev/null \

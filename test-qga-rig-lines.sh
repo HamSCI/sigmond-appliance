@@ -70,7 +70,7 @@ chmod 755 "$T/bin/"* "$T/panel"
 run(){
     local d="$T/$1"; shift; local probe="$1"; shift
     mkdir -p "$d"
-    "$probe" | D="$d" QGA_PANEL="${QGA_PANEL_OVERRIDE:-$T/panel}" QGA_ISSUE="$d/issue" QGA_NOTE="$d/qga-reset" \
+    "$probe" | D="$d" QGA_PANEL="${QGA_PANEL_OVERRIDE:-$T/panel}" QGA_ISSUE="$d/issue" QGA_NOTE="$d/qga-reset" QGA_DIR="$d" \
         PATH="$T/bin:$PATH" bash -s 100 "$@" 2>&1
 }
 
@@ -113,7 +113,20 @@ has   "one lost ping per try is not deafness: DEAF:0" "$out" "DEAF:0"
 
 echo "== the heal"
 mkdir -p "$T/h1"; : > "$T/h1/deaf"; : > "$T/h1/panel-heals"; echo "all quiet" > "$T/h1/issue.txt"
+# A stand-in agent that answers the rig's own reset in pieces, as the real one may.
+python3 - "$T/h1/100.qga" <<'PY' &
+import socket, sys, time
+srv = socket.socket(socket.AF_UNIX); srv.bind(sys.argv[1]); srv.listen(1); srv.settimeout(10)
+c, _ = srv.accept(); c.recv(4096)
+for piece in (b'{"error":"x"}\n', b"\xff", b'{"return": 4242}\n'):
+    c.sendall(piece); time.sleep(0.2)
+c.close()
+PY
+for i in $(seq 1 50); do [ -S "$T/h1/100.qga" ] && break; python3 -c 'import time; time.sleep(0.1)'; done
 out=$(run h1 qga_probe_heal)
+wait
+hexof(){ od -An -tx1 | tr -d ' \n'; }
+has   "the agent's raw reply comes back in hex"       "$out" "RESETHEX:$(printf '{"error":"x"}\n\377{"return": 4242}\n' | hexof)"
 has   "a refresh that heals: HEARS:1"                 "$out" "HEARS:1"
 has   "the reset's line names the panel"              "$out" "NOTE:2026-10-10T03:00:00Z panel"
 has   "the panel no longer says the agent is silent"  "$out" "PANELSILENT:0"
@@ -123,6 +136,7 @@ mkdir -p "$T/h2"; : > "$T/h2/deaf"; echo " .. the decoder VM's guest agent does 
 out=$(run h2 qga_probe_heal)
 has   "a refresh that does not heal: HEARS:0"         "$out" "HEARS:0"
 has   "no line of a reset: NOTE:none"                 "$out" "NOTE:none"
+has   "no reply to read: RESETHEX:none"              "$out" "RESETHEX:none"
 has   "the panel says the agent is silent"            "$out" "PANELSILENT:1"
 grep -q 'start sigmond-issue.timer pm-heartbeat.timer' "$T/h2/systemctl.calls" && ok "the timers start again all the same" || bad "the timers start again all the same" "not started"
 
