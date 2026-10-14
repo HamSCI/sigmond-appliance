@@ -424,12 +424,20 @@ PYEOF
 )
     RADID=$(ls /etc/radio/radiod@*.conf 2>/dev/null | head -1 | sed 's/.*radiod@\(.*\)\.conf/\1/')
     if [ -n "$REPORTER" ] && [ -n "$RADID" ]; then
-        INST=$(echo "$REPORTER" | tr '/' '=')
-        MCONF="/etc/meteor-scatter/$INST.toml"
-        if ! grep -q '\[\[radiod\]\]' "$MCONF" 2>/dev/null; then
-            smd install --components meteor-scatter --yes >/dev/null 2>&1
-            smd admin instance add --force meteor-scatter "$REPORTER" >/dev/null 2>&1
-            python3 - "$MCONF" "$REPORTER" "$RADID" <<'PYEOF'
+        # smd owns the three spellings of a reporter id: the storage form
+        # names the file (AC0G=B4.toml), the systemd form names the unit
+        # (meteor-scatter@AC0G\x3dB4).  Never systemd-escape: it turns '-'
+        # into \x2d, a unit nobody enabled.  The display form (AC0G/B4) is
+        # the canonical storage form with '=' turned back into '/'.
+        if INST=$(smd admin instance canonical "$REPORTER" 2>/dev/null) \
+           && UNIT_INST=$(smd admin instance canonical --systemd "$REPORTER" 2>/dev/null) \
+           && [ -n "$INST" ] && [ -n "$UNIT_INST" ]; then
+            SHOWN=$(printf '%s' "$INST" | tr '=' '/')
+            MCONF="/etc/meteor-scatter/$INST.toml"
+            if ! grep -q '\[\[radiod\]\]' "$MCONF" 2>/dev/null; then
+                smd install --components meteor-scatter --yes >/dev/null 2>&1
+                smd admin instance add --force meteor-scatter "$REPORTER" >/dev/null 2>&1
+                python3 - "$MCONF" "$SHOWN" "$RADID" <<'PYEOF'
 import sys, tomllib
 p, reporter, radid = sys.argv[1], sys.argv[2], sys.argv[3]
 sp = tomllib.load(open('/etc/sigmond/site-profile.toml','rb'))
@@ -457,12 +465,15 @@ freqs_hz      = [
   28_145_000,
   50_260_000,
 ]
-""" % (reporter.replace('/','='), reporter, radid,
+""" % (reporter, reporter, radid,
        st.get('callsign',''), st.get('grid_square',''), radid))
 PYEOF
-            systemctl enable --now "meteor-scatter@$(systemd-escape "$INST")" 2>/dev/null \
-                && say "meteor-scatter@$INST configured + started (MSK144 10m/6m)" \
-                || say "WARN: meteor-scatter@$INST failed to start - check journal"
+                systemctl enable --now "meteor-scatter@$UNIT_INST.service" 2>/dev/null \
+                    && say "meteor-scatter@$SHOWN configured + started (MSK144 10m/6m)" \
+                    || say "WARN: meteor-scatter@$SHOWN failed to start - check journal"
+            fi
+        else
+            say "WARN: smd could not read reporter id '$REPORTER' (an invalid id, or an smd older than v3.72) - meteor-scatter not configured"
         fi
     fi
 fi
