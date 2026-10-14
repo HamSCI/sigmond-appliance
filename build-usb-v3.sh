@@ -396,6 +396,9 @@ BUILT_UTC="$(date -u -Iseconds)"
     # not have: it shipped a firstboot three days older than its own tag and
     # every gate passed, because none of them looked at the artefact.
     echo "firstboot_sha256: $(sha256sum firstboot-rendered.sh | cut -d" " -f1)"
+    # The IPv6 relay pm-align carries to hosts in the field (v3.72 #15).  It
+    # fetches the file at appliance_commit and checks it against this line.
+    echo "vm6proxy_sha256: $(sha256sum sigmond-vm6proxy | cut -d" " -f1)"
     echo "built_utc: $BUILT_UTC"
     # Explained here, not just in this build script's comments, because a
     # field engineer reads THIS file, not build-usb-v3.sh. Sits above the
@@ -596,6 +599,9 @@ MANIFEST="${IMG%.img}.manifest.txt"
     # not have: it shipped a firstboot three days older than its own tag and
     # every gate passed, because none of them looked at the artefact.
     echo "firstboot_sha256: $(sha256sum firstboot-rendered.sh | cut -d" " -f1)"
+    # The IPv6 relay pm-align carries to hosts in the field (v3.72 #15).  It
+    # fetches the file at appliance_commit and checks it against this line.
+    echo "vm6proxy_sha256: $(sha256sum sigmond-vm6proxy | cut -d" " -f1)"
     echo "built_utc: $BUILT_UTC"
     echo "image_sha256: $(cut -d' ' -f1 < "${IMG%.img}.sha256")"
     echo

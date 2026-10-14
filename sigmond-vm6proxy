@@ -19,11 +19,23 @@
 # faster (in-kernel).  Binding dual-stack here would put a userspace hop in the
 # path of traffic that works today.
 #
-#   sigmond-vm6proxy install [vm-ip]   write + enable the units
+# Every host gets it, not only an IPv6-only one (v3.72 #15): a dual-stack site
+# had no IPv6 way to the VM's pages, and a site whose router turns IPv6 on later
+# needs it already in place.  The importer installs it beside the IPv4 DNAT
+# rules; pm-align brings it to hosts installed before that.  A host whose kernel
+# has IPv6 off skips the units through their Condition, quietly.
+#
+# install never waits on a unit: it enables each socket and starts it with
+# --no-block.  The v6 gateway runs it from units that are part of getting the
+# network online, and firstboot-v3.sh forbids a synchronous start there.
+#
+#   sigmond-vm6proxy install [vm-ip]   write + enable the units (idempotent)
 #   sigmond-vm6proxy status
 #   sigmond-vm6proxy remove
 set -u
 VM_IP="${SIGMOND_MGMT_VM:-10.99.0.2}"
+# Only the tests point this elsewhere.
+UNITDIR="${SIGMOND_VM6PROXY_UNITDIR:-/etc/systemd/system}"
 # listen:target -- 2222 maps to the VM's 22 because the host's own sshd owns 22.
 # 8765 is mag-usb's live sample feed.  Without it the magnetometer dashboard
 # loads over IPv6 and then sits "disconnected" for ever, because the page can
@@ -39,10 +51,12 @@ cmd_install(){
     local pair lp tp
     for pair in $PORTS; do
         lp="${pair%%:*}"; tp="${pair##*:}"
-        cat > "/etc/systemd/system/sigmond-vm6proxy@${lp}.socket" <<EOF
+        cat > "${UNITDIR}/sigmond-vm6proxy@${lp}.socket" <<EOF || { say "cannot write ${UNITDIR}/sigmond-vm6proxy@${lp}.socket"; return 1; }
 [Unit]
 Description=IPv6 listener for the decoder VM's port ${lp}
 Documentation=man:systemd-socket-proxyd(8)
+# A kernel with IPv6 off has no such file: skip quietly, no failed unit.
+ConditionPathExists=/proc/net/if_inet6
 
 [Socket]
 # IPv6 ONLY: IPv4 already reaches the VM through the in-kernel DNAT rule, and
@@ -54,9 +68,10 @@ Accept=no
 [Install]
 WantedBy=sockets.target
 EOF
-        cat > "/etc/systemd/system/sigmond-vm6proxy@${lp}.service" <<EOF
+        cat > "${UNITDIR}/sigmond-vm6proxy@${lp}.service" <<EOF || { say "cannot write ${UNITDIR}/sigmond-vm6proxy@${lp}.service"; return 1; }
 [Unit]
 Description=Relay IPv6 :${lp} to the decoder VM ${VM_IP}:${tp}
+ConditionPathExists=/proc/net/if_inet6
 Requires=sigmond-vm6proxy@${lp}.socket
 After=sigmond-vm6proxy@${lp}.socket
 
@@ -70,7 +85,8 @@ EOF
     systemctl daemon-reload
     for pair in $PORTS; do
         lp="${pair%%:*}"
-        systemctl enable --now "sigmond-vm6proxy@${lp}.socket" >/dev/null 2>&1
+        systemctl enable "sigmond-vm6proxy@${lp}.socket" >/dev/null 2>&1
+        systemctl start --no-block "sigmond-vm6proxy@${lp}.socket" >/dev/null 2>&1
     done
     cmd_status
 }
@@ -95,8 +111,8 @@ cmd_remove(){
     for pair in $PORTS; do
         lp="${pair%%:*}"
         systemctl disable --now "sigmond-vm6proxy@${lp}.socket" >/dev/null 2>&1
-        rm -f "/etc/systemd/system/sigmond-vm6proxy@${lp}.socket" \
-              "/etc/systemd/system/sigmond-vm6proxy@${lp}.service"
+        rm -f "${UNITDIR}/sigmond-vm6proxy@${lp}.socket" \
+              "${UNITDIR}/sigmond-vm6proxy@${lp}.service"
     done
     systemctl daemon-reload
     say "removed"

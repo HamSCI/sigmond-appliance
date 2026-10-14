@@ -2107,6 +2107,19 @@ for _pf in 8000:8000 8081:8081 8082:8082 8765:8765 2222:22; do
   iptables -t nat -C PREROUTING -p tcp --dport "$_hp" -j DNAT --to-destination "${MGMT_VM}:${_gp}" 2>/dev/null \
     || iptables -t nat -A PREROUTING -p tcp --dport "$_hp" -j DNAT --to-destination "${MGMT_VM}:${_gp}"
 done
+# The same ports over IPv6, for EVERY host.  DNAT cannot cross address
+# families, so sigmond-vm6proxy relays them in userspace.  It used to be
+# installed only by the IPv6-only gateway below, which left a dual-stack site
+# with no IPv6 way to the VM's pages, and sigmond-check read FAIL on all of
+# them (v3.72 #15).  The v6 gateway still calls it; a second install rewrites
+# the same units.  It enables each socket and starts it with --no-block, so
+# nothing here waits on a unit.
+if [ -x /usr/local/sbin/sigmond-vm6proxy ]; then
+  SIGMOND_MGMT_VM="$MGMT_VM" /usr/local/sbin/sigmond-vm6proxy install 2>&1 \
+    | while IFS= read -r _l; do say "vm6proxy: $_l"; done
+else
+  say "import: WARNING - sigmond-vm6proxy missing; the VM's pages answer over IPv4 only"
+fi
 if ip -4 addr show vmbr1 2>/dev/null | grep -q "$MGMT_PM"; then
   say "import: vmbr1 up — VM will be at ${MGMT_VM}, NATed out vmbr0, :8081 forwarded here"
 else
