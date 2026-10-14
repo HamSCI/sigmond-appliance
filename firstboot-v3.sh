@@ -3247,7 +3247,7 @@ $_cable}
  Logins   host  root / $PWLINE
           VM    sigmond / same password
 ${RACBLOCK}
- From the host:  sigmond-vm (VM shell) · qm terminal $VMID (VM console) · sigmond-setup --reconfigure
+ From the host:  sigmond-check (is it working?) · sigmond-vm (VM shell) · qm terminal $VMID · sigmond-setup --reconfigure
 ════ end Sigmond panel ════  $VERSION ${CONF:+· station ${CONF%% *} }════
 PEOF
 )

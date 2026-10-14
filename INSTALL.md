@@ -254,8 +254,8 @@ into the station types into the VM. The station still carries that typing to a
 login on the host, and the panel's first line says so:
 `KEYBOARD WORKS HERE — press Enter for a login to THIS host`. Press Enter, then
 type the host's root password when the screen asks for it. Nothing shows while
-you type the password. With that login on the host you can type
-`sigmond-setup --rac-off`, `sigmond-setup --rac-on` and
+you type the password. With that login on the host you can type `sigmond-check`
+(§9), and `sigmond-setup --rac-off`, `sigmond-setup --rac-on` and
 `sigmond-setup --pair-vm` (§10 says what they do). For everything else, use the
 station from another computer. The panel lists every address and login;
 disconnect the monitor and keyboard whenever you like.
@@ -264,53 +264,85 @@ disconnect the monitor and keyboard whenever you like.
 
 ## 9. Fifteen minutes later — check it's alive
 
-From any computer on the same network (addresses are on the console panel):
-
-- **Live receiver:** `http://<host address>:8081` — a waterfall with signals.
-- **Station pages:** `http://<host address>:8000` — the station's callsign and grid,
-  and its timing and GRAPE pages.
-- **Magnetometer:** `http://<host address>:8082` (if you have one)
-
-The decoder VM sits on a private link behind the host, so the host relays these pages for it.
-
-**No spots or PSWS data leave the station yet.**  A new station starts with its site sink
-switch at `off`.  It records and decodes, but sends no spots or data to wsprnet,
-pskreporter.info, wsprdaemon.org or PSWS.  Only its heartbeat, a five-minute health report
-for the fleet board, goes out.
-
-Log in to the decoder VM (§10) and check three things:
+At the station's keyboard, press Enter and log in to the host, as §8 describes.  Then
+type one command:
 
 ```
-smd watch wspr      # a line per 2-minute cycle counting the WSPR spots it decoded; Ctrl-C stops it
-smd watch psk       # the same for FT8 and FT4, every 15 seconds
-grep -E 'reporter_id|callsign|grid' /etc/sigmond/site-profile.toml
+sigmond-check
 ```
 
-When the waterfall shows signals, the watchers count spots, and the reporter ID, callsign
-and grid read right, read the site sink switch:
+It takes about fifteen seconds.  It prints one line for each part of the station and
+ends with a verdict:
 
 ```
-smd sink status
+ ok    PSK            214 FT8 and 31 FT4 spots in the last 15 min
+ ok    WSPR           48 spots in the last 10 min, on 6 bands
+ FAIL  magnetometer   frozen: 0.00 C, no change in 60 s.
+                      Fix: sigmond-vm sudo systemctl restart mag-recorder
+ wait  GRAPE          first files due in about 7 min (hf-timestd started 4 min ago)
+ ok    storage        /var/lib has 61 % free
+ wait  uploads        off, new station: check the lines above, then run: sigmond-vm smd sink upload
+ --    meteor scatter not on this station
+ ok    receiver page  IPv4 http://192.168.1.50:8081   IPv6 http://[2601:db8::50]:8081
+ ok    station pages  IPv4 http://192.168.1.50:8000   IPv6 http://[2601:db8::50]:8000
+ ok    magnetometer page  IPv4 http://192.168.1.50:8082   IPv6 http://[2601:db8::50]:8082
+FAIL  (1 failing, 2 waiting)
 ```
 
-A new station says `site sink: off` and gives the reason `new station: …`.  Any other
-reason means someone set the switch on purpose.  Leave it alone and ask your fleet admin.
+The word at the start of a line tells you how that part stands:
 
-With the reason `new station: …`, set the site sink switch to `upload`:
+| Word | Meaning |
+|---|---|
+| `ok` | It works. |
+| `wait` | Not yet.  A new station shows this for a while; the line says how long to wait. |
+| `FAIL` | It does not work.  The line says what to do, or whom to tell. |
+| `--` | This station does not run that part, and the verdict leaves it out. |
+
+The last line gives the verdict.  `PASS` means every part works.  `WAIT` means some part
+has not started yet: wait the time its line names, then type `sigmond-check` again.
+`FAIL` means some part does not work.  Do what its line says.  A fix stands on its own
+line under it, after the word `Fix:`; type it exactly as printed.  When a `FAIL` line
+names no fix, send the whole output to your fleet admin.
+
+A quiet band can look like a fault.  So a `FAIL` line about spots asks you to check the
+antenna and its cable before anything else.
+
+A new station sends nothing yet.  It starts with its site sink switch at `off`: it
+records and decodes, but sends no spots or data to wsprnet, pskreporter.info,
+wsprdaemon.org or PSWS.  Only its heartbeat goes out, a five-minute health report for
+the fleet board.  So the uploads line shows `wait` and says `new station`.
+
+When every other line shows `ok` or `--`, turn the uploads on:
 
 ```
-smd sink upload
-smd sink status     # should say: site sink: upload
+sigmond-vm smd sink upload
 ```
+
+Then type `sigmond-check` again.  The uploads line now says `on`, and within 30 minutes
+it shows the first delivery.  An uploads line that shows `FAIL` with `off` or `hold`
+and some other reason means someone set the switch on purpose.  Leave it alone and ask your
+fleet admin.
 
 Nothing recorded before `smd sink upload` leaves the station, with one exception.  The
 station packs each UTC day's GRAPE and magnetometer data after that day ends, between
-01:00 and about 05:00 UTC.  So the packages for the UTC day you run it still go out, and
-so do the previous day's if you run it before that packing has finished.  Run it after
-about 05:00 UTC if you can.  While a packing job runs, `smd sink upload` refuses, names
-the job, and asks you to run it again when the job ends.  About fifteen minutes after
-`smd sink upload`, search your reporter ID at wsprnet.org (Database) and your callsign at
-pskreporter.info.
+01:00 and about 05:00 UTC.  The packages for the day you turn the uploads on still go
+out, and so do the previous day's if their packing has not finished.  So turn them on
+after about 05:00 UTC if you can.  While a packing job runs, `smd sink upload` refuses,
+names the job, and asks you to try again when it ends.  About fifteen minutes after,
+search your reporter ID at wsprnet.org (Database) and your callsign at pskreporter.info.
+
+If you like, open the pages from another computer on the same network.  `sigmond-check`
+printed their addresses, for example `http://192.168.1.50:8081` over IPv4 or
+`http://[2601:db8::50]:8081` over IPv6.  A browser needs the square brackets around an
+IPv6 address.  The receiver page shows a waterfall with signals; the station pages show
+the callsign, the grid, and the timing and GRAPE pages.
+
+From another computer you can also ask the decoder VM alone.  This prints the VM's lines
+without the host's page lines:
+
+```
+ssh -p 2222 sigmond@<host address> smd check
+```
 
 ---
 
@@ -377,7 +409,7 @@ More: [remote access §8](https://github.com/HamSCI/sigmond/blob/main/docs/opera
 | The panel prints `ssh root@<host address> 'sigmond-setup --rac-off'` where this guide says `smd remote off` | The VM and the host have not paired, or the host's last check of the pairing failed (§10). Type the panel's line from another computer; it works the same switch |
 | The panel prints `bring-up ran WITHOUT the radio` | No SDR stood on the USB bus when bring-up ran. Plug the SDR in. Bring-up finishes by itself, and nothing else needs your hands |
 | The panel prints `the decoder VM's guest agent does not answer` | The host cannot ask the decoder VM anything for the moment. The radio and the uploads go on. The panel tries a reset at every refresh, every five minutes. When the line stays for more than ten minutes while the VM runs, tell your fleet admin |
-| No spots after 30 minutes | Expected on a new station until you run `smd sink upload` (§9). Log in to the VM and run `smd sink status`. If it says `site sink: off` with the reason `new station: …`, check the station as §9 describes, then run `smd sink upload`. If it says `site sink: off` with any other reason, or `hold (legacy)`, ask your fleet admin. If it says `site sink: upload`: antenna actually connected? Then run `smd status` and send its output to your fleet admin |
+| No spots after 30 minutes | Expected on a new station until you turn the uploads on (§9). At the host's console, type `sigmond-check`. If the uploads line says `new station`, check the other lines as §9 describes, then type `sigmond-vm smd sink upload`. If it shows `off` or `hold` with any other reason, ask your fleet admin. If the PSK or WSPR line shows `FAIL`, check the antenna and its cable first, then send the whole output to your fleet admin |
 | Anything else | Your fleet admin can log in through remote access and fix it — just ask. If you turned remote access off, run `smd remote on` in the VM first |
 
 More symptoms and the decision tree: [operator troubleshooting](https://github.com/HamSCI/sigmond/blob/main/docs/operator/troubleshooting.md).
@@ -398,9 +430,9 @@ then shipped to their permanent home. Keep the site sink switch at `off`
 until the station knows where it stands:
 
 1. At the staging site, leave the site sink switch at `off`; a new station
-   starts that way. Check reception there with the waterfall and
-   `smd watch wspr` (§9). No data leaves the station; only its heartbeat
-   goes out.
+   starts that way. Check reception there with `sigmond-check` (§9): every
+   line but uploads should show `ok` or `--`. No data leaves the station; only
+   its heartbeat goes out.
 2. At the destination, log into the **Proxmox host** (`ssh root@<host address>`,
    or the console before the USB controllers were handed to the VM) and run
    `sigmond-setup --reconfigure`.
