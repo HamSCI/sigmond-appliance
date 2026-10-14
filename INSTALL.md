@@ -299,10 +299,14 @@ The word at the start of a line tells you how that part stands:
 | `--` | This station does not run that part, and the verdict leaves it out.  A station without a magnetometer shows `--` on the magnetometer line. |
 
 Right after the install the station may still bring itself up.  Then the first line
-reads `wait  bring-up  still running (started 12 min ago)`, and each part that bring-up
-has not started yet shows `wait` too.  Type `sigmond-check` again in ten minutes.  If
-the first line reads `FAIL  bring-up`, the bring-up failed: send the whole output to
-your fleet admin.
+reads `wait  bring-up  still running (started 12 min ago)`.  A part that bring-up has
+installed but not started yet shows `wait`; a part it has not installed yet shows `--`.
+Type `sigmond-check` again in ten minutes.
+
+If the first line reads `FAIL  bring-up  ran without the radio`, no SDR stood on the USB
+bus when bring-up ran.  Plug the SDR in; bring-up finishes by itself.  Until then the
+radio parts show `wait` and offer no fix.  Any other `FAIL  bring-up` line means the
+bring-up failed: send the whole output to your fleet admin.
 
 The last line gives the verdict.  `PASS` means every part works.  `WAIT` means some part
 has not started yet: wait the time its line names, then type `sigmond-check` again.
