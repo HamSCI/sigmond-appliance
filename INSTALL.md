@@ -294,7 +294,7 @@ The word at the start of a line tells you how that part stands:
 | Word | Meaning |
 |---|---|
 | `ok` | It works. |
-| `wait` | Not yet.  A new station shows this for a while; the line says how long to wait. |
+| `wait` | Not yet.  A new station shows this for a while; the line usually says how long to wait. |
 | `FAIL` | It does not work.  The line says what to do, or whom to tell. |
 | `--` | This station does not run that part, and the verdict leaves it out. |
 
@@ -304,7 +304,7 @@ has not started yet: wait the time its line names, then type `sigmond-check` aga
 line under it, after the word `Fix:`; type it exactly as printed.  When a `FAIL` line
 names no fix, send the whole output to your fleet admin.
 
-A quiet band can look like a fault.  So a `FAIL` line about spots asks you to check the
+A quiet band can look like a fault.  So when a `FAIL` line says no spots arrived, it asks you to check the
 antenna and its cable before anything else.
 
 A new station sends nothing yet.  It starts with its site sink switch at `off`: it
@@ -318,8 +318,7 @@ When every other line shows `ok` or `--`, turn the uploads on:
 sigmond-vm smd sink upload
 ```
 
-Then type `sigmond-check` again.  The uploads line now says `on`, and within 30 minutes
-it shows the first delivery.  An uploads line that shows `FAIL` with `off` or `hold`
+Then type `sigmond-check` again.  The uploads line now shows `wait`, and the verdict reads `WAIT`, until the first delivery arrives, within 30 minutes.  After that the line shows `ok`.  If it shows `FAIL` because nothing went out in 30 minutes, send the whole output to your fleet admin.  An uploads line that shows `FAIL` with `off` or `hold`
 and some other reason means someone set the switch on purpose.  Leave it alone and ask your
 fleet admin.
 
@@ -337,8 +336,8 @@ printed their addresses, for example `http://192.168.1.50:8081` over IPv4 or
 IPv6 address.  The receiver page shows a waterfall with signals; the station pages show
 the callsign, the grid, and the timing and GRAPE pages.
 
-From another computer you can also ask the decoder VM alone.  This prints the VM's lines
-without the host's page lines:
+From another computer you can also ask the decoder VM alone.  This prints the VM's own lines,
+without the host's checks of the addresses people browse to:
 
 ```
 ssh -p 2222 sigmond@<host address> smd check
@@ -409,7 +408,7 @@ More: [remote access §8](https://github.com/HamSCI/sigmond/blob/main/docs/opera
 | The panel prints `ssh root@<host address> 'sigmond-setup --rac-off'` where this guide says `smd remote off` | The VM and the host have not paired, or the host's last check of the pairing failed (§10). Type the panel's line from another computer; it works the same switch |
 | The panel prints `bring-up ran WITHOUT the radio` | No SDR stood on the USB bus when bring-up ran. Plug the SDR in. Bring-up finishes by itself, and nothing else needs your hands |
 | The panel prints `the decoder VM's guest agent does not answer` | The host cannot ask the decoder VM anything for the moment. The radio and the uploads go on. The panel tries a reset at every refresh, every five minutes. When the line stays for more than ten minutes while the VM runs, tell your fleet admin |
-| No spots after 30 minutes | Expected on a new station until you turn the uploads on (§9). At the host's console, type `sigmond-check`. If the uploads line says `new station`, check the other lines as §9 describes, then type `sigmond-vm smd sink upload`. If it shows `off` or `hold` with any other reason, ask your fleet admin. If the PSK or WSPR line shows `FAIL`, check the antenna and its cable first, then send the whole output to your fleet admin |
+| No spots after 30 minutes | Expected on a new station until you turn the uploads on (§9). At the host's console, type `sigmond-check`. If the uploads line says `new station`, check the other lines as §9 describes, then type `sigmond-vm smd sink upload`. If it shows `off` or `hold` with any other reason, ask your fleet admin. If the PSK or WSPR line shows `FAIL` with no fix, check the antenna and its cable first, then send the whole output to your fleet admin |
 | Anything else | Your fleet admin can log in through remote access and fix it — just ask. If you turned remote access off, run `smd remote on` in the VM first |
 
 More symptoms and the decision tree: [operator troubleshooting](https://github.com/HamSCI/sigmond/blob/main/docs/operator/troubleshooting.md).
