@@ -2860,8 +2860,24 @@ try:
     for i in json.load(sys.stdin):
         if i.get("name", "").startswith(("en", "eth")):
             for a in i.get("ip-addresses", []):
-                if a["ip-address-type"] == "ipv4" and not a["ip-address"].startswith("127"):
-                    cands.append(a["ip-address"])
+                ip = a["ip-address"]
+                # ⛔ NEVER ADVERTISE THE /30.  10.99.0.0/30 is the private host-to-guest
+                # link.  Nothing off this machine can reach it, and it is the MOST local
+                # address there is, so the is_local sort below puts it first and it wins
+                # every time.  rob, on the AI6VN v3.72 panel: telling people about
+                # 10.99.0.2 is meaningless, nobody would ever use it.  The HOST address
+                # selector learned this on 2026-09-21; the VM selector never did.
+                # 169.254/16 is link-local and 192.0.0.0/29 is the CLAT endpoint
+                # (RFC 7335) -- equally unreachable from anywhere useful.
+                #
+                # ⛔ NO APOSTROPHES ANYWHERE IN THIS BLOCK.  It is inside python3 -c with
+                # single quotes, so one apostrophe ends the shell string and the entire
+                # script stops parsing.  test-wifi-boot.sh "the panel parses" catches it.
+                if a["ip-address-type"] != "ipv4":
+                    continue
+                if ip.startswith(("127.", "169.254.", "10.99.0.", "192.0.0.")):
+                    continue
+                cands.append(ip)
 except Exception:
     pass
 if cands:
@@ -3415,14 +3431,9 @@ fi
 # longer ... they only occupy about half of the monitor."
 PANEL=$(cat <<PEOF
 ════ Sigmond appliance $VERSION ${CONF:+— station ${CONF%% *}} ════
- KEYBOARD WORKS HERE — press Enter for a login to THIS host.  Your typing does
- NOT echo (not even the username); that is normal, the screen is not frozen.
+ The station is the DECODER VM below — this screen is its hypervisor.
+ Press Enter here for a hypervisor login; typing does not echo, which is normal.
 ${NETWARN}${BRINGUP}${RXWARN}
- Network   ${_gwl}
-   ${NICLINES}${_stray:+
-$_stray}${_cable:+
-$_cable}
-
  Proxmox host   ssh root@${HOSTIP:-<no-ip-yet>}
                 web UI  https://$(ipurl "${HOSTIP:-<no-ip-yet>}"):8006
 
@@ -3432,8 +3443,9 @@ $_cable}
    via this host  http://$(ipurl "${HOSTIP:-<no-ip-yet>}"):PORT  where PORT =
                   ka9q-web 8081 · station-web 8000 · magnetometer 8082 · mag feed ws 8765
 
- Logins   host  root / $PWLINE
-          VM    sigmond / same password
+ Passwords   for the logins above and the Proxmox web UI
+             host  root / $PWLINE
+             VM    sigmond / same password
 ${RACBLOCK}
  From the host:  sigmond-check (is it working?) · sigmond-vm (VM shell) · qm terminal $VMID · sigmond-setup --reconfigure
 ════ end Sigmond panel ════  $VERSION ${CONF:+· station ${CONF%% *} }════
