@@ -413,7 +413,8 @@ print(f"{path}: commented out {n} unrestricted DNAT post-up line(s); original ke
 cmd_refresh(){
     take_lock || return 1
     refresh_locked || return 1
-    # The chain stands: the old post-up lines may go.
+    # The chain stands, or the relay was removed: either way the old post-up
+    # lines, which would put the unrestricted rules back at boot, may go.
     neutralize_interfaces
 }
 
@@ -517,9 +518,14 @@ cmd_remove(){
     done
     iptables -w -t nat -F "$CHAIN" 2>/dev/null
     iptables -w -t nat -X "$CHAIN" 2>/dev/null
-    guard_refresh
+    local guarded=0
+    guard_refresh || guarded=1
     say "removed: the decoder VM's ports no longer answer over IPv4 through this host"
-    say "  the FORWARD guard stays, and its units keep it at boot and every 15 min"
+    if [ "$guarded" = 0 ]; then
+        say "  the FORWARD guard stays, and its units keep it at boot and every 15 min"
+    else
+        say "  WARNING: the FORWARD guard could not be put in place; the timer retries in 15 min"
+    fi
     say "  pm-align leaves it removed; to bring it back: sudo $SELF install"
 }
 
