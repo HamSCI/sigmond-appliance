@@ -36,7 +36,8 @@
 #     IPAddressDeny=any
 #     IPAddressAllow=localhost link-local fc00::/7
 # and a drop-in, sigmond-vm6proxy@.socket.d/10-allow-local.conf, adds the
-# prefixes of this host's own global IPv6 addresses (never its routes).  systemd applies a socket unit's access
+# prefixes of this host's own global IPv6 addresses on its uplink (never its
+# routes; see local_prefixes, which also records the residual risk).  systemd applies a socket unit's access
 # list to the listening socket (systemd.resource-control(5)), which drops a
 # connection from anywhere else.  The service units carry no list: proxyd
 # connects out to the VM over IPv4.  allow-refresh recomputes the drop-in;
@@ -75,19 +76,50 @@ put_unit(){
     echo changed
 }
 
-# The prefixes of this host's OWN global IPv6 addresses, each address masked
-# to its prefix length, /48 to /64 only.  Never the routing table: anyone on
-# the LAN can send a router advertisement, and a forged RA announcing an
-# on-link ::/1 or 2000::/3 makes the kernel add that route (security review
-# 2026-10-15).  An address needs no route to count, and a route counts for
-# nothing.  Skipped: tentative and dadfailed addresses, /128s (DHCPv6 IA_NA),
-# ULA (fc00::/7 is already allowed), link-local, and the VM's link vmbr1.
-# Without python3 the list stays local-only, which fails safe.
+# The prefixes of this host's OWN global IPv6 addresses on its UPLINK, each
+# address masked to its prefix length, /48 to /64 only.
+#
+# Never the routing table: anyone on the LAN can send a router advertisement,
+# and a forged RA announcing an on-link ::/1 or 2000::/3 makes the kernel add
+# that route (security review 2026-10-15).  A route counts for nothing.
+#
+# The uplink only: the device(s) that carry the default IPv6 route, or vmbr0
+# when there is none.  Never vmbr1 (the VM's link), never a tunnel (wg*, tun*,
+# tailscale*, frp*, clat*): a VPN or a second uplink holding a global address
+# must not open its whole prefix (security review 2026-10-15).
+#
+# Skipped: tentative and dadfailed addresses, /128s (DHCPv6 IA_NA), ULA
+# (fc00::/7 is already allowed), link-local.
+#
+# RESIDUAL RISK, accepted (controller ruling 2026-10-15): a hostile host on the
+# station's own LAN can send a router advertisement whose /64 makes this host
+# autoconfigure an address there, and that /64 then enters the list.  That
+# needs an attacker already on the local network, which "local networks only"
+# trusts by definition.  The rule stays: own uplink addresses, /48 to /64.
+#
+# This runs as root (install, allow-refresh, pm-align, the timer), so python
+# runs isolated: /usr/bin/python3 -I (no cwd or script dir on sys.path, no
+# PYTHON* variables, no user site), from /.  A planted ipaddress.py cannot run.
+# Without /usr/bin/python3 the list stays local-only, which fails safe.
+#
 # Sorted, one line, space-separated.
+uplinks(){
+    local devs
+    devs=$(ip -6 route show default 2>/dev/null \
+        | awk '{ for (i = 1; i < NF; i++) if ($i == "dev") print $(i + 1) }' \
+        | grep -vE '^(lo|vmbr1|wg.*|tun.*|tailscale.*|frp.*|clat.*)$' | sort -u | tr '\n' ' ')
+    [ -n "${devs// /}" ] || devs=vmbr0
+    printf '%s\n' "$devs"
+}
+
 local_prefixes(){
-    command -v python3 >/dev/null 2>&1 || return 0
-    ip -6 -o addr show scope global 2>/dev/null | python3 -c '
+    [ -x /usr/bin/python3 ] || return 0
+    local devs
+    devs=$(uplinks)
+    # shellcheck disable=SC2086  # one argument per device
+    ( cd / && ip -6 -o addr show scope global 2>/dev/null | /usr/bin/python3 -I -c '
 import ipaddress, sys
+UPLINKS = set(sys.argv[1:])
 ULA = ipaddress.ip_network("fc00::/7")
 LL = ipaddress.ip_network("fe80::/10")
 MC = ipaddress.ip_network("ff00::/8")
@@ -98,7 +130,7 @@ for line in sys.stdin:
         continue
     if "tentative" in f or "dadfailed" in f:
         continue
-    if f[1].split("@")[0] in ("lo", "vmbr1"):
+    if f[1].split("@")[0] not in UPLINKS:
         continue
     try:
         net = ipaddress.IPv6Interface(f[f.index("inet6") + 1]).network
@@ -110,7 +142,7 @@ for line in sys.stdin:
         continue
     out.add(str(net))
 print(" ".join(sorted(out)))
-' 2>/dev/null
+' $devs 2>/dev/null )
 }
 
 restart_sockets(){   # try-restart: an inactive socket stays as it is

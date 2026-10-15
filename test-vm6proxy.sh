@@ -28,18 +28,20 @@ chmod +x "$T/bin/systemctl"
 export SYSTEMCTL_LOG="$T/systemctl.log"
 # A stub `ip` that prints the routing table the test chose, so allow-refresh
 # can be run against any network without touching this machine's.
-# `ip ... addr ...` prints $IP_ADDRS; `ip ... route ...` prints $IP_ROUTES.
+# `ip ... addr ...` prints $IP_ADDRS; `ip ... route ... default` prints
+# $IP_DEFAULT; any other `ip ... route ...` prints $IP_ROUTES.
 cat > "$T/bin/ip" <<'STUB'
 #!/bin/bash
 case " $* " in
     *" addr "*)  [ -f "$IP_ADDRS" ] && cat "$IP_ADDRS" ;;
+    *" route "*" default "*) [ -f "$IP_DEFAULT" ] && cat "$IP_DEFAULT" ;;
     *" route "*) [ -f "$IP_ROUTES" ] && cat "$IP_ROUTES" ;;
 esac
 exit 0
 STUB
 chmod +x "$T/bin/ip"
-export IP_ROUTES="$T/routes" IP_ADDRS="$T/addrs"
-: > "$IP_ROUTES"; : > "$IP_ADDRS"
+export IP_ROUTES="$T/routes" IP_ADDRS="$T/addrs" IP_DEFAULT="$T/default"
+: > "$IP_ROUTES"; : > "$IP_ADDRS"; : > "$IP_DEFAULT"
 DROPIN="$T/units/sigmond-vm6proxy@.socket.d/10-allow-local.conf"
 
 run_install(){
@@ -198,8 +200,64 @@ grep -q 'try-restart --no-block sigmond-vm6proxy@8000.socket' "$SYSTEMCTL_LOG" \
     && ok "and the shrink restarts the sockets" || bad "and the shrink restarts the sockets" "$(cat "$SYSTEMCTL_LOG")"
 
 echo
+echo "allow-refresh: addresses on the uplink only"
+# Security review 2026-10-15: a VPN or a second uplink holding a global
+# address must not open its whole prefix.  The uplink is the device that
+# carries the default IPv6 route (vmbr0 when there is none); never vmbr1, never
+# a tunnel.
+: > "$IP_ROUTES"
+cat > "$IP_ADDRS" <<'A'
+2: vmbr0    inet6 2601:db8:1:2:21b:21ff:fe3a:4b5c/64 scope global dynamic mngtmpaddr \       valid_lft 86000sec preferred_lft 14000sec
+5: wg0    inet6 2602:f00:5:6::2/64 scope global \       valid_lft forever preferred_lft forever
+6: tailscale0    inet6 2603:f00:7:8::2/64 scope global \       valid_lft forever preferred_lft forever
+4: wlp2s0    inet6 2604:f00:9:a:1:2:3:4/64 scope global dynamic mngtmpaddr \       valid_lft 86000sec preferred_lft 14000sec
+3: vmbr1    inet6 2605:f00:b:c::1/64 scope global \       valid_lft forever preferred_lft forever
+A
+printf 'default via fe80::1 dev vmbr0 proto ra metric 1024 expires 1700sec pref medium\n' > "$IP_DEFAULT"
+refresh
+[ "$(allow_line)" = "IPAddressAllow=localhost link-local fc00::/7 2601:db8:1:2::/64" ] \
+    && ok "default via vmbr0: only vmbr0's /64, not wg0, tailscale0, wlp2s0 or vmbr1" \
+    || bad "default via vmbr0: only vmbr0's /64, not wg0, tailscale0, wlp2s0 or vmbr1" "got: $(allow_line)"
+printf 'default via fe80::1 dev wlp2s0 proto ra metric 600 pref medium\n' > "$IP_DEFAULT"
+refresh
+[ "$(allow_line)" = "IPAddressAllow=localhost link-local fc00::/7 2604:f00:9:a::/64" ] \
+    && ok "default via Wi-Fi: the Wi-Fi /64 alone" \
+    || bad "default via Wi-Fi: the Wi-Fi /64 alone" "got: $(allow_line)"
+printf 'default dev wg0 metric 50 pref medium\ndefault dev tun0 metric 60 pref medium\n' > "$IP_DEFAULT"
+refresh
+[ "$(allow_line)" = "IPAddressAllow=localhost link-local fc00::/7 2601:db8:1:2::/64" ] \
+    && ok "default via a tunnel only: vmbr0, never the tunnel" \
+    || bad "default via a tunnel only: vmbr0, never the tunnel" "got: $(allow_line)"
+: > "$IP_DEFAULT"
+refresh
+[ "$(allow_line)" = "IPAddressAllow=localhost link-local fc00::/7 2601:db8:1:2::/64" ] \
+    && ok "no IPv6 default route: vmbr0" \
+    || bad "no IPv6 default route: vmbr0" "got: $(allow_line)"
+
+echo
+echo "allow-refresh: a planted python module never runs as root"
+# python3 -c puts the current directory first on sys.path, so an ipaddress.py
+# in the caller's cwd would run as root (security review 2026-10-15).
+DECOY="$T/decoy"; mkdir -p "$DECOY"
+cat > "$DECOY/ipaddress.py" <<PYEOF
+open("$T/decoy-ran", "w").write("ran")
+raise SystemExit(0)
+PYEOF
+cp "$DECOY/ipaddress.py" "$DECOY/sys.py" 2>/dev/null
+rm -f "$T/decoy-ran"
+( cd "$DECOY" && : > "$SYSTEMCTL_LOG" && PATH="$T/bin:$PATH" SIGMOND_VM6PROXY_UNITDIR="$T/units" \
+    PYTHONPATH="$DECOY" PYTHONSTARTUP="$DECOY/ipaddress.py" \
+    bash "$HERE/sigmond-vm6proxy" allow-refresh > "$T/out" 2>&1 )
+[ ! -e "$T/decoy-ran" ] && ok "a decoy ipaddress.py in cwd or PYTHONPATH does not run" \
+    || bad "a decoy ipaddress.py in cwd or PYTHONPATH does not run" "marker written"
+[ "$(allow_line)" = "IPAddressAllow=localhost link-local fc00::/7 2601:db8:1:2::/64" ] \
+    && ok "and the list still comes out right" || bad "and the list still comes out right" "got: $(allow_line)"
+grep -q '/usr/bin/python3 -I ' "$HERE/sigmond-vm6proxy" && ok "the script names /usr/bin/python3 -I" \
+    || bad "the script names /usr/bin/python3 -I"
+
+echo
 echo "install: the refresh timer"
-: > "$IP_ROUTES"; : > "$IP_ADDRS"
+: > "$IP_ROUTES"; : > "$IP_ADDRS"; : > "$IP_DEFAULT"
 run_install
 for u in sigmond-vm6proxy-refresh.timer sigmond-vm6proxy-refresh.service; do
     [ -f "$T/units/$u" ] && ok "$u written" || bad "$u written"
