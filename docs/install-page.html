@@ -84,7 +84,7 @@ ol li, ul li{margin:.25rem 0;}
 </style>
 <div class="wrap">
 <header class="col">
-  <p class="kicker">Sigmond appliance v3.71 &middot; new station</p>
+  <p class="kicker">Sigmond appliance v3.72 &middot; new station</p>
   <h1>Setting up a new station</h1>
   <p class="lede">You have a USB stick and a small computer with a radio receiver attached.
   About an hour from now the machine will record and decode HF signals on its own. It
@@ -159,20 +159,20 @@ Wi-Fi network you join during setup. Sites with only IPv6 work too.</li>
 <div class="step">
   <span class="num">step 1</span>
   <p>Your fleet admin sends you two files, or download links for them: the image,
-  <span class="mono">sigmond-appliance-v3.71-20261011-release.img</span> (about 5.5 GB), and its
+  <span class="mono">sigmond-appliance-v3.72-20261015-release.img</span> (about 5.5 GB), and its
   checksum, <span class="mono">…release.sha256</span>. A later release carries its own version and
   date in the name; use the names you were given. Keep both in one folder and check the
   image:</p>
-  <pre>sha256sum -c sigmond-appliance-v3.71-20261011-release.sha256</pre>
+  <pre>sha256sum -c sigmond-appliance-v3.72-20261015-release.sha256</pre>
   <p>The image is <b>not compressed</b>: there is nothing to unzip.</p>
   <p>With the project's tools, this is the safe way to write it. It finds the stick by
   looking for something removable, <em>refuses</em> the disk your own computer runs from,
   and reads the stick back afterwards to check every byte:</p>
-  <pre>./flash-usb.sh sigmond-appliance-v3.71-20261011-release.img</pre>
+  <pre>./flash-usb.sh sigmond-appliance-v3.72-20261015-release.img</pre>
   <p>balenaEtcher or Raspberry Pi Imager ("Use custom") work too, and both verify the write.
   By hand, with only the image file:</p>
   <pre>lsblk -dno NAME,SIZE,TRAN,RM,MODEL        # find the stick, check its size
-sudo dd if=sigmond-appliance-v3.71-20261011-release.img of=/dev/sdX bs=4M \
+sudo dd if=sigmond-appliance-v3.72-20261015-release.img of=/dev/sdX bs=4M \
         oflag=direct conv=fsync status=progress
 sync</pre>
   <div class="note warn">
@@ -266,46 +266,74 @@ The decoder VM then installs itself automatically.</div>
 </div>
 
 <div class="step">
-  <span class="num">step 8</span><h3>Look and listen</h3>
-  <p>About fifteen minutes after the panel stops saying it is building, open these from any
-  computer on the same network (the panel shows the host address):</p>
+  <span class="num">step 8</span><h3>Ask the station how it stands</h3>
+  <p>About fifteen minutes after the panel stops saying it is building, press Enter at the
+  station's keyboard and log in to the host (see section 6). Then type one command:</p>
+  <pre>sigmond-check</pre>
+  <p>It takes about fifteen seconds. It prints one line for each part of the station and
+  ends with a verdict:</p>
+  <pre> ok    PSK            214 FT8 and 31 FT4 spots in the last 15 min
+ ok    WSPR           48 spots in the last 10 min, on 6 bands
+ FAIL  magnetometer   frozen: 0.00 C, no change in 60 s.
+                      Fix: sigmond-vm sudo systemctl restart mag-recorder
+ wait  GRAPE          first files due in about 7 min (hf-timestd started 4 min ago)
+ ok    storage        /var/lib has 61 % free
+ wait  uploads        off, new station: check the lines above, then run: sigmond-vm smd sink upload
+ --    meteor scatter not on this station
+ ok    receiver page  IPv4 http://192.168.1.50:8081   IPv6 http://[2601:db8::50]:8081
+ ok    station pages  IPv4 http://192.168.1.50:8000   IPv6 http://[2601:db8::50]:8000
+ ok    magnetometer page  IPv4 http://192.168.1.50:8082   IPv6 http://[2601:db8::50]:8082
+FAIL  (1 failing, 2 waiting)</pre>
+  <p>The word at the start of each line tells you how that part stands:</p>
   <div class="tablewrap">
   <table>
-  <thead><tr><th>Page</th><th>Address</th><th>You should see</th></tr></thead>
+  <thead><tr><th>Word</th><th>Meaning</th></tr></thead>
   <tbody>
-  <tr><td>Live receiver</td><td><span class="mono">http://&lt;host&gt;:8081</span></td><td>a waterfall with signals</td></tr>
-  <tr><td>Station pages</td><td><span class="mono">http://&lt;host&gt;:8000</span></td><td>your callsign and grid, and the timing and GRAPE pages</td></tr>
-  <tr><td>Magnetometer</td><td><span class="mono">http://&lt;host&gt;:8082</span></td><td>its readings, if you have one</td></tr>
+  <tr><td><span class="mono">ok</span></td><td>It works.</td></tr>
+  <tr><td><span class="mono">wait</span></td><td>Not yet. A new station shows this for a while; the line usually says how long to wait.</td></tr>
+  <tr><td><span class="mono">FAIL</span></td><td>It does not work. The line says what to do, or whom to tell.</td></tr>
+  <tr><td><span class="mono">--</span></td><td>This station does not run that part, and the verdict leaves it out.</td></tr>
   </tbody>
   </table>
   </div>
-  <p>Then log in to the recorder (see section 6) and check that it decodes and knows who it is:</p>
-  <pre>smd watch wspr      # one line per 2-minute cycle, counting WSPR spots; Ctrl-C stops it
-smd watch psk       # the same for FT8 and FT4, every 15 seconds
-grep -E 'reporter_id|callsign|grid' /etc/sigmond/site-profile.toml</pre>
+  <p>The last line gives the verdict. <span class="mono">PASS</span> means every part works.
+  <span class="mono">WAIT</span> means some part has not started yet: wait the time its line
+  names, then type <span class="mono">sigmond-check</span> again. <span class="mono">FAIL</span>
+  means some part does not work. A fix stands on its own line under it, after the word
+  <span class="mono">Fix:</span>; type it exactly as printed. When a <span class="mono">FAIL</span>
+  line names no fix, send the whole output to your fleet admin.</p>
+  <p>Right after the install the station may still bring itself up; then the first line reads
+  <span class="mono">wait&nbsp;&nbsp;bring-up</span>. If it reads
+  <span class="mono">FAIL&nbsp;&nbsp;bring-up&nbsp;&nbsp;ran without the radio</span>, no SDR stood on
+  the USB bus. Plug the SDR in, and bring-up finishes by itself. A quiet band can look like a
+  fault, so a line that reports no spots asks you to check the antenna and its cable first.</p>
+  <p>The page lines print the addresses to open from another computer on the same network:
+  the receiver's waterfall, the station pages with your callsign and grid, and the
+  magnetometer's readings. A browser needs square brackets around an IPv6 address. These
+  pages answer only computers on the station's own network. A computer elsewhere on the
+  internet, or a VPN peer of the host, gets no answer.</p>
 </div>
 
 <div class="step">
   <span class="num">step 9</span><h3>Raise the site sink switch</h3>
-  <p>When the waterfall shows signals, the watchers count spots, and the reporter ID,
-  callsign and grid read right, look at the switch:</p>
-  <pre>smd sink status</pre>
-  <p>A new station says <span class="mono">site sink: off</span> with the reason
-  <span class="mono">new station: …</span>. Any other reason means someone set the switch on
-  purpose: leave it alone and ask your fleet admin. With the reason
-  <span class="mono">new station: …</span>, turn uploads on:</p>
-  <pre>smd sink upload
-smd sink status     # should now say: site sink: upload</pre>
-  <p>About fifteen minutes later, search your reporter ID at wsprnet.org (Database) and your
-  callsign at pskreporter.info.</p>
+  <p>A new station's uploads line reads <span class="mono">wait</span> and says
+  <span class="mono">new station</span>. When every other line shows <span class="mono">ok</span>
+  or <span class="mono">--</span>, turn uploads on, still at the host's login:</p>
+  <pre>sigmond-vm smd sink upload
+sigmond-check       # the uploads line shows ok after the first delivery, within 30 minutes</pre>
+  <p>An uploads line that shows <span class="mono">FAIL</span> with <span class="mono">off</span>
+  or <span class="mono">hold</span> and some other reason means someone set the switch on
+  purpose: leave it alone and ask your fleet admin. About fifteen minutes after you turn
+  uploads on, search your reporter ID at wsprnet.org (Database) and your callsign at
+  pskreporter.info.</p>
   <div class="note">
-    <p><b>What ships, and when.</b> Nothing recorded before <span class="mono">smd sink upload</span>
-    leaves the station, with one exception. The station packs each UTC day's GRAPE and
-    magnetometer data after that day ends, between 01:00 and about 05:00 UTC, so the
-    packages for the day you run it still go out, and the previous day's too if its
-    packing has not finished. Run it after about 05:00 UTC if you can. While a packing job
-    runs, <span class="mono">smd sink upload</span> refuses, names the job, and asks you to run it
-    again when the job ends.</p>
+    <p><b>What ships, and when.</b> When you run <span class="mono">smd sink upload</span>, the
+    station sends the GRAPE and magnetometer packages for today and yesterday (UTC), even if
+    it built them while the switch read off. Older packages stay on the station, and nothing
+    else recorded before the switch ships. The station packs each UTC day's data after that
+    day ends, between 01:00 and about 05:00 UTC; a package not built yet goes out once the
+    station builds it. While a packing job runs, <span class="mono">smd sink upload</span>
+    refuses, names the job, and asks you to try again when it ends.</p>
   </div>
 </div>
 
@@ -417,7 +445,7 @@ fifteen minutes later.</li>
 </ol>
 
 <hr>
-<p class="foot">For sigmond-appliance v3.71, blessed 2026-10-14. The steps, screen messages and
+<p class="foot">For sigmond-appliance v3.72, blessed 2026-10-15. The steps, screen messages and
 logins here follow the release's installation guide, verified on the image builder's
 nested test and on a fresh install at AC0G-B4. Day-2 operation, health checks and
 troubleshooting live in the operator guide:
