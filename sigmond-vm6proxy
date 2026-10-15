@@ -37,8 +37,11 @@
 #     IPAddressAllow=localhost link-local
 # and a drop-in, sigmond-vm6proxy@.socket.d/10-allow-local.conf, carries
 # IPAddressDeny=any again plus the prefixes of this host's own IPv6 addresses
-# on its uplink, global and ULA (never its routes, never a tunnel's ULA; see
-# local_prefixes, which also records the residual risk).  The drop-in denies
+# on its uplink, global and ULA (never its routes, never a tunnel's ULA, never
+# a guess from a /128), plus any prefix the administrator lists in
+# /etc/sigmond/vm6proxy-allow.conf.  A site that numbers its hosts by DHCPv6
+# /128 adds its LAN prefix to that file.  allowed_prefixes below has the rules
+# and records the residual risk.  The drop-in denies
 # on its own because Allow without Deny filters nothing: an older
 # sigmond-vm6proxy rewrites the socket units without Deny, and the drop-in
 # still closes them.  systemd applies a socket unit's access list to the
@@ -87,11 +90,20 @@ put_unit(){
     echo changed
 }
 
-# The prefixes of this host's OWN IPv6 addresses on its UPLINK, global and
-# ULA, each address masked to its prefix length, /48 to /64 only.  An own
-# /128 (stateful DHCPv6, IA_NA) stands for its /64.  ULA counts only this way:
-# no blanket fc00::/7, because overlay VPNs (Tailscale fd7a:115c:a1e0::/48,
-# ZeroTier) hand their peers ULA addresses (final review 2026-10-15).
+# The allow list beyond localhost and link-local, from two sources only.
+#
+# 1. This host's OWN IPv6 addresses on its UPLINK, global and ULA, each
+#    address masked to its prefix length, /48 to /64 only.  ULA counts only
+#    this way: no blanket fc00::/7, because overlay VPNs (Tailscale
+#    fd7a:115c:a1e0::/48, ZeroTier) hand their peers ULA addresses.  An own
+#    /128 (stateful DHCPv6, IA_NA) adds NOTHING: nothing on the host proves
+#    which /64 it sits in, and one shared /64 can hand /128s to unrelated
+#    machines (review of 1334bc0).  A host with only /128s stays local-only.
+# 2. The administrator's override file, /etc/sigmond/vm6proxy-allow.conf: one
+#    IPv6 prefix per line, '#' comments allowed, /48 to /128.  It must be
+#    owned by root and writable by no one else, or it is ignored with a
+#    warning; a bad line is skipped with a warning that names it.  A site that
+#    numbers its hosts by DHCPv6 /128 adds its LAN prefix there.
 #
 # Never the routing table: anyone on the LAN can send a router advertisement,
 # and a forged RA announcing an on-link ::/1 or 2000::/3 makes the kernel add
@@ -115,8 +127,13 @@ put_unit(){
 # runs isolated: /usr/bin/python3 -I (no cwd or script dir on sys.path, no
 # PYTHON* variables, no user site), from /.  A planted ipaddress.py cannot run.
 # Without /usr/bin/python3 the list stays local-only, which fails safe.
-#
-# Sorted, one line, space-separated.
+ALLOW_FILE=/etc/sigmond/vm6proxy-allow.conf
+ALLOW_OWNER=0
+if [ "${SIGMOND_VM6PROXY_TEST:-}" = 1 ]; then
+    ALLOW_FILE="${SIGMOND_VM6PROXY_ALLOW_FILE:-$ALLOW_FILE}"
+    ALLOW_OWNER="${SIGMOND_VM6PROXY_TEST_OWNER:-$ALLOW_OWNER}"
+fi
+
 uplinks(){
     local devs
     devs=$(ip -6 route show default 2>/dev/null \
@@ -126,17 +143,22 @@ uplinks(){
     printf '%s\n' "$devs"
 }
 
-local_prefixes(){
+# One line per allowed prefix, "<prefix> <sources>", sources "own", "file" or
+# "file,own", sorted by prefix.  Warnings go to stderr.
+allowed_prefixes(){
     [ -x /usr/bin/python3 ] || return 0
     local devs
     devs=$(uplinks)
     # shellcheck disable=SC2086  # one argument per device
     ( cd / && ip -6 -o addr show scope global 2>/dev/null | /usr/bin/python3 -I -c '
-import ipaddress, sys
-UPLINKS = set(sys.argv[1:])
+import ipaddress, os, stat, sys
+allow_file, owner = sys.argv[1], int(sys.argv[2])
+UPLINKS = set(sys.argv[3:])
 LL = ipaddress.ip_network("fe80::/10")
 MC = ipaddress.ip_network("ff00::/8")
-out = set()
+src = {}
+def warn(msg):
+    print(f"WARNING: {msg}", file=sys.stderr)
 for line in sys.stdin:
     f = line.split()
     if "inet6" not in f or len(f) < 4:
@@ -146,19 +168,48 @@ for line in sys.stdin:
     if f[1].split("@")[0] not in UPLINKS:
         continue
     try:
-        iface = ipaddress.IPv6Interface(f[f.index("inet6") + 1])
+        net = ipaddress.IPv6Interface(f[f.index("inet6") + 1]).network
     except ValueError:
         continue
-    net = iface.network
-    if net.prefixlen == 128:
-        net = ipaddress.IPv6Interface(f"{iface.ip}/64").network
     if not 48 <= net.prefixlen <= 64:
         continue
     if net.subnet_of(LL) or net.subnet_of(MC):
         continue
-    out.add(str(net))
-print(" ".join(sorted(out)))
-' $devs 2>/dev/null )
+    src.setdefault(net, set()).add("own")
+try:
+    st = os.stat(allow_file)
+except FileNotFoundError:
+    st = None
+except OSError as exc:
+    st = None
+    warn(f"{allow_file}: cannot read it ({exc.strerror}); ignored")
+if st is not None:
+    if st.st_uid != owner:
+        warn(f"{allow_file} is not owned by root; ignored")
+    elif st.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+        warn(f"{allow_file} is group- or world-writable; ignored")
+    else:
+        with open(allow_file, encoding="ascii", errors="replace") as fh:
+            for n, raw in enumerate(fh, 1):
+                entry = raw.split("#", 1)[0].strip()
+                if not entry:
+                    continue
+                shown = entry.encode("ascii", "replace").decode()[:60]
+                try:
+                    net = ipaddress.IPv6Network(entry, strict=False)
+                except ValueError:
+                    warn(f"{allow_file} line {n}: {shown!r} is not an IPv6 prefix; skipped")
+                    continue
+                if not 48 <= net.prefixlen <= 128:
+                    warn(f"{allow_file} line {n}: {shown!r} is shorter than /48; skipped")
+                    continue
+                if net.subnet_of(MC):
+                    warn(f"{allow_file} line {n}: {shown!r} is multicast; skipped")
+                    continue
+                src.setdefault(net, set()).add("file")
+for net in sorted(src, key=str):
+    print(str(net), ",".join(sorted(src[net])))
+' "$ALLOW_FILE" "$ALLOW_OWNER" $devs )
 }
 
 restart_sockets(){   # try-restart: an inactive socket stays as it is
@@ -172,8 +223,13 @@ restart_sockets(){   # try-restart: an inactive socket stays as it is
 # write_dropin: 0 and "changed" when it rewrote the drop-in, 0 and nothing
 # when it matched, 1 on failure.  No reload, no restart.
 write_dropin(){
-    local pfx allow
-    pfx=$(local_prefixes)
+    local lines pfx allow sources
+    lines=$(allowed_prefixes)
+    pfx=$(printf '%s\n' "$lines" | awk 'NF { printf "%s%s", sep, $1; sep = " " }')
+    # Where each prefix came from, for `status`.
+    sources=$(printf '%s\n' "$lines" | awk 'NF {
+        s = $2; gsub(/own/, "own address", s); gsub(/file/, "override file", s); gsub(/,/, ", ", s)
+        print "# allowed: " $1 " (" s ")" }')
     allow="$LOCAL_ALLOW${pfx:+ $pfx}"
     mkdir -p "$DROPDIR" 2>/dev/null || { say "cannot create $DROPDIR"; return 1; }
     put_unit "$DROPIN" <<EOF
@@ -181,7 +237,8 @@ write_dropin(){
 # The relay answers this host's own networks only.  Deny is repeated here
 # because Allow without Deny filters nothing, and an older sigmond-vm6proxy
 # writes socket units without it.
-[Socket]
+${sources:+$sources
+}[Socket]
 IPAddressDeny=any
 IPAddressAllow=${allow}
 EOF
@@ -285,6 +342,12 @@ EOF
 
 cmd_status(){
     local pair lp tp st deny filt vm
+    say "allowed over IPv6: localhost, link-local, and:"
+    if grep -q '^# allowed: ' "$DROPIN" 2>/dev/null; then
+        sed -n 's/^# allowed: /  /p' "$DROPIN"
+    else
+        say "  nothing else"
+    fi
     for pair in $PORTS; do
         lp="${pair%%:*}"; tp="${pair##*:}"
         st=$(systemctl is-active "sigmond-vm6proxy@${lp}.socket" 2>/dev/null)

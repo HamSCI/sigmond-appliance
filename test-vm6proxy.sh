@@ -45,6 +45,9 @@ chmod +x "$T/bin/ip"
 export IP_ROUTES="$T/routes" IP_ADDRS="$T/addrs" IP_DEFAULT="$T/default"
 : > "$IP_ROUTES"; : > "$IP_ADDRS"; : > "$IP_DEFAULT"
 DROPIN="$T/units/sigmond-vm6proxy@.socket.d/10-allow-local.conf"
+# The administrator's override file, and the owner the script demands of it
+# (root in production; the test runs as itself, so it names its own uid).
+export SIGMOND_VM6PROXY_ALLOW_FILE="$T/allow.conf" SIGMOND_VM6PROXY_TEST_OWNER="$(id -u)"
 
 run_install(){
     : > "$SYSTEMCTL_LOG"
@@ -210,9 +213,64 @@ cat > "$IP_ADDRS" <<'A'
 6: tailscale0    inet6 fd7a:115c:a1e0::5/128 scope global \       valid_lft forever preferred_lft forever
 A
 refresh
-[ "$(allow_line)" = "IPAddressAllow=localhost link-local 2601:db8:77:1::/64" ] \
-    && ok "an own uplink /128 (DHCPv6) stands for its /64; a tunnel's ULA /128 does not" \
-    || bad "an own uplink /128 (DHCPv6) stands for its /64; a tunnel's ULA /128 does not" "got: $(allow_line)"
+# Nothing on the host proves which /64 a DHCPv6 /128 sits in, and one shared
+# /64 can hand /128s to unrelated machines (review of 1334bc0).  Fail closed.
+[ "$(allow_line)" = "IPAddressAllow=localhost link-local" ] \
+    && ok "an own /128 (DHCPv6) adds nothing: local list only" \
+    || bad "an own /128 (DHCPv6) adds nothing: local list only" "got: $(allow_line)"
+
+echo
+echo "the administrator's override file"
+: > "$IP_ADDRS"
+printf '# the station LAN, numbered by DHCPv6\n2601:db8:aa:bb::/64\n\n2601:db8:77:1::5/128   # one host\n' > "$T/allow.conf"
+chmod 644 "$T/allow.conf"
+refresh
+[ "$(allow_line)" = "IPAddressAllow=localhost link-local 2601:db8:77:1::5/128 2601:db8:aa:bb::/64" ] \
+    && ok "a valid /64 and a /128 from the file join the list" \
+    || bad "a valid /64 and a /128 from the file join the list" "got: $(allow_line) $(cat "$T/out")"
+grep -q 'WARNING' "$T/out" && bad "a clean file draws no warning" "$(cat "$T/out")" || ok "a clean file draws no warning"
+PATH="$T/bin:$PATH" SIGMOND_VM6PROXY_TEST=1 SIGMOND_VM6PROXY_UNITDIR="$T/units" SIGMOND_MGMT_VM=127.0.0.9 STUB_DENY="::/0" \
+    bash "$HERE/sigmond-vm6proxy" status > "$T/st" 2>&1
+grep -q '2601:db8:aa:bb::/64.*override file' "$T/st" && ok "status names the override file as its source" \
+    || bad "status names the override file as its source" "$(cat "$T/st")"
+
+printf '::/0\n2601::/32\nnot-a-prefix\n10.0.0.0/8\n2601:db8:aa:bb::/64\n' > "$T/allow.conf"
+refresh
+[ "$(allow_line)" = "IPAddressAllow=localhost link-local 2601:db8:aa:bb::/64" ] \
+    && ok "::/0, a /32, garbage and IPv4 are skipped; the good line stays" \
+    || bad "::/0, a /32, garbage and IPv4 are skipped; the good line stays" "got: $(allow_line)"
+for n in 1 2 3 4; do
+    grep -q "WARNING.*line $n" "$T/out" && ok "a warning names line $n" || bad "a warning names line $n" "$(cat "$T/out")"
+done
+
+printf '2601:db8:aa:bb::/64\n' > "$T/allow.conf"; chmod 666 "$T/allow.conf"
+refresh
+[ "$(allow_line)" = "IPAddressAllow=localhost link-local" ] && grep -q 'WARNING.*writable' "$T/out" \
+    && ok "a group- or world-writable file is ignored, with a warning" \
+    || bad "a group- or world-writable file is ignored, with a warning" "got: $(allow_line) $(cat "$T/out")"
+chmod 644 "$T/allow.conf"
+: > "$SYSTEMCTL_LOG"
+PATH="$T/bin:$PATH" SIGMOND_VM6PROXY_TEST=1 SIGMOND_VM6PROXY_UNITDIR="$T/units" SIGMOND_VM6PROXY_TEST_OWNER=0 \
+    bash "$HERE/sigmond-vm6proxy" allow-refresh > "$T/out" 2>&1
+if [ "$(id -u)" = 0 ]; then
+    ok "skipped as root (the file is root's)"
+else
+    [ "$(allow_line)" = "IPAddressAllow=localhost link-local" ] && grep -q 'WARNING.*not owned by root' "$T/out" \
+        && ok "a file not owned by root is ignored, with a warning" \
+        || bad "a file not owned by root is ignored, with a warning" "got: $(allow_line) $(cat "$T/out")"
+fi
+rm -f "$T/allow.conf"
+cat > "$IP_ADDRS" <<'A'
+2: vmbr0    inet6 2601:db8:1:2:21b:21ff:fe3a:4b5c/64 scope global dynamic mngtmpaddr \       valid_lft 86000sec preferred_lft 14000sec
+A
+refresh
+PATH="$T/bin:$PATH" SIGMOND_VM6PROXY_TEST=1 SIGMOND_VM6PROXY_UNITDIR="$T/units" SIGMOND_MGMT_VM=127.0.0.9 STUB_DENY="::/0" \
+    bash "$HERE/sigmond-vm6proxy" status > "$T/st" 2>&1
+grep -q '2601:db8:1:2::/64.*own address' "$T/st" && ok "status names an own address as its source" \
+    || bad "status names an own address as its source" "$(cat "$T/st")"
+grep -q 'DHCPv6' "$HERE/INSTALL.md" && grep -q '/etc/sigmond/vm6proxy-allow.conf' "$HERE/INSTALL.md" \
+    && ok "INSTALL.md names the override file" || bad "INSTALL.md names the override file"
+: > "$IP_ADDRS"
 
 echo
 echo "allow-refresh: addresses on the uplink only"

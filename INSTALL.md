@@ -351,6 +351,10 @@ IPv6 address.  The receiver page shows a waterfall with signals; the station pag
 the callsign, the grid, and the timing and GRAPE pages.  Over IPv6 the pages answer only
 computers on the station's own network, just as IPv4 does behind your router.  A computer
 elsewhere on the internet gets no answer, even when it can reach the host's IPv6 address.
+If your site numbers its computers by DHCPv6 (one /128 address each), the host cannot tell
+which network it sits on.  Add your LAN's prefix, for example `2601:db8:1:2::/64`, as one
+line in `/etc/sigmond/vm6proxy-allow.conf` on the host (owned by root, writable by root
+only).  The relay reads it within 15 minutes; `sigmond-vm6proxy status` shows the result.
 
 From another computer you can also ask the decoder VM alone.  This prints the VM's own lines,
 without the host's checks of the addresses people browse to:
