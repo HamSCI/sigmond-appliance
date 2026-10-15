@@ -59,6 +59,11 @@
 #   sigmond-vm6proxy status            per port: the effective filter and the VM
 #   sigmond-vm6proxy remove
 set -u
+# The filter generation pm-align demands before it carries or runs this
+# script.  2 = the socket units and the drop-in deny all but localhost,
+# link-local and this host's own uplink prefixes (no blanket fc00::/7).  An
+# older script, or one without this exact line, is never run by pm-align.
+VM6PROXY_FILTER=2
 VM_IP="${SIGMOND_MGMT_VM:-10.99.0.2}"
 UNITDIR=/etc/systemd/system
 # The tests point this elsewhere, and only with their flag set: production
@@ -143,8 +148,8 @@ uplinks(){
     printf '%s\n' "$devs"
 }
 
-# One line per allowed prefix, "<prefix> <sources>", sources "own", "file" or
-# "file,own", sorted by prefix.  Warnings go to stderr.
+# One line per result, on stdout: "P <prefix> <sources>" (sources "own",
+# "file" or "file,own"), sorted by prefix, then "W <warning>" lines.
 allowed_prefixes(){
     [ -x /usr/bin/python3 ] || return 0
     local devs
@@ -156,9 +161,11 @@ allow_file, owner = sys.argv[1], int(sys.argv[2])
 UPLINKS = set(sys.argv[3:])
 LL = ipaddress.ip_network("fe80::/10")
 MC = ipaddress.ip_network("ff00::/8")
+CAP = 64 * 1024
 src = {}
+warnings = []
 def warn(msg):
-    print(f"WARNING: {msg}", file=sys.stderr)
+    warnings.append(msg.replace("\n", " "))
 for line in sys.stdin:
     f = line.split()
     if "inet6" not in f or len(f) < 4:
@@ -176,40 +183,80 @@ for line in sys.stdin:
     if net.subnet_of(LL) or net.subnet_of(MC):
         continue
     src.setdefault(net, set()).add("own")
+
+def read_override():
+    """The override file text, or None.  Any problem warns; none of them
+    touches the own-address prefixes gathered above."""
+    try:
+        fd = os.open(allow_file, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        warn(f"{allow_file}: cannot read it ({exc.strerror}; a symlink is refused); ignored")
+        return None
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            warn(f"{allow_file} is not a regular file; ignored")
+            return None
+        if st.st_uid != owner:
+            warn(f"{allow_file} is not owned by root; ignored")
+            return None
+        if st.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+            warn(f"{allow_file} is group- or world-writable; ignored")
+            return None
+        parent = os.stat(os.path.dirname(allow_file) or "/")
+        if parent.st_uid != owner or parent.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+            warn(f"{allow_file}: its directory is not root-owned or is writable by others; ignored")
+            return None
+        data = b""
+        while len(data) <= CAP:
+            chunk = os.read(fd, CAP + 1 - len(data))
+            if not chunk:
+                break
+            data += chunk
+        if len(data) > CAP:
+            warn(f"{allow_file} is larger than 64 KiB; ignored")
+            return None
+        return data.decode("ascii", "replace")
+    finally:
+        os.close(fd)
+
 try:
-    st = os.stat(allow_file)
-except FileNotFoundError:
-    st = None
-except OSError as exc:
-    st = None
-    warn(f"{allow_file}: cannot read it ({exc.strerror}); ignored")
-if st is not None:
-    if st.st_uid != owner:
-        warn(f"{allow_file} is not owned by root; ignored")
-    elif st.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
-        warn(f"{allow_file} is group- or world-writable; ignored")
-    else:
-        with open(allow_file, encoding="ascii", errors="replace") as fh:
-            for n, raw in enumerate(fh, 1):
-                entry = raw.split("#", 1)[0].strip()
-                if not entry:
-                    continue
-                shown = entry.encode("ascii", "replace").decode()[:60]
-                try:
-                    net = ipaddress.IPv6Network(entry, strict=False)
-                except ValueError:
-                    warn(f"{allow_file} line {n}: {shown!r} is not an IPv6 prefix; skipped")
-                    continue
-                if not 48 <= net.prefixlen <= 128:
-                    warn(f"{allow_file} line {n}: {shown!r} is shorter than /48; skipped")
-                    continue
-                if net.subnet_of(MC):
-                    warn(f"{allow_file} line {n}: {shown!r} is multicast; skipped")
-                    continue
-                src.setdefault(net, set()).add("file")
+    text = read_override()
+except Exception as exc:
+    text = None
+    warn(f"{allow_file}: cannot read it ({type(exc).__name__}); ignored")
+for n, raw in enumerate((text or "").splitlines(), 1):
+    entry = raw.split("#", 1)[0].strip()
+    if not entry:
+        continue
+    shown = entry.encode("ascii", "replace").decode()[:60]
+    if "%" in entry:
+        warn(f"{allow_file} line {n}: {shown!r} carries a scope id; skipped")
+        continue
+    try:
+        net = ipaddress.IPv6Network(entry, strict=False)
+    except ValueError:
+        warn(f"{allow_file} line {n}: {shown!r} is not an IPv6 prefix; skipped")
+        continue
+    if not 48 <= net.prefixlen <= 128:
+        warn(f"{allow_file} line {n}: {shown!r} is shorter than /48; skipped")
+        continue
+    if net.subnet_of(MC):
+        warn(f"{allow_file} line {n}: {shown!r} is multicast; skipped")
+        continue
+    src.setdefault(net, set()).add("file")
 for net in sorted(src, key=str):
-    print(str(net), ",".join(sorted(src[net])))
+    print("P", str(net), ",".join(sorted(src[net])))
+for w in warnings:
+    print("W", w)
 ' "$ALLOW_FILE" "$ALLOW_OWNER" $devs )
+}
+
+# The warnings the drop-in recorded, one "WARNING: ..." line each.
+dropin_warnings(){
+    sed -n 's/^# warning: /WARNING: /p' "$DROPIN" 2>/dev/null
 }
 
 restart_sockets(){   # try-restart: an inactive socket stays as it is
@@ -223,13 +270,18 @@ restart_sockets(){   # try-restart: an inactive socket stays as it is
 # write_dropin: 0 and "changed" when it rewrote the drop-in, 0 and nothing
 # when it matched, 1 on failure.  No reload, no restart.
 write_dropin(){
-    local lines pfx allow sources
+    local lines pfx allow sources warns
     lines=$(allowed_prefixes)
-    pfx=$(printf '%s\n' "$lines" | awk 'NF { printf "%s%s", sep, $1; sep = " " }')
+    pfx=$(printf '%s\n' "$lines" | awk '$1 == "P" { printf "%s%s", sep, $2; sep = " " }')
     # Where each prefix came from, for `status`.
-    sources=$(printf '%s\n' "$lines" | awk 'NF {
-        s = $2; gsub(/own/, "own address", s); gsub(/file/, "override file", s); gsub(/,/, ", ", s)
-        print "# allowed: " $1 " (" s ")" }')
+    sources=$(printf '%s\n' "$lines" | awk '$1 == "P" {
+        s = $3; gsub(/own/, "own address", s); gsub(/file/, "override file", s); gsub(/,/, ", ", s)
+        print "# allowed: " $2 " (" s ")" }')
+    # Warnings live in the drop-in, so a condition that persists is printed
+    # once, when it appears, not on every timer tick.
+    warns=$(printf '%s\n' "$lines" | sed -n 's/^W /# warning: /p')
+    sources="${sources:+$sources${warns:+
+}}$warns"
     allow="$LOCAL_ALLOW${pfx:+ $pfx}"
     mkdir -p "$DROPDIR" 2>/dev/null || { say "cannot create $DROPDIR"; return 1; }
     put_unit "$DROPIN" <<EOF
@@ -253,6 +305,7 @@ cmd_allow_refresh(){
         # Requires= its socket) and drop every relayed session.
         systemctl daemon-reload
         say "allow list now: $(grep '^IPAddressAllow=' "$DROPIN" | cut -d= -f2-)"
+        dropin_warnings >&2
     fi
     return 0
 }
@@ -337,6 +390,7 @@ EOF
     systemctl enable sigmond-vm6proxy-refresh.timer >/dev/null 2>&1
     systemctl start --no-block sigmond-vm6proxy-refresh.timer >/dev/null 2>&1
     say "allow list: $(grep '^IPAddressAllow=' "$DROPIN" | cut -d= -f2-)"
+    dropin_warnings >&2
     [ "$NO_STATUS" = 1 ] || cmd_status
 }
 
@@ -348,6 +402,7 @@ cmd_status(){
     else
         say "  nothing else"
     fi
+    dropin_warnings
     for pair in $PORTS; do
         lp="${pair%%:*}"; tp="${pair##*:}"
         st=$(systemctl is-active "sigmond-vm6proxy@${lp}.socket" 2>/dev/null)

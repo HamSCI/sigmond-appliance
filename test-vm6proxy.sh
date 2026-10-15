@@ -330,6 +330,67 @@ grep -q '/usr/bin/python3 -I ' "$HERE/sigmond-vm6proxy" && ok "the script names 
     || bad "the script names /usr/bin/python3 -I"
 
 echo
+echo "override warnings: logged once per change"
+# A persistent condition logged on every timer tick buries everything else in
+# the journal.  The drop-in keeps the warning; allow-refresh prints it only
+# when the drop-in changed; status and install always show it.
+OWN_ONE='2: vmbr0    inet6 2601:db8:1:2:21b:21ff:fe3a:4b5c/64 scope global dynamic mngtmpaddr \       valid_lft 86000sec preferred_lft 14000sec'
+printf '%s\n' "$OWN_ONE" > "$IP_ADDRS"; : > "$IP_DEFAULT"
+printf '::/0\n' > "$T/allow.conf"; chmod 644 "$T/allow.conf"
+refresh
+grep -q 'WARNING.*line 1' "$T/out" && ok "the first refresh with a bad line warns" \
+    || bad "the first refresh with a bad line warns" "$(cat "$T/out")"
+grep -q '^# warning: .*line 1' "$DROPIN" && ok "the drop-in keeps the warning" \
+    || bad "the drop-in keeps the warning" "$(cat "$DROPIN")"
+refresh
+grep -q 'WARNING' "$T/out" && bad "the second identical refresh prints nothing" "$(cat "$T/out")" \
+    || ok "the second identical refresh prints nothing"
+PATH="$T/bin:$PATH" SIGMOND_VM6PROXY_TEST=1 SIGMOND_VM6PROXY_UNITDIR="$T/units" SIGMOND_MGMT_VM=127.0.0.9 STUB_DENY="::/0" \
+    bash "$HERE/sigmond-vm6proxy" status > "$T/st" 2>&1
+grep -q 'WARNING.*line 1' "$T/st" && ok "status still shows it" || bad "status still shows it" "$(cat "$T/st")"
+: > "$SYSTEMCTL_LOG"
+PATH="$T/bin:$PATH" SIGMOND_VM6PROXY_TEST=1 SIGMOND_VM6PROXY_UNITDIR="$T/units" SIGMOND_MGMT_VM=127.0.0.9 \
+    bash "$HERE/sigmond-vm6proxy" install --no-status > "$T/out" 2>&1
+grep -q 'WARNING.*line 1' "$T/out" && ok "install shows it too" || bad "install shows it too" "$(cat "$T/out")"
+
+echo
+echo "override file: read safely, never at the cost of the own prefixes"
+OWN_LINE="IPAddressAllow=localhost link-local 2601:db8:1:2::/64"
+printf '2601:db8:aa:bb::/64\n' > "$T/good.conf"; chmod 644 "$T/good.conf"
+try_file(){   # <desc> <path> <warning regex>
+    SIGMOND_VM6PROXY_ALLOW_FILE="$2"
+    : > "$SYSTEMCTL_LOG"
+    PATH="$T/bin:$PATH" SIGMOND_VM6PROXY_TEST=1 SIGMOND_VM6PROXY_UNITDIR="$T/units" \
+        SIGMOND_VM6PROXY_ALLOW_FILE="$2" timeout 20 bash "$HERE/sigmond-vm6proxy" allow-refresh > "$T/out" 2>&1
+    local rc=$?
+    if [ "$rc" != 124 ] && [ "$(allow_line)" = "$OWN_LINE" ] && grep -qE "^# warning: .*$3" "$DROPIN"; then
+        ok "$1: warns, own prefix kept"
+    else
+        bad "$1: warns, own prefix kept" "rc=$rc got: $(allow_line) | $(grep warning "$DROPIN")"
+    fi
+}
+ln -sf "$T/good.conf" "$T/link.conf"
+try_file "a symlink at the path" "$T/link.conf" "cannot read"
+mkdir -p "$T/dir.conf"
+try_file "a directory at the path" "$T/dir.conf" "not a regular file"
+mkfifo "$T/fifo.conf"
+try_file "a FIFO at the path (no hang)" "$T/fifo.conf" "not a regular file"
+{ printf '2601:db8:aa:bb::/64\n'; head -c 70000 /dev/zero | tr '\0' '#'; printf '\n'; } > "$T/big.conf"; chmod 644 "$T/big.conf"
+try_file "a file over 64 KiB" "$T/big.conf" "larger than 64 KiB"
+printf '2601:db8:aa:bb::%%vmbr0/64\n' > "$T/scope.conf"; chmod 644 "$T/scope.conf"
+try_file "a scoped entry" "$T/scope.conf" "line 1.*scope"
+mkdir -p "$T/ww"; chmod 777 "$T/ww"; cp "$T/good.conf" "$T/ww/allow.conf"
+try_file "a world-writable parent directory" "$T/ww/allow.conf" "directory"
+export SIGMOND_VM6PROXY_ALLOW_FILE="$T/allow.conf"
+rm -f "$T/allow.conf"; : > "$IP_ADDRS"
+refresh
+
+echo
+echo "the filter version marker"
+grep -qx 'VM6PROXY_FILTER=2' "$HERE/sigmond-vm6proxy" && ok "the script carries VM6PROXY_FILTER=2" \
+    || bad "the script carries VM6PROXY_FILTER=2"
+
+echo
 echo "install: the refresh timer"
 : > "$IP_ROUTES"; : > "$IP_ADDRS"; : > "$IP_DEFAULT"
 run_install
