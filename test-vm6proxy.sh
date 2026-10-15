@@ -28,14 +28,18 @@ chmod +x "$T/bin/systemctl"
 export SYSTEMCTL_LOG="$T/systemctl.log"
 # A stub `ip` that prints the routing table the test chose, so allow-refresh
 # can be run against any network without touching this machine's.
+# `ip ... addr ...` prints $IP_ADDRS; `ip ... route ...` prints $IP_ROUTES.
 cat > "$T/bin/ip" <<'STUB'
 #!/bin/bash
-[ -f "$IP_ROUTES" ] && cat "$IP_ROUTES"
+case " $* " in
+    *" addr "*)  [ -f "$IP_ADDRS" ] && cat "$IP_ADDRS" ;;
+    *" route "*) [ -f "$IP_ROUTES" ] && cat "$IP_ROUTES" ;;
+esac
 exit 0
 STUB
 chmod +x "$T/bin/ip"
-export IP_ROUTES="$T/routes"
-: > "$IP_ROUTES"
+export IP_ROUTES="$T/routes" IP_ADDRS="$T/addrs"
+: > "$IP_ROUTES"; : > "$IP_ADDRS"
 DROPIN="$T/units/sigmond-vm6proxy@.socket.d/10-allow-local.conf"
 
 run_install(){
@@ -131,23 +135,37 @@ refresh(){
 allow_line(){ grep '^IPAddressAllow=' "$DROPIN" 2>/dev/null; }
 
 echo
-echo "allow-refresh: the host's own on-link prefixes"
+echo "allow-refresh: the prefixes of this host's own addresses, never its routes"
+# Security review 2026-10-15: anyone on the LAN can send a router
+# advertisement.  A forged RA announcing an on-link ::/1 or 2000::/3 makes the
+# kernel add that route; a list built from routes would then let most of the
+# internet in.  So routes count for nothing: only the host's own configured
+# global addresses, each masked to its prefix, and only /48 to /64.
 cat > "$IP_ROUTES" <<'R'
-2001:db8:1::/64 dev vmbr0 proto ra metric 1024 expires 86000sec pref medium
-2001:db8:1::/64 dev vmbr0 proto kernel metric 256 expires 86000sec pref medium
-2001:db8:9::/48 via fe80::1 dev vmbr0 proto ra metric 1024 pref medium
-2001:db8:7::/64 dev vmbr0 proto static metric 1024 pref medium
-2001:db8:5::1 dev clat proto kernel metric 256 pref medium
-fd00:1::/64 dev vmbr0 proto kernel metric 256 pref medium
-fe80::/64 dev vmbr0 proto kernel metric 256 pref medium
-::1 dev lo proto kernel metric 256 pref medium
+::/1 dev vmbr0 proto ra metric 1024 expires 86000sec pref medium
+2000::/3 dev vmbr0 proto ra metric 1024 expires 86000sec pref medium
+2601:db8:1:2::/64 dev vmbr0 proto kernel metric 256 expires 86000sec pref medium
+2001:db8:7::/64 dev vmbr0 proto kernel metric 256 pref medium
 default via fe80::1 dev vmbr0 proto ra metric 1024 expires 1700sec pref medium
 R
+cat > "$IP_ADDRS" <<'A'
+2: vmbr0    inet6 2601:db8:1:2:aaaa:bbbb:cccc:dddd/64 scope global temporary dynamic \       valid_lft 86000sec preferred_lft 14000sec
+2: vmbr0    inet6 2601:db8:1:2:21b:21ff:fe3a:4b5c/64 scope global dynamic mngtmpaddr noprefixroute \       valid_lft 86000sec preferred_lft 14000sec
+2: vmbr0    inet6 2601:db8:abcd:0:1:2:3:4/48 scope global \       valid_lft forever preferred_lft forever
+2: vmbr0    inet6 2601:db8:4400::5/40 scope global \       valid_lft forever preferred_lft forever
+2: vmbr0    inet6 2601:db8:1:2::77/128 scope global dynamic noprefixroute \       valid_lft 7000sec preferred_lft 7000sec
+2: vmbr0    inet6 2601:db8:9:9:1:2:3:4/64 scope global tentative \       valid_lft forever preferred_lft forever
+2: vmbr0    inet6 2601:db8:8:8:1:2:3:4/64 scope global dadfailed tentative \       valid_lft forever preferred_lft forever
+2: vmbr0    inet6 fd00:1::21b:21ff:fe3a:4b5c/64 scope global dynamic mngtmpaddr \       valid_lft 86000sec preferred_lft 14000sec
+A
 refresh; rc=$?
 [ "$rc" = 0 ] && ok "allow-refresh exits 0" || bad "allow-refresh exits 0" "rc=$rc: $(cat "$T/out")"
-[ "$(allow_line)" = "IPAddressAllow=localhost link-local fc00::/7 2001:db8:1::/64" ] \
-    && ok "a global /64 on the uplink joins the allow list, once" \
-    || bad "a global /64 on the uplink joins the allow list, once" "got: $(allow_line)"
+[ "$(allow_line)" = "IPAddressAllow=localhost link-local fc00::/7 2601:db8:1:2::/64 2601:db8:abcd::/48" ] \
+    && ok "the SLAAC /64 joins once (stable + temporary), a /48 too, host bits masked" \
+    || bad "the SLAAC /64 joins once (stable + temporary), a /48 too, host bits masked" "got: $(allow_line)"
+for x in '::/1' '2000::/3' '2001:db8:7::/64' '/40' '/128' '2601:db8:4400' '2601:db8:9:9' '2601:db8:8:8' 'fd00'; do
+    allow_line | grep -qF -- "$x" && bad "not in the list: $x" "got: $(allow_line)" || ok "not in the list: $x"
+done
 grep -q '^\[Socket\]' "$DROPIN" 2>/dev/null && ok "the drop-in sets [Socket]" \
     || bad "the drop-in sets [Socket]" "$(cat "$DROPIN" 2>/dev/null)"
 grep -qx 'daemon-reload' "$SYSTEMCTL_LOG" && ok "a new list reloads systemd" \
@@ -170,8 +188,8 @@ refresh
 [ -s "$SYSTEMCTL_LOG" ] && bad "and reloads and restarts nothing" "$(cat "$SYSTEMCTL_LOG")" \
     || ok "and reloads and restarts nothing"
 
-: > "$IP_ROUTES"
-printf 'fe80::/64 dev vmbr0 proto kernel metric 256 pref medium\n' > "$IP_ROUTES"
+printf '2000::/3 dev vmbr0 proto ra metric 1024 pref medium\n' > "$IP_ROUTES"
+: > "$IP_ADDRS"
 refresh
 [ "$(allow_line)" = "IPAddressAllow=localhost link-local fc00::/7" ] \
     && ok "no global IPv6: the local list alone" \
@@ -181,7 +199,7 @@ grep -q 'try-restart --no-block sigmond-vm6proxy@8000.socket' "$SYSTEMCTL_LOG" \
 
 echo
 echo "install: the refresh timer"
-: > "$IP_ROUTES"
+: > "$IP_ROUTES"; : > "$IP_ADDRS"
 run_install
 for u in sigmond-vm6proxy-refresh.timer sigmond-vm6proxy-refresh.service; do
     [ -f "$T/units/$u" ] && ok "$u written" || bad "$u written"

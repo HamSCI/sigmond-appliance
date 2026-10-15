@@ -35,8 +35,8 @@
 # the whole internet -- ssh on 2222 included.  So each socket unit carries
 #     IPAddressDeny=any
 #     IPAddressAllow=localhost link-local fc00::/7
-# and a drop-in, sigmond-vm6proxy@.socket.d/10-allow-local.conf, adds this
-# host's own on-link IPv6 prefixes.  systemd applies a socket unit's access
+# and a drop-in, sigmond-vm6proxy@.socket.d/10-allow-local.conf, adds the
+# prefixes of this host's own global IPv6 addresses (never its routes).  systemd applies a socket unit's access
 # list to the listening socket (systemd.resource-control(5)), which drops a
 # connection from anywhere else.  The service units carry no list: proxyd
 # connects out to the VM over IPv4.  allow-refresh recomputes the drop-in;
@@ -75,18 +75,42 @@ put_unit(){
     echo changed
 }
 
-# The host's own on-link global IPv6 prefixes: kernel or RA routes with a
-# prefix length, no gateway, not link-local, not ULA (fc00::/7 is already
-# allowed), not a host route, not on lo.  Sorted, one line, space-separated.
+# The prefixes of this host's OWN global IPv6 addresses, each address masked
+# to its prefix length, /48 to /64 only.  Never the routing table: anyone on
+# the LAN can send a router advertisement, and a forged RA announcing an
+# on-link ::/1 or 2000::/3 makes the kernel add that route (security review
+# 2026-10-15).  An address needs no route to count, and a route counts for
+# nothing.  Skipped: tentative and dadfailed addresses, /128s (DHCPv6 IA_NA),
+# ULA (fc00::/7 is already allowed), link-local, and the VM's link vmbr1.
+# Without python3 the list stays local-only, which fails safe.
+# Sorted, one line, space-separated.
 local_prefixes(){
-    ip -6 route show 2>/dev/null | awk '
-        $1 ~ /^[0-9a-fA-F:]+\/[0-9]+$/ && $0 !~ / via / && $0 ~ / proto (kernel|ra)( |$)/ {
-            for (i = 2; i < NF; i++) if ($i == "dev" && $(i + 1) == "lo") next
-            split($1, a, "/"); len = a[2] + 0; p = tolower(a[1])
-            if (len < 1 || len >= 128) next
-            if (p ~ /^fe[89ab]/ || p ~ /^f[cd]/) next
-            print tolower($1)
-        }' | sort -u | tr '\n' ' ' | sed 's/ $//'
+    command -v python3 >/dev/null 2>&1 || return 0
+    ip -6 -o addr show scope global 2>/dev/null | python3 -c '
+import ipaddress, sys
+ULA = ipaddress.ip_network("fc00::/7")
+LL = ipaddress.ip_network("fe80::/10")
+MC = ipaddress.ip_network("ff00::/8")
+out = set()
+for line in sys.stdin:
+    f = line.split()
+    if "inet6" not in f or len(f) < 4:
+        continue
+    if "tentative" in f or "dadfailed" in f:
+        continue
+    if f[1].split("@")[0] in ("lo", "vmbr1"):
+        continue
+    try:
+        net = ipaddress.IPv6Interface(f[f.index("inet6") + 1]).network
+    except ValueError:
+        continue
+    if not 48 <= net.prefixlen <= 64:
+        continue
+    if net.subnet_of(ULA) or net.subnet_of(LL) or net.subnet_of(MC):
+        continue
+    out.add(str(net))
+print(" ".join(sorted(out)))
+' 2>/dev/null
 }
 
 restart_sockets(){   # try-restart: an inactive socket stays as it is
@@ -146,8 +170,8 @@ ConditionPathExists=/proc/net/if_inet6
 ListenStream=[::]:${lp}
 BindIPv6Only=ipv6-only
 Accept=no
-# Local networks only.  The drop-in in sigmond-vm6proxy@.socket.d adds this
-# host's own on-link prefixes; everything else is refused.
+# Local networks only.  The drop-in in sigmond-vm6proxy@.socket.d adds the
+# prefixes of this host's own global addresses; everything else is refused.
 IPAddressDeny=any
 IPAddressAllow=${LOCAL_ALLOW}
 
