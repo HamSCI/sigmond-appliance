@@ -200,6 +200,31 @@ lacks "silence raises no ka9q-web alarm"               "$out" "ka9q-web IS NOT R
                              || bad "a reset that brought no answer leaves no record" "$(cat "$d/run/qga-reset")"
 [ "$(wc -l < "$d/sleep.calls")" = 6 ] && ok "the six tries keep their waits" || bad "the six tries keep their waits" "$(wc -l < "$d/sleep.calls")"
 
+echo "== an agent that ANSWERS, on a VM with only the private link"
+# ⛔ A SETTLED ANSWER IS NOT A FAILURE.  The address picker excludes
+# 10.99.0.0/30 on purpose -- it is the host-to-guest link and nothing off this
+# machine can reach it.  On a VM that has no other address the picker
+# therefore returns nothing, and the loop used to treat that exactly like
+# silence: six tries, six ten-second sleeps, ~72 s per refresh, then an ARP
+# fallback captioned "guest agent not answering" -- about an agent that had
+# replied correctly to every single request.
+#
+# Measured on AI6VN, 2026-10-15, after installing the post-v3.72 artifacts:
+# `systemctl start sigmond-issue` took 72 s while `qm agent 100 ping` and
+# `qm agent 100 network-get-interfaces` both answered instantly.
+d=$(scene answers inactive ok active); out=$(panel "$d")     # NOT deaf
+has   "the address still comes from ARP"               "$out" "VMIP=[10.99.0.2]"
+# The panel explains the private link once, through VMBEHIND, a line later.
+has   "...and carries NO second caveat"                "$out" "VMNOTE=[]"
+lacks "it does not blame an agent that answered"       "$out" "guest agent not answering"
+[ ! -e "$d/sleep.calls" ] \
+    && ok "it stops as soon as the agent has answered -- no ten-second waits" \
+    || bad "it stops as soon as the agent has answered" \
+           "slept $(wc -l < "$d/sleep.calls") times: $(tr '\n' ' ' < "$d/sleep.calls")"
+[ ! -e "$d/run/qga-reset" ] \
+    && ok "and it never resets an agent that is talking" \
+    || bad "it reset a healthy agent" "$(cat "$d/run/qga-reset" 2>/dev/null)"
+
 echo "== the RX888 notice"
 d=$(scene rx inactive ok active); : > "$d/rxmark"; out=$(panel "$d")
 has   "no SDR in the VM: the notice stands"            "$out" "RX888 NOT VISIBLE"

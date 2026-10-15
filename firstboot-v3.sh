@@ -2920,7 +2920,7 @@ for f in /etc/issue /etc/motd; do
     printf '\n%s\n' "$_STARTING" >> "$f"
 done
 
-VMIP=""; VMNOTE=""
+VMIP=""; VMNOTE=""; _vm_agent_spoke=""
 for i in 1 2 3 4 5 6; do
   # Print the VM address THIS HOST can actually reach.  Taking whichever
   # address the guest agent happened to list first assumes they are all
@@ -2938,7 +2938,17 @@ for i in 1 2 3 4 5 6; do
   # 6 x (10 s + 10 s sleep) = ~2 min, bounded.  Keep this even though the flock
   # above exists -- they fix different halves: the lock stops the pile-up, the
   # timeout stops the hang that made each one long-lived in the first place.
-  VMIP=$(timeout 10 qm agent "$VMID" network-get-interfaces 2>/dev/null | python3 -c '
+  # ⛔ ASK THE AGENT ONCE, THEN JUDGE ITS ANSWER SEPARATELY.  Piping straight
+  # into the picker conflates "the agent said nothing" with "the agent spoke
+  # and the VM simply has no address worth printing" -- and those need
+  # opposite handling.  AI6VN, 2026-10-15: its VM lives only on the private
+  # /30, which the picker excludes on purpose, so every refresh spent the
+  # FULL 6 x (10 s + 10 s) = ~72 s retrying a question that had already been
+  # answered, then fell back to ARP and blamed a guest agent that had replied
+  # correctly every time.  `qm agent ping` answered throughout.
+  _vm_raw=$(timeout 10 qm agent "$VMID" network-get-interfaces 2>/dev/null)
+  [ -n "$_vm_raw" ] && _vm_agent_spoke=1
+  VMIP=$(printf '%s' "$_vm_raw" | python3 -c '
 import json, re, socket, struct, subprocess, sys
 
 def local_nets():
@@ -2990,6 +3000,12 @@ if cands:
     cands.sort(key=lambda ip: 0 if is_local(ip) else 1)
     print(cands[0])' 2>/dev/null)
   [ -n "$VMIP" ] && break
+  # ⛔ A SETTLED ANSWER IS NOT A FAILURE.  If the agent spoke, the inventory it
+  # gave is the truth about this VM, and asking the same question five more
+  # times cannot change it.  The VM is reachable only over the private link;
+  # say so below and stop.  Retrying is for SILENCE, not for an answer we did
+  # not like.
+  if [ -n "$_vm_agent_spoke" ]; then break; fi
   # ONE RESET BEFORE ANY VERDICT.  A first try that brought nothing and a ping
   # that fails: the agent may stand deaf.  Reset its parser once; when it
   # answers, record that and ask again at once.
@@ -3015,7 +3031,21 @@ if [ -z "$VMIP" ]; then
   # which is not a command anyone can paste, on the row an operator reaches
   # for when the guest agent is exactly what is not answering (rob's console,
   # v3.62, 2026-09-30).  Carry it as a separate label.
-  [ -n "$VMIP" ] && VMNOTE=" (address via ARP — guest agent not answering)"
+  # ⛔ DO NOT BLAME AN AGENT THAT ANSWERED.  Two different situations land
+  # here and the operator needs to tell them apart: a genuinely wedged agent,
+  # and a VM that simply has no address off the private link.  Saying "guest
+  # agent not answering" in the second case sends someone to debug qga on a
+  # station where qga is fine (AI6VN, 2026-10-15 -- `qm agent ping` answered
+  # throughout, and so did network-get-interfaces).
+  # When the agent SPOKE, the fallback address is not a workaround for a
+  # fault -- it is simply the only address this VM has, and the panel already
+  # explains that a line later ("private link to this host -- not on your
+  # LAN", from VMBEHIND).  A second caveat here would say the same thing
+  # twice, and the version that said "guest agent not answering" sent people
+  # to debug a qga that had replied correctly every time.
+  if [ -n "$VMIP" ] && [ -z "$_vm_agent_spoke" ]; then
+      VMNOTE=" (address via ARP — guest agent not answering)"
+  fi
 fi
 # -- where does bring-up stand? ---------------------------------------------
 # ONE request, ASCII only, answers four questions: the bring-up unit's state,
