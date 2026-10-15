@@ -930,7 +930,7 @@ iptables -t nat -C POSTROUTING -s "$MGMT_VM_NET" -o clat -j MASQUERADE 2>/dev/nu
 #    systemd-socket-proxyd relays v6 -> the host-only /30. Nothing to install.
 if [ -x /usr/local/sbin/sigmond-vm6proxy ]; then
     say "IPv6 -> VM relay (DNAT cannot cross address families):"
-    SIGMOND_MGMT_VM="$MGMT_VM_IP" /usr/local/sbin/sigmond-vm6proxy install 2>&1 \
+    SIGMOND_MGMT_VM="$MGMT_VM_IP" /usr/local/sbin/sigmond-vm6proxy install --no-status 2>&1 \
         | while IFS= read -r _l; do say "  $_l"; done
 else
     say "WARNING: sigmond-vm6proxy missing — the VM's web ports stay unreachable"
@@ -2115,7 +2115,7 @@ done
 # the same units.  It enables each socket and starts it with --no-block, so
 # nothing here waits on a unit.
 if [ -x /usr/local/sbin/sigmond-vm6proxy ]; then
-  SIGMOND_MGMT_VM="$MGMT_VM" /usr/local/sbin/sigmond-vm6proxy install 2>&1 \
+  SIGMOND_MGMT_VM="$MGMT_VM" /usr/local/sbin/sigmond-vm6proxy install --no-status 2>&1 \
     | while IFS= read -r _l; do say "vm6proxy: $_l"; done
 else
   say "import: WARNING - sigmond-vm6proxy missing; the VM's pages answer over IPv4 only"

@@ -22,6 +22,8 @@ mkdir -p "$T/bin" "$T/units"
 cat > "$T/bin/systemctl" <<'STUB'
 #!/bin/bash
 printf '%s\n' "$*" >> "$SYSTEMCTL_LOG"
+# `show -p IPAddressDeny --value <unit>` answers $STUB_DENY (the effective list).
+[ "${1:-}" = show ] && printf '%s\n' "${STUB_DENY:-}"
 exit 0
 STUB
 chmod +x "$T/bin/systemctl"
@@ -46,7 +48,7 @@ DROPIN="$T/units/sigmond-vm6proxy@.socket.d/10-allow-local.conf"
 
 run_install(){
     : > "$SYSTEMCTL_LOG"
-    PATH="$T/bin:$PATH" SIGMOND_VM6PROXY_UNITDIR="$T/units" SIGMOND_MGMT_VM=127.0.0.9 \
+    PATH="$T/bin:$PATH" SIGMOND_VM6PROXY_TEST=1 SIGMOND_VM6PROXY_UNITDIR="$T/units" SIGMOND_MGMT_VM=127.0.0.9 \
         bash "$HERE/sigmond-vm6proxy" install > "$T/out" 2>&1
 }
 
@@ -119,10 +121,10 @@ echo "the relay answers local networks only (Michael, 2026-10-15)"
 for p in $PORTS; do
     s="$T/units/sigmond-vm6proxy@$p.socket"; v="$T/units/sigmond-vm6proxy@$p.service"
     if awk '/^\[/{sec=$0} sec=="[Socket]" && $0=="IPAddressDeny=any"{found=1} END{exit !found}' "$s" \
-       && awk '/^\[/{sec=$0} sec=="[Socket]" && $0=="IPAddressAllow=localhost link-local fc00::/7"{found=1} END{exit !found}' "$s"; then
-        ok ":$p socket denies all but localhost, link-local and ULA"
+       && awk '/^\[/{sec=$0} sec=="[Socket]" && $0=="IPAddressAllow=localhost link-local"{found=1} END{exit !found}' "$s"; then
+        ok ":$p socket denies all but localhost and link-local (no blanket fc00::/7)"
     else
-        bad ":$p socket denies all but localhost, link-local and ULA" "$(cat "$s")"
+        bad ":$p socket denies all but localhost and link-local (no blanket fc00::/7)" "$(cat "$s")"
     fi
     # proxyd connects OUT to the VM over IPv4; a filter on the service would cut that.
     grep -q 'IPAddress' "$v" && bad ":$p service carries no address filter" "$(cat "$v")" \
@@ -131,7 +133,7 @@ done
 
 refresh(){
     : > "$SYSTEMCTL_LOG"
-    PATH="$T/bin:$PATH" SIGMOND_VM6PROXY_UNITDIR="$T/units" \
+    PATH="$T/bin:$PATH" SIGMOND_VM6PROXY_TEST=1 SIGMOND_VM6PROXY_UNITDIR="$T/units" \
         bash "$HERE/sigmond-vm6proxy" allow-refresh > "$T/out" 2>&1
 }
 allow_line(){ grep '^IPAddressAllow=' "$DROPIN" 2>/dev/null; }
@@ -159,28 +161,29 @@ cat > "$IP_ADDRS" <<'A'
 2: vmbr0    inet6 2601:db8:9:9:1:2:3:4/64 scope global tentative \       valid_lft forever preferred_lft forever
 2: vmbr0    inet6 2601:db8:8:8:1:2:3:4/64 scope global dadfailed tentative \       valid_lft forever preferred_lft forever
 2: vmbr0    inet6 fd00:1::21b:21ff:fe3a:4b5c/64 scope global dynamic mngtmpaddr \       valid_lft 86000sec preferred_lft 14000sec
+2: vmbr0    inet6 2601:db8:6:6::1/64 scope global deprecated dynamic \       valid_lft 3000sec preferred_lft 0sec
 A
 refresh; rc=$?
 [ "$rc" = 0 ] && ok "allow-refresh exits 0" || bad "allow-refresh exits 0" "rc=$rc: $(cat "$T/out")"
-[ "$(allow_line)" = "IPAddressAllow=localhost link-local fc00::/7 2601:db8:1:2::/64 2601:db8:abcd::/48" ] \
-    && ok "the SLAAC /64 joins once (stable + temporary), a /48 too, host bits masked" \
-    || bad "the SLAAC /64 joins once (stable + temporary), a /48 too, host bits masked" "got: $(allow_line)"
-for x in '::/1' '2000::/3' '2001:db8:7::/64' '/40' '/128' '2601:db8:4400' '2601:db8:9:9' '2601:db8:8:8' 'fd00'; do
+[ "$(allow_line)" = "IPAddressAllow=localhost link-local 2601:db8:1:2::/64 2601:db8:abcd::/48 fd00:1::/64" ] \
+    && ok "the SLAAC /64 joins once (stable + temporary), a /48 and the uplink's own ULA /64 too, host bits masked" \
+    || bad "the SLAAC /64 joins once (stable + temporary), a /48 and the uplink's own ULA /64 too, host bits masked" "got: $(allow_line)"
+for x in '::/1' '2000::/3' '2001:db8:7::/64' '/40' '/128' '2601:db8:4400' '2601:db8:9:9' '2601:db8:8:8' '2601:db8:6:6' 'fc00::/7'; do
     allow_line | grep -qF -- "$x" && bad "not in the list: $x" "got: $(allow_line)" || ok "not in the list: $x"
 done
 grep -q '^\[Socket\]' "$DROPIN" 2>/dev/null && ok "the drop-in sets [Socket]" \
     || bad "the drop-in sets [Socket]" "$(cat "$DROPIN" 2>/dev/null)"
+# Allow without Deny filters nothing.  An older sigmond-vm6proxy rewrites the
+# socket units without Deny; the drop-in must still deny on its own.
+grep -qx 'IPAddressDeny=any' "$DROPIN" 2>/dev/null && ok "the drop-in denies everything else itself" \
+    || bad "the drop-in denies everything else itself" "$(cat "$DROPIN" 2>/dev/null)"
 grep -qx 'daemon-reload' "$SYSTEMCTL_LOG" && ok "a new list reloads systemd" \
     || bad "a new list reloads systemd" "$(cat "$SYSTEMCTL_LOG")"
-for p in $PORTS; do
-    grep -qx "try-restart --no-block sigmond-vm6proxy@$p.socket" "$SYSTEMCTL_LOG" \
-        && ok ":$p socket restarted without waiting" \
-        || bad ":$p socket restarted without waiting" "$(cat "$SYSTEMCTL_LOG")"
-done
-grep -E 'restart' "$SYSTEMCTL_LOG" | grep -v -- '--no-block' | grep -q . \
-    && bad "no blocking restart" "$(cat "$SYSTEMCTL_LOG")" || ok "no blocking restart"
-grep -E 'restart.*\.service' "$SYSTEMCTL_LOG" | grep -q . \
-    && bad "only the sockets restart" "$(cat "$SYSTEMCTL_LOG")" || ok "only the sockets restart"
+# A reload applies the new list to the live listener (final review, systemd
+# 257).  A socket restart would also restart proxyd (Requires=) and drop
+# every relayed session.
+grep -q 'restart' "$SYSTEMCTL_LOG" && bad "allow-refresh restarts nothing" "$(cat "$SYSTEMCTL_LOG")" \
+    || ok "allow-refresh restarts nothing"
 
 before=$(sha256sum "$DROPIN" 2>/dev/null); touch -d '2000-01-01' "$DROPIN" 2>/dev/null
 refresh
@@ -193,11 +196,23 @@ refresh
 printf '2000::/3 dev vmbr0 proto ra metric 1024 pref medium\n' > "$IP_ROUTES"
 : > "$IP_ADDRS"
 refresh
-[ "$(allow_line)" = "IPAddressAllow=localhost link-local fc00::/7" ] \
+[ "$(allow_line)" = "IPAddressAllow=localhost link-local" ] \
     && ok "no global IPv6: the local list alone" \
     || bad "no global IPv6: the local list alone" "got: $(allow_line)"
-grep -q 'try-restart --no-block sigmond-vm6proxy@8000.socket' "$SYSTEMCTL_LOG" \
-    && ok "and the shrink restarts the sockets" || bad "and the shrink restarts the sockets" "$(cat "$SYSTEMCTL_LOG")"
+grep -qx 'IPAddressDeny=any' "$DROPIN" && ok "and it still denies" || bad "and it still denies" "$(cat "$DROPIN")"
+grep -qx 'daemon-reload' "$SYSTEMCTL_LOG" && ! grep -q restart "$SYSTEMCTL_LOG" \
+    && ok "the shrink reloads and restarts nothing" || bad "the shrink reloads and restarts nothing" "$(cat "$SYSTEMCTL_LOG")"
+
+# Stateful DHCPv6 (IA_NA) gives a /128 and no prefix.  The host's own /128 on
+# the uplink stands for its /64; a /128 anywhere else counts for nothing.
+cat > "$IP_ADDRS" <<'A'
+2: vmbr0    inet6 2601:db8:77:1::5/128 scope global dynamic noprefixroute \       valid_lft 7000sec preferred_lft 7000sec
+6: tailscale0    inet6 fd7a:115c:a1e0::5/128 scope global \       valid_lft forever preferred_lft forever
+A
+refresh
+[ "$(allow_line)" = "IPAddressAllow=localhost link-local 2601:db8:77:1::/64" ] \
+    && ok "an own uplink /128 (DHCPv6) stands for its /64; a tunnel's ULA /128 does not" \
+    || bad "an own uplink /128 (DHCPv6) stands for its /64; a tunnel's ULA /128 does not" "got: $(allow_line)"
 
 echo
 echo "allow-refresh: addresses on the uplink only"
@@ -210,27 +225,28 @@ cat > "$IP_ADDRS" <<'A'
 2: vmbr0    inet6 2601:db8:1:2:21b:21ff:fe3a:4b5c/64 scope global dynamic mngtmpaddr \       valid_lft 86000sec preferred_lft 14000sec
 5: wg0    inet6 2602:f00:5:6::2/64 scope global \       valid_lft forever preferred_lft forever
 6: tailscale0    inet6 2603:f00:7:8::2/64 scope global \       valid_lft forever preferred_lft forever
+6: tailscale0    inet6 fd7a:115c:a1e0:ab12:4843:cd96:6258:b240/64 scope global \       valid_lft forever preferred_lft forever
 4: wlp2s0    inet6 2604:f00:9:a:1:2:3:4/64 scope global dynamic mngtmpaddr \       valid_lft 86000sec preferred_lft 14000sec
 3: vmbr1    inet6 2605:f00:b:c::1/64 scope global \       valid_lft forever preferred_lft forever
 A
 printf 'default via fe80::1 dev vmbr0 proto ra metric 1024 expires 1700sec pref medium\n' > "$IP_DEFAULT"
 refresh
-[ "$(allow_line)" = "IPAddressAllow=localhost link-local fc00::/7 2601:db8:1:2::/64" ] \
+[ "$(allow_line)" = "IPAddressAllow=localhost link-local 2601:db8:1:2::/64" ] \
     && ok "default via vmbr0: only vmbr0's /64, not wg0, tailscale0, wlp2s0 or vmbr1" \
     || bad "default via vmbr0: only vmbr0's /64, not wg0, tailscale0, wlp2s0 or vmbr1" "got: $(allow_line)"
 printf 'default via fe80::1 dev wlp2s0 proto ra metric 600 pref medium\n' > "$IP_DEFAULT"
 refresh
-[ "$(allow_line)" = "IPAddressAllow=localhost link-local fc00::/7 2604:f00:9:a::/64" ] \
+[ "$(allow_line)" = "IPAddressAllow=localhost link-local 2604:f00:9:a::/64" ] \
     && ok "default via Wi-Fi: the Wi-Fi /64 alone" \
     || bad "default via Wi-Fi: the Wi-Fi /64 alone" "got: $(allow_line)"
 printf 'default dev wg0 metric 50 pref medium\ndefault dev tun0 metric 60 pref medium\n' > "$IP_DEFAULT"
 refresh
-[ "$(allow_line)" = "IPAddressAllow=localhost link-local fc00::/7 2601:db8:1:2::/64" ] \
+[ "$(allow_line)" = "IPAddressAllow=localhost link-local 2601:db8:1:2::/64" ] \
     && ok "default via a tunnel only: vmbr0, never the tunnel" \
     || bad "default via a tunnel only: vmbr0, never the tunnel" "got: $(allow_line)"
 : > "$IP_DEFAULT"
 refresh
-[ "$(allow_line)" = "IPAddressAllow=localhost link-local fc00::/7 2601:db8:1:2::/64" ] \
+[ "$(allow_line)" = "IPAddressAllow=localhost link-local 2601:db8:1:2::/64" ] \
     && ok "no IPv6 default route: vmbr0" \
     || bad "no IPv6 default route: vmbr0" "got: $(allow_line)"
 
@@ -245,12 +261,12 @@ raise SystemExit(0)
 PYEOF
 cp "$DECOY/ipaddress.py" "$DECOY/sys.py" 2>/dev/null
 rm -f "$T/decoy-ran"
-( cd "$DECOY" && : > "$SYSTEMCTL_LOG" && PATH="$T/bin:$PATH" SIGMOND_VM6PROXY_UNITDIR="$T/units" \
+( cd "$DECOY" && : > "$SYSTEMCTL_LOG" && PATH="$T/bin:$PATH" SIGMOND_VM6PROXY_TEST=1 SIGMOND_VM6PROXY_UNITDIR="$T/units" \
     PYTHONPATH="$DECOY" PYTHONSTARTUP="$DECOY/ipaddress.py" \
     bash "$HERE/sigmond-vm6proxy" allow-refresh > "$T/out" 2>&1 )
 [ ! -e "$T/decoy-ran" ] && ok "a decoy ipaddress.py in cwd or PYTHONPATH does not run" \
     || bad "a decoy ipaddress.py in cwd or PYTHONPATH does not run" "marker written"
-[ "$(allow_line)" = "IPAddressAllow=localhost link-local fc00::/7 2601:db8:1:2::/64" ] \
+[ "$(allow_line)" = "IPAddressAllow=localhost link-local 2601:db8:1:2::/64" ] \
     && ok "and the list still comes out right" || bad "and the list still comes out right" "got: $(allow_line)"
 grep -q '/usr/bin/python3 -I ' "$HERE/sigmond-vm6proxy" && ok "the script names /usr/bin/python3 -I" \
     || bad "the script names /usr/bin/python3 -I"
@@ -284,13 +300,70 @@ grep -q 'restart.*@8000' "$SYSTEMCTL_LOG" && bad "an unchanged socket does not" 
     || ok "an unchanged socket does not"
 
 echo
+echo "status: the effective filter of each socket"
+: > "$SYSTEMCTL_LOG"
+PATH="$T/bin:$PATH" SIGMOND_VM6PROXY_TEST=1 SIGMOND_VM6PROXY_UNITDIR="$T/units" SIGMOND_MGMT_VM=127.0.0.9 STUB_DENY="" \
+    bash "$HERE/sigmond-vm6proxy" status > "$T/out" 2>&1
+[ "$(grep -c 'NOT FILTERED' "$T/out")" = 5 ] && ok "an empty IPAddressDeny reads NOT FILTERED on every port" \
+    || bad "an empty IPAddressDeny reads NOT FILTERED on every port" "$(cat "$T/out")"
+grep -q 'show -p IPAddressDeny --value sigmond-vm6proxy@2222.socket' "$SYSTEMCTL_LOG" \
+    && ok "it asks systemd for the effective list" || bad "it asks systemd for the effective list" "$(cat "$SYSTEMCTL_LOG")"
+PATH="$T/bin:$PATH" SIGMOND_VM6PROXY_TEST=1 SIGMOND_VM6PROXY_UNITDIR="$T/units" SIGMOND_MGMT_VM=127.0.0.9 STUB_DENY="::/0 0.0.0.0/0" \
+    bash "$HERE/sigmond-vm6proxy" status > "$T/out" 2>&1
+! grep -q 'NOT FILTERED' "$T/out" && [ "$(grep -c 'filtered' "$T/out")" = 5 ] \
+    && ok "a deny list reads filtered" || bad "a deny list reads filtered" "$(cat "$T/out")"
+
+echo
+echo "the VM address: a dotted quad or nothing"
+# It reaches a root `bash -c` in the status probe.
+for bad_ip in '1.2.3.4; touch '"$T"'/pwned' '256.1.1.1' '10.99.0' 'evil.example' '1.2.3.4/24'; do
+    rm -rf "$T/v"; mkdir -p "$T/v"; : > "$SYSTEMCTL_LOG"
+    PATH="$T/bin:$PATH" SIGMOND_VM6PROXY_TEST=1 SIGMOND_VM6PROXY_UNITDIR="$T/v" SIGMOND_MGMT_VM="$bad_ip" \
+        bash "$HERE/sigmond-vm6proxy" install > "$T/out" 2>&1; rc=$?
+    if [ "$rc" != 0 ] && [ -z "$(ls -A "$T/v")" ] && [ ! -e "$T/pwned" ]; then
+        ok "refused: $bad_ip"
+    else
+        bad "refused: $bad_ip" "rc=$rc files=$(ls -A "$T/v" | wc -l) $(cat "$T/out")"
+    fi
+done
+rm -rf "$T/v"; mkdir -p "$T/v"
+PATH="$T/bin:$PATH" SIGMOND_VM6PROXY_TEST=1 SIGMOND_VM6PROXY_UNITDIR="$T/v" \
+    bash "$HERE/sigmond-vm6proxy" install '1.2.3.4;id' > "$T/out" 2>&1; rc=$?
+[ "$rc" != 0 ] && [ -z "$(ls -A "$T/v")" ] && ok "refused as an argument too" \
+    || bad "refused as an argument too" "rc=$rc $(cat "$T/out")"
+
+echo
+echo "install --no-status: no probe"
+rm -rf "$T/v"; mkdir -p "$T/v"; : > "$SYSTEMCTL_LOG"
+PATH="$T/bin:$PATH" SIGMOND_VM6PROXY_TEST=1 SIGMOND_VM6PROXY_UNITDIR="$T/v" \
+    bash "$HERE/sigmond-vm6proxy" install --no-status 10.99.0.2 > "$T/out" 2>&1; rc=$?
+[ "$rc" = 0 ] && grep -q ' 10.99.0.2:22$' "$T/v/sigmond-vm6proxy@2222.service" \
+    && ok "it installs, with the address after the flag" || bad "it installs, with the address after the flag" "rc=$rc $(cat "$T/out")"
+grep -q -e 'is-active' -e '^show' "$SYSTEMCTL_LOG" || grep -q 'VM=' "$T/out" \
+    && bad "and probes nothing" "$(cat "$SYSTEMCTL_LOG") $(cat "$T/out")" || ok "and probes nothing"
+
+echo
+echo "the test hook needs the test flag"
+if [ "$(id -u)" = 0 ]; then
+    ok "skipped as root (it would write the real unit dir)"
+else
+    rm -rf "$T/v"; mkdir -p "$T/v"
+    PATH="$T/bin:$PATH" SIGMOND_VM6PROXY_UNITDIR="$T/v" SIGMOND_MGMT_VM=127.0.0.9 \
+        bash "$HERE/sigmond-vm6proxy" install --no-status > "$T/out" 2>&1
+    [ -z "$(ls -A "$T/v")" ] && ok "SIGMOND_VM6PROXY_UNITDIR alone is ignored" \
+        || bad "SIGMOND_VM6PROXY_UNITDIR alone is ignored" "$(ls -A "$T/v")"
+fi
+
+echo
 echo "sigmond-vm6proxy install: a unit it cannot write is a failure"
 # pm-align reports a failed install as a warning; it can only do that when the
 # exit status says so.
 : > "$SYSTEMCTL_LOG"
-PATH="$T/bin:$PATH" SIGMOND_VM6PROXY_UNITDIR="$T/no-such-dir" SIGMOND_MGMT_VM=127.0.0.9 \
+PATH="$T/bin:$PATH" SIGMOND_VM6PROXY_TEST=1 SIGMOND_VM6PROXY_UNITDIR="$T/no-such-dir" SIGMOND_MGMT_VM=127.0.0.9 \
     bash "$HERE/sigmond-vm6proxy" install > "$T/out" 2>&1; rc=$?
 [ "$rc" != 0 ] && ok "install exits non-zero (rc=$rc)" || bad "install exits non-zero" "rc=0: $(cat "$T/out")"
+grep -q 'cannot write' "$T/out" && ! grep -q -e 'line [0-9]' -e 'No such file' "$T/out" \
+    && ok "it says so once, without bash's redirect error" || bad "it says so once, without bash's redirect error" "$(cat "$T/out")"
 grep -q 'enable' "$SYSTEMCTL_LOG" && bad "and enables nothing" "$(cat "$SYSTEMCTL_LOG")" \
     || ok "and enables nothing"
 
@@ -310,6 +383,13 @@ else
     bad "it installs the relay after the DNAT rules, with MGMT_VM, before the v6 gateway" \
         "dnat=${_dnat:-none} install=${_inst:-none} gateway=${_gw:-none}"
 fi
+grep -q '/usr/local/sbin/sigmond-vm6proxy install --no-status' "$IMPORTER" \
+    && ok "the importer does not wait on the status probe" || bad "the importer does not wait on the status probe"
+V6GW="$T/v6gw.sh"
+awk '/^cat > \/usr\/local\/sbin\/sigmond-v6-gateway <<.V6GWEOF.$/{f=1;next} /^V6GWEOF$/{f=0} f' \
+    "$HERE/firstboot-v3.sh" > "$V6GW"
+grep -q '/usr/local/sbin/sigmond-vm6proxy install --no-status' "$V6GW" \
+    && ok "nor does the v6 gateway" || bad "nor does the v6 gateway"
 _off=$(grep -n 'install -m 755 /mnt/sig-media/sigmond-vm6proxy' "$IMPORTER" | head -1 | cut -d: -f1)
 [ -n "$_off" ] && [ -n "$_inst" ] && [ "$_off" -lt "$_inst" ] \
     && ok "and the script is copied off the media before that" \

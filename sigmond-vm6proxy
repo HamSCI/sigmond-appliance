@@ -34,24 +34,35 @@
 # wherever the site router does not filter inbound IPv6, the relay would answer
 # the whole internet -- ssh on 2222 included.  So each socket unit carries
 #     IPAddressDeny=any
-#     IPAddressAllow=localhost link-local fc00::/7
-# and a drop-in, sigmond-vm6proxy@.socket.d/10-allow-local.conf, adds the
-# prefixes of this host's own global IPv6 addresses on its uplink (never its
-# routes; see local_prefixes, which also records the residual risk).  systemd applies a socket unit's access
-# list to the listening socket (systemd.resource-control(5)), which drops a
-# connection from anywhere else.  The service units carry no list: proxyd
-# connects out to the VM over IPv4.  allow-refresh recomputes the drop-in;
-# a timer runs it every 15 minutes, so a renumbered prefix, or a router that
-# turns IPv6 on later, reaches the list without a reinstall.
+#     IPAddressAllow=localhost link-local
+# and a drop-in, sigmond-vm6proxy@.socket.d/10-allow-local.conf, carries
+# IPAddressDeny=any again plus the prefixes of this host's own IPv6 addresses
+# on its uplink, global and ULA (never its routes, never a tunnel's ULA; see
+# local_prefixes, which also records the residual risk).  The drop-in denies
+# on its own because Allow without Deny filters nothing: an older
+# sigmond-vm6proxy rewrites the socket units without Deny, and the drop-in
+# still closes them.  systemd applies a socket unit's access list to the
+# listening socket (systemd.resource-control(5)), which drops a connection
+# from anywhere else; a daemon-reload re-applies a changed list to the live
+# listener (final review, systemd 257).  The service units carry no list:
+# proxyd connects out to the VM over IPv4.  allow-refresh recomputes the
+# drop-in; a timer runs it every 15 minutes, so a renumbered prefix, or a
+# router that turns IPv6 on later, reaches the list without a reinstall.
 #
-#   sigmond-vm6proxy install [vm-ip]   write + enable the units (idempotent)
+#   sigmond-vm6proxy install [--no-status] [vm-ip]
+#                                      write + enable the units (idempotent);
+#                                      --no-status skips the VM probe
 #   sigmond-vm6proxy allow-refresh     recompute the local-prefix allow list
-#   sigmond-vm6proxy status
+#   sigmond-vm6proxy status            per port: the effective filter and the VM
 #   sigmond-vm6proxy remove
 set -u
 VM_IP="${SIGMOND_MGMT_VM:-10.99.0.2}"
-# Only the tests point this elsewhere.
-UNITDIR="${SIGMOND_VM6PROXY_UNITDIR:-/etc/systemd/system}"
+UNITDIR=/etc/systemd/system
+# The tests point this elsewhere, and only with their flag set: production
+# never reads the variable alone.
+if [ "${SIGMOND_VM6PROXY_TEST:-}" = 1 ] && [ -n "${SIGMOND_VM6PROXY_UNITDIR:-}" ]; then
+    UNITDIR="$SIGMOND_VM6PROXY_UNITDIR"
+fi
 # listen:target -- 2222 maps to the VM's 22 because the host's own sshd owns 22.
 # 8765 is mag-usb's live sample feed.  Without it the magnetometer dashboard
 # loads over IPv6 and then sits "disconnected" for ever, because the page can
@@ -59,7 +70,7 @@ UNITDIR="${SIGMOND_VM6PROXY_UNITDIR:-/etc/systemd/system}"
 PORTS="8000:8000 8081:8081 8082:8082 8765:8765 2222:22"
 PROXY=/lib/systemd/systemd-socket-proxyd
 [ -x "$PROXY" ] || PROXY=/usr/lib/systemd/systemd-socket-proxyd
-LOCAL_ALLOW="localhost link-local fc00::/7"
+LOCAL_ALLOW="localhost link-local"
 DROPDIR="${UNITDIR}/sigmond-vm6proxy@.socket.d"
 DROPIN="${DROPDIR}/10-allow-local.conf"
 SELF=/usr/local/sbin/sigmond-vm6proxy
@@ -70,14 +81,17 @@ say(){ printf '%s\n' "$*"; }
 # print "changed" when it wrote, 0 and nothing when they matched, 1 on failure.
 put_unit(){
     local dest="$1" tmp="$1.vm6new"
-    cat > "$tmp" 2>/dev/null || { rm -f "$tmp"; say "cannot write $dest"; return 1; }
+    { cat > "$tmp"; } 2>/dev/null || { rm -f "$tmp"; say "cannot write $dest"; return 1; }
     if [ -f "$dest" ] && cmp -s "$tmp" "$dest"; then rm -f "$tmp"; return 0; fi
     mv -f "$tmp" "$dest" || { rm -f "$tmp"; say "cannot write $dest"; return 1; }
     echo changed
 }
 
-# The prefixes of this host's OWN global IPv6 addresses on its UPLINK, each
-# address masked to its prefix length, /48 to /64 only.
+# The prefixes of this host's OWN IPv6 addresses on its UPLINK, global and
+# ULA, each address masked to its prefix length, /48 to /64 only.  An own
+# /128 (stateful DHCPv6, IA_NA) stands for its /64.  ULA counts only this way:
+# no blanket fc00::/7, because overlay VPNs (Tailscale fd7a:115c:a1e0::/48,
+# ZeroTier) hand their peers ULA addresses (final review 2026-10-15).
 #
 # Never the routing table: anyone on the LAN can send a router advertisement,
 # and a forged RA announcing an on-link ::/1 or 2000::/3 makes the kernel add
@@ -88,8 +102,8 @@ put_unit(){
 # tailscale*, frp*, clat*): a VPN or a second uplink holding a global address
 # must not open its whole prefix (security review 2026-10-15).
 #
-# Skipped: tentative and dadfailed addresses, /128s (DHCPv6 IA_NA), ULA
-# (fc00::/7 is already allowed), link-local.
+# Skipped: tentative, dadfailed and deprecated addresses, other prefix
+# lengths, link-local, multicast.
 #
 # RESIDUAL RISK, accepted (controller ruling 2026-10-15): a hostile host on the
 # station's own LAN can send a router advertisement whose /64 makes this host
@@ -120,7 +134,6 @@ local_prefixes(){
     ( cd / && ip -6 -o addr show scope global 2>/dev/null | /usr/bin/python3 -I -c '
 import ipaddress, sys
 UPLINKS = set(sys.argv[1:])
-ULA = ipaddress.ip_network("fc00::/7")
 LL = ipaddress.ip_network("fe80::/10")
 MC = ipaddress.ip_network("ff00::/8")
 out = set()
@@ -128,17 +141,20 @@ for line in sys.stdin:
     f = line.split()
     if "inet6" not in f or len(f) < 4:
         continue
-    if "tentative" in f or "dadfailed" in f:
+    if "tentative" in f or "dadfailed" in f or "deprecated" in f:
         continue
     if f[1].split("@")[0] not in UPLINKS:
         continue
     try:
-        net = ipaddress.IPv6Interface(f[f.index("inet6") + 1]).network
+        iface = ipaddress.IPv6Interface(f[f.index("inet6") + 1])
     except ValueError:
         continue
+    net = iface.network
+    if net.prefixlen == 128:
+        net = ipaddress.IPv6Interface(f"{iface.ip}/64").network
     if not 48 <= net.prefixlen <= 64:
         continue
-    if net.subnet_of(ULA) or net.subnet_of(LL) or net.subnet_of(MC):
+    if net.subnet_of(LL) or net.subnet_of(MC):
         continue
     out.add(str(net))
 print(" ".join(sorted(out)))
@@ -152,7 +168,6 @@ restart_sockets(){   # try-restart: an inactive socket stays as it is
     done
 }
 
-all_ports(){ local pair; for pair in $PORTS; do printf '%s ' "${pair%%:*}"; done; }
 
 # write_dropin: 0 and "changed" when it rewrote the drop-in, 0 and nothing
 # when it matched, 1 on failure.  No reload, no restart.
@@ -163,9 +178,11 @@ write_dropin(){
     mkdir -p "$DROPDIR" 2>/dev/null || { say "cannot create $DROPDIR"; return 1; }
     put_unit "$DROPIN" <<EOF
 # Written by sigmond-vm6proxy allow-refresh; rewritten when the prefixes change.
-# The relay answers this host's own networks only.  The socket units deny
-# everything else (IPAddressDeny=any).
+# The relay answers this host's own networks only.  Deny is repeated here
+# because Allow without Deny filters nothing, and an older sigmond-vm6proxy
+# writes socket units without it.
 [Socket]
+IPAddressDeny=any
 IPAddressAllow=${allow}
 EOF
 }
@@ -174,11 +191,10 @@ cmd_allow_refresh(){
     local r
     r=$(write_dropin) || { say "$r"; return 1; }
     if [ "$r" = changed ]; then
+        # A reload alone applies the new list to the live listening socket.
+        # No restart: that would also restart each proxyd (the service
+        # Requires= its socket) and drop every relayed session.
         systemctl daemon-reload
-        # A socket restart also restarts its proxyd (the service Requires= the
-        # socket), so a relayed connection in flight drops.  Only a prefix
-        # change gets here.
-        restart_sockets $(all_ports)
         say "allow list now: $(grep '^IPAddressAllow=' "$DROPIN" | cut -d= -f2-)"
     fi
     return 0
@@ -250,8 +266,8 @@ OnUnitActiveSec=15min
 WantedBy=timers.target
 EOF
 ) || { say "$r"; return 1; }
+    # A changed drop-in needs only the reload below (see cmd_allow_refresh).
     r=$(write_dropin) || { say "$r"; return 1; }
-    [ "$r" = changed ] && changed="$(all_ports)"
     systemctl daemon-reload
     # Sockets whose text changed restart (try-restart: only a running one);
     # unchanged ones are left alone.
@@ -264,21 +280,26 @@ EOF
     systemctl enable sigmond-vm6proxy-refresh.timer >/dev/null 2>&1
     systemctl start --no-block sigmond-vm6proxy-refresh.timer >/dev/null 2>&1
     say "allow list: $(grep '^IPAddressAllow=' "$DROPIN" | cut -d= -f2-)"
-    cmd_status
+    [ "$NO_STATUS" = 1 ] || cmd_status
 }
 
 cmd_status(){
-    local pair lp tp st
+    local pair lp tp st deny filt vm
     for pair in $PORTS; do
         lp="${pair%%:*}"; tp="${pair##*:}"
         st=$(systemctl is-active "sigmond-vm6proxy@${lp}.socket" 2>/dev/null)
-        # Report whether the VM is actually serving, not merely whether we listen.
+        # What systemd enforces, not what the files say: an empty Deny list
+        # means the port answers any address.
+        deny=$(systemctl show -p IPAddressDeny --value "sigmond-vm6proxy@${lp}.socket" 2>/dev/null)
+        if [ -n "${deny// /}" ]; then filt="filtered"; else filt="NOT FILTERED"; fi
+        # Report whether the VM is actually serving, not merely whether we
+        # listen.  VM_IP is a checked dotted quad (valid_ipv4 at the top).
         if timeout 3 bash -c "exec 3<>/dev/tcp/${VM_IP}/${tp}" 2>/dev/null; then
-            printf '  :%-5s -> %s:%-5s  socket=%-8s VM=serving\n' "$lp" "$VM_IP" "$tp" "$st"
+            vm="VM=serving"
         else
-            printf '  :%-5s -> %s:%-5s  socket=%-8s VM=NOT serving (nothing to reach yet)\n' \
-                   "$lp" "$VM_IP" "$tp" "$st"
+            vm="VM=NOT serving (nothing to reach yet)"
         fi
+        printf '  :%-5s -> %s:%-5s  socket=%-8s %-12s %s\n' "$lp" "$VM_IP" "$tp" "$st" "$filt" "$vm"
     done
 }
 
@@ -297,10 +318,31 @@ cmd_remove(){
     say "removed"
 }
 
-case "${1:-status}" in
-    install) shift; [ $# -gt 0 ] && VM_IP="$1"; cmd_install ;;
+# A dotted quad, each octet 0-255.  VM_IP reaches the units and a root
+# `bash -c` in the status probe, so nothing else gets through.
+valid_ipv4(){
+    local ip="$1" o
+    [[ "$ip" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]] || return 1
+    local IFS=.
+    for o in $ip; do [ $((10#$o)) -le 255 ] || return 1; done
+    return 0
+}
+
+NO_STATUS=0
+CMD="${1:-status}"; [ $# -gt 0 ] && shift
+if [ "$CMD" = install ]; then
+    [ "${1:-}" = --no-status ] && { NO_STATUS=1; shift; }
+    [ $# -gt 0 ] && VM_IP="$1"
+fi
+if ! valid_ipv4 "$VM_IP"; then
+    say "sigmond-vm6proxy: not an IPv4 address: $(printf '%s' "$VM_IP" | LC_ALL=C tr -c ' -~' '?')"
+    exit 2
+fi
+
+case "$CMD" in
+    install) cmd_install ;;
     allow-refresh) cmd_allow_refresh ;;
     status)  cmd_status ;;
     remove)  cmd_remove ;;
-    *) say "usage: sigmond-vm6proxy {install [vm-ip] | allow-refresh | status | remove}"; exit 2 ;;
+    *) say "usage: sigmond-vm6proxy {install [--no-status] [vm-ip] | allow-refresh | status | remove}"; exit 2 ;;
 esac
