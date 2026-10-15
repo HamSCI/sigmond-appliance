@@ -26,6 +26,17 @@ exit 0
 STUB
 chmod +x "$T/bin/systemctl"
 export SYSTEMCTL_LOG="$T/systemctl.log"
+# A stub `ip` that prints the routing table the test chose, so allow-refresh
+# can be run against any network without touching this machine's.
+cat > "$T/bin/ip" <<'STUB'
+#!/bin/bash
+[ -f "$IP_ROUTES" ] && cat "$IP_ROUTES"
+exit 0
+STUB
+chmod +x "$T/bin/ip"
+export IP_ROUTES="$T/routes"
+: > "$IP_ROUTES"
+DROPIN="$T/units/sigmond-vm6proxy@.socket.d/10-allow-local.conf"
 
 run_install(){
     : > "$SYSTEMCTL_LOG"
@@ -82,14 +93,119 @@ fi
 
 echo
 echo "sigmond-vm6proxy install: idempotent"
-sum1=$(cd "$T/units" && sha256sum -- * 2>/dev/null | sha256sum)
+sum1=$(cd "$T/units" && find . -type f | sort | xargs -r sha256sum | sha256sum)
 run_install
-sum2=$(cd "$T/units" && sha256sum -- * 2>/dev/null | sha256sum)
-nunits=$(find "$T/units" -type f | wc -l)
+sum2=$(cd "$T/units" && find . -type f | sort | xargs -r sha256sum | sha256sum)
+nunits=$(find "$T/units" -type f -name 'sigmond-vm6proxy@*' | wc -l)
 [ "$nunits" = 10 ] && [ "$sum1" = "$sum2" ] && ok "a second install writes the same bytes" \
     || bad "a second install writes the same bytes" "$nunits unit files"
 grep -qx 'daemon-reload' "$SYSTEMCTL_LOG" && ok "and reloads and enables again" \
     || bad "and reloads and enables again" "$(cat "$SYSTEMCTL_LOG")"
+
+grep -q 'restart' "$SYSTEMCTL_LOG" && bad "and restarts nothing" "$(cat "$SYSTEMCTL_LOG")" \
+    || ok "and restarts nothing"
+
+echo
+echo "the relay answers local networks only (Michael, 2026-10-15)"
+# A global IPv6 address is reachable from the whole internet wherever the site
+# router does not filter inbound IPv6.  NAT gives IPv4 "local only" for free;
+# here the socket units must say it.
+for p in $PORTS; do
+    s="$T/units/sigmond-vm6proxy@$p.socket"; v="$T/units/sigmond-vm6proxy@$p.service"
+    if awk '/^\[/{sec=$0} sec=="[Socket]" && $0=="IPAddressDeny=any"{found=1} END{exit !found}' "$s" \
+       && awk '/^\[/{sec=$0} sec=="[Socket]" && $0=="IPAddressAllow=localhost link-local fc00::/7"{found=1} END{exit !found}' "$s"; then
+        ok ":$p socket denies all but localhost, link-local and ULA"
+    else
+        bad ":$p socket denies all but localhost, link-local and ULA" "$(cat "$s")"
+    fi
+    # proxyd connects OUT to the VM over IPv4; a filter on the service would cut that.
+    grep -q 'IPAddress' "$v" && bad ":$p service carries no address filter" "$(cat "$v")" \
+        || ok ":$p service carries no address filter"
+done
+
+refresh(){
+    : > "$SYSTEMCTL_LOG"
+    PATH="$T/bin:$PATH" SIGMOND_VM6PROXY_UNITDIR="$T/units" \
+        bash "$HERE/sigmond-vm6proxy" allow-refresh > "$T/out" 2>&1
+}
+allow_line(){ grep '^IPAddressAllow=' "$DROPIN" 2>/dev/null; }
+
+echo
+echo "allow-refresh: the host's own on-link prefixes"
+cat > "$IP_ROUTES" <<'R'
+2001:db8:1::/64 dev vmbr0 proto ra metric 1024 expires 86000sec pref medium
+2001:db8:1::/64 dev vmbr0 proto kernel metric 256 expires 86000sec pref medium
+2001:db8:9::/48 via fe80::1 dev vmbr0 proto ra metric 1024 pref medium
+2001:db8:7::/64 dev vmbr0 proto static metric 1024 pref medium
+2001:db8:5::1 dev clat proto kernel metric 256 pref medium
+fd00:1::/64 dev vmbr0 proto kernel metric 256 pref medium
+fe80::/64 dev vmbr0 proto kernel metric 256 pref medium
+::1 dev lo proto kernel metric 256 pref medium
+default via fe80::1 dev vmbr0 proto ra metric 1024 expires 1700sec pref medium
+R
+refresh; rc=$?
+[ "$rc" = 0 ] && ok "allow-refresh exits 0" || bad "allow-refresh exits 0" "rc=$rc: $(cat "$T/out")"
+[ "$(allow_line)" = "IPAddressAllow=localhost link-local fc00::/7 2001:db8:1::/64" ] \
+    && ok "a global /64 on the uplink joins the allow list, once" \
+    || bad "a global /64 on the uplink joins the allow list, once" "got: $(allow_line)"
+grep -q '^\[Socket\]' "$DROPIN" 2>/dev/null && ok "the drop-in sets [Socket]" \
+    || bad "the drop-in sets [Socket]" "$(cat "$DROPIN" 2>/dev/null)"
+grep -qx 'daemon-reload' "$SYSTEMCTL_LOG" && ok "a new list reloads systemd" \
+    || bad "a new list reloads systemd" "$(cat "$SYSTEMCTL_LOG")"
+for p in $PORTS; do
+    grep -qx "try-restart --no-block sigmond-vm6proxy@$p.socket" "$SYSTEMCTL_LOG" \
+        && ok ":$p socket restarted without waiting" \
+        || bad ":$p socket restarted without waiting" "$(cat "$SYSTEMCTL_LOG")"
+done
+grep -E 'restart' "$SYSTEMCTL_LOG" | grep -v -- '--no-block' | grep -q . \
+    && bad "no blocking restart" "$(cat "$SYSTEMCTL_LOG")" || ok "no blocking restart"
+grep -E 'restart.*\.service' "$SYSTEMCTL_LOG" | grep -q . \
+    && bad "only the sockets restart" "$(cat "$SYSTEMCTL_LOG")" || ok "only the sockets restart"
+
+before=$(sha256sum "$DROPIN" 2>/dev/null); touch -d '2000-01-01' "$DROPIN" 2>/dev/null
+refresh
+[ "$(sha256sum "$DROPIN" 2>/dev/null)" = "$before" ] && [ "$(stat -c %Y "$DROPIN" 2>/dev/null)" = "$(date -d '2000-01-01' +%s)" ] \
+    && ok "an identical refresh rewrites nothing" \
+    || bad "an identical refresh rewrites nothing"
+[ -s "$SYSTEMCTL_LOG" ] && bad "and reloads and restarts nothing" "$(cat "$SYSTEMCTL_LOG")" \
+    || ok "and reloads and restarts nothing"
+
+: > "$IP_ROUTES"
+printf 'fe80::/64 dev vmbr0 proto kernel metric 256 pref medium\n' > "$IP_ROUTES"
+refresh
+[ "$(allow_line)" = "IPAddressAllow=localhost link-local fc00::/7" ] \
+    && ok "no global IPv6: the local list alone" \
+    || bad "no global IPv6: the local list alone" "got: $(allow_line)"
+grep -q 'try-restart --no-block sigmond-vm6proxy@8000.socket' "$SYSTEMCTL_LOG" \
+    && ok "and the shrink restarts the sockets" || bad "and the shrink restarts the sockets" "$(cat "$SYSTEMCTL_LOG")"
+
+echo
+echo "install: the refresh timer"
+: > "$IP_ROUTES"
+run_install
+for u in sigmond-vm6proxy-refresh.timer sigmond-vm6proxy-refresh.service; do
+    [ -f "$T/units/$u" ] && ok "$u written" || bad "$u written"
+done
+grep -q '^OnUnitActiveSec=' "$T/units/sigmond-vm6proxy-refresh.timer" 2>/dev/null \
+    && grep -q '^OnBootSec=' "$T/units/sigmond-vm6proxy-refresh.timer" \
+    && ok "the timer runs after boot and then repeats" \
+    || bad "the timer runs after boot and then repeats" "$(cat "$T/units/sigmond-vm6proxy-refresh.timer" 2>/dev/null)"
+grep -q 'ExecStart=.*sigmond-vm6proxy allow-refresh' "$T/units/sigmond-vm6proxy-refresh.service" 2>/dev/null \
+    && ok "and runs allow-refresh" || bad "and runs allow-refresh"
+grep -qx 'enable sigmond-vm6proxy-refresh.timer' "$SYSTEMCTL_LOG" \
+    && grep -qx 'start --no-block sigmond-vm6proxy-refresh.timer' "$SYSTEMCTL_LOG" \
+    && ok "install enables the timer and starts it without waiting" \
+    || bad "install enables the timer and starts it without waiting" "$(cat "$SYSTEMCTL_LOG")"
+[ -f "$DROPIN" ] && ok "install writes the drop-in" || bad "install writes the drop-in"
+
+echo
+echo "install over older units restarts the sockets that changed"
+sed -i '/^IPAddress/d' "$T/units/sigmond-vm6proxy@8081.socket"
+run_install
+grep -qx 'try-restart --no-block sigmond-vm6proxy@8081.socket' "$SYSTEMCTL_LOG" \
+    && ok "the changed :8081 socket restarts" || bad "the changed :8081 socket restarts" "$(cat "$SYSTEMCTL_LOG")"
+grep -q 'restart.*@8000' "$SYSTEMCTL_LOG" && bad "an unchanged socket does not" "$(cat "$SYSTEMCTL_LOG")" \
+    || ok "an unchanged socket does not"
 
 echo
 echo "sigmond-vm6proxy install: a unit it cannot write is a failure"

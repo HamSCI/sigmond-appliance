@@ -348,7 +348,9 @@ If you like, open the pages from another computer on the same network.  `sigmond
 printed their addresses, for example `http://192.168.1.50:8081` over IPv4 or
 `http://[2601:db8::50]:8081` over IPv6.  A browser needs the square brackets around an
 IPv6 address.  The receiver page shows a waterfall with signals; the station pages show
-the callsign, the grid, and the timing and GRAPE pages.
+the callsign, the grid, and the timing and GRAPE pages.  Over IPv6 the pages answer only
+computers on the station's own network, just as IPv4 does behind your router.  A computer
+elsewhere on the internet gets no answer, even when it can reach the host's IPv6 address.
 
 From another computer you can also ask the decoder VM alone.  This prints the VM's own lines,
 without the host's checks of the addresses people browse to:

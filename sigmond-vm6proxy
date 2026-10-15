@@ -29,7 +29,22 @@
 # --no-block.  The v6 gateway runs it from units that are part of getting the
 # network online, and firstboot-v3.sh forbids a synchronous start there.
 #
+# LOCAL NETWORKS ONLY (Michael, 2026-10-15).  NAT keeps the VM's IPv4 ports on
+# the site's own network.  A global IPv6 address has no NAT in front of it, so
+# wherever the site router does not filter inbound IPv6, the relay would answer
+# the whole internet -- ssh on 2222 included.  So each socket unit carries
+#     IPAddressDeny=any
+#     IPAddressAllow=localhost link-local fc00::/7
+# and a drop-in, sigmond-vm6proxy@.socket.d/10-allow-local.conf, adds this
+# host's own on-link IPv6 prefixes.  systemd applies a socket unit's access
+# list to the listening socket (systemd.resource-control(5)), which drops a
+# connection from anywhere else.  The service units carry no list: proxyd
+# connects out to the VM over IPv4.  allow-refresh recomputes the drop-in;
+# a timer runs it every 15 minutes, so a renumbered prefix, or a router that
+# turns IPv6 on later, reaches the list without a reinstall.
+#
 #   sigmond-vm6proxy install [vm-ip]   write + enable the units (idempotent)
+#   sigmond-vm6proxy allow-refresh     recompute the local-prefix allow list
 #   sigmond-vm6proxy status
 #   sigmond-vm6proxy remove
 set -u
@@ -43,15 +58,82 @@ UNITDIR="${SIGMOND_VM6PROXY_UNITDIR:-/etc/systemd/system}"
 PORTS="8000:8000 8081:8081 8082:8082 8765:8765 2222:22"
 PROXY=/lib/systemd/systemd-socket-proxyd
 [ -x "$PROXY" ] || PROXY=/usr/lib/systemd/systemd-socket-proxyd
+LOCAL_ALLOW="localhost link-local fc00::/7"
+DROPDIR="${UNITDIR}/sigmond-vm6proxy@.socket.d"
+DROPIN="${DROPDIR}/10-allow-local.conf"
+SELF=/usr/local/sbin/sigmond-vm6proxy
 
 say(){ printf '%s\n' "$*"; }
 
+# put_unit <path>: write stdin there only when the bytes differ.  Exit 0 and
+# print "changed" when it wrote, 0 and nothing when they matched, 1 on failure.
+put_unit(){
+    local dest="$1" tmp="$1.vm6new"
+    cat > "$tmp" 2>/dev/null || { rm -f "$tmp"; say "cannot write $dest"; return 1; }
+    if [ -f "$dest" ] && cmp -s "$tmp" "$dest"; then rm -f "$tmp"; return 0; fi
+    mv -f "$tmp" "$dest" || { rm -f "$tmp"; say "cannot write $dest"; return 1; }
+    echo changed
+}
+
+# The host's own on-link global IPv6 prefixes: kernel or RA routes with a
+# prefix length, no gateway, not link-local, not ULA (fc00::/7 is already
+# allowed), not a host route, not on lo.  Sorted, one line, space-separated.
+local_prefixes(){
+    ip -6 route show 2>/dev/null | awk '
+        $1 ~ /^[0-9a-fA-F:]+\/[0-9]+$/ && $0 !~ / via / && $0 ~ / proto (kernel|ra)( |$)/ {
+            for (i = 2; i < NF; i++) if ($i == "dev" && $(i + 1) == "lo") next
+            split($1, a, "/"); len = a[2] + 0; p = tolower(a[1])
+            if (len < 1 || len >= 128) next
+            if (p ~ /^fe[89ab]/ || p ~ /^f[cd]/) next
+            print tolower($1)
+        }' | sort -u | tr '\n' ' ' | sed 's/ $//'
+}
+
+restart_sockets(){   # try-restart: an inactive socket stays as it is
+    local lp
+    for lp in "$@"; do
+        systemctl try-restart --no-block "sigmond-vm6proxy@${lp}.socket" >/dev/null 2>&1
+    done
+}
+
+all_ports(){ local pair; for pair in $PORTS; do printf '%s ' "${pair%%:*}"; done; }
+
+# write_dropin: 0 and "changed" when it rewrote the drop-in, 0 and nothing
+# when it matched, 1 on failure.  No reload, no restart.
+write_dropin(){
+    local pfx allow
+    pfx=$(local_prefixes)
+    allow="$LOCAL_ALLOW${pfx:+ $pfx}"
+    mkdir -p "$DROPDIR" 2>/dev/null || { say "cannot create $DROPDIR"; return 1; }
+    put_unit "$DROPIN" <<EOF
+# Written by sigmond-vm6proxy allow-refresh; rewritten when the prefixes change.
+# The relay answers this host's own networks only.  The socket units deny
+# everything else (IPAddressDeny=any).
+[Socket]
+IPAddressAllow=${allow}
+EOF
+}
+
+cmd_allow_refresh(){
+    local r
+    r=$(write_dropin) || { say "$r"; return 1; }
+    if [ "$r" = changed ]; then
+        systemctl daemon-reload
+        # A socket restart also restarts its proxyd (the service Requires= the
+        # socket), so a relayed connection in flight drops.  Only a prefix
+        # change gets here.
+        restart_sockets $(all_ports)
+        say "allow list now: $(grep '^IPAddressAllow=' "$DROPIN" | cut -d= -f2-)"
+    fi
+    return 0
+}
+
 cmd_install(){
-    [ -x "$PROXY" ] || { say "systemd-socket-proxyd not found — cannot proxy"; return 1; }
-    local pair lp tp
+    [ -x "$PROXY" ] || { say "systemd-socket-proxyd not found -- cannot proxy"; return 1; }
+    local pair lp tp r changed=""
     for pair in $PORTS; do
         lp="${pair%%:*}"; tp="${pair##*:}"
-        cat > "${UNITDIR}/sigmond-vm6proxy@${lp}.socket" <<EOF || { say "cannot write ${UNITDIR}/sigmond-vm6proxy@${lp}.socket"; return 1; }
+        r=$(put_unit "${UNITDIR}/sigmond-vm6proxy@${lp}.socket" <<EOF
 [Unit]
 Description=IPv6 listener for the decoder VM's port ${lp}
 Documentation=man:systemd-socket-proxyd(8)
@@ -64,11 +146,17 @@ ConditionPathExists=/proc/net/if_inet6
 ListenStream=[::]:${lp}
 BindIPv6Only=ipv6-only
 Accept=no
+# Local networks only.  The drop-in in sigmond-vm6proxy@.socket.d adds this
+# host's own on-link prefixes; everything else is refused.
+IPAddressDeny=any
+IPAddressAllow=${LOCAL_ALLOW}
 
 [Install]
 WantedBy=sockets.target
 EOF
-        cat > "${UNITDIR}/sigmond-vm6proxy@${lp}.service" <<EOF || { say "cannot write ${UNITDIR}/sigmond-vm6proxy@${lp}.service"; return 1; }
+) || { say "$r"; return 1; }
+        [ "$r" = changed ] && changed="$changed $lp"
+        r=$(put_unit "${UNITDIR}/sigmond-vm6proxy@${lp}.service" <<EOF
 [Unit]
 Description=Relay IPv6 :${lp} to the decoder VM ${VM_IP}:${tp}
 ConditionPathExists=/proc/net/if_inet6
@@ -81,13 +169,45 @@ ExecStart=${PROXY} ${VM_IP}:${tp}
 # failed unit the operator has to clear.
 Restart=no
 EOF
+) || { say "$r"; return 1; }
+        [ "$r" = changed ] && changed="$changed $lp"
     done
+    r=$(put_unit "${UNITDIR}/sigmond-vm6proxy-refresh.service" <<EOF
+[Unit]
+Description=Recompute the IPv6 relay's local-network allow list
+ConditionPathExists=/proc/net/if_inet6
+
+[Service]
+Type=oneshot
+ExecStart=${SELF} allow-refresh
+EOF
+) || { say "$r"; return 1; }
+    r=$(put_unit "${UNITDIR}/sigmond-vm6proxy-refresh.timer" <<EOF
+[Unit]
+Description=Follow this host's IPv6 prefixes into the relay's allow list
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=15min
+
+[Install]
+WantedBy=timers.target
+EOF
+) || { say "$r"; return 1; }
+    r=$(write_dropin) || { say "$r"; return 1; }
+    [ "$r" = changed ] && changed="$(all_ports)"
     systemctl daemon-reload
+    # Sockets whose text changed restart (try-restart: only a running one);
+    # unchanged ones are left alone.
+    [ -n "$changed" ] && restart_sockets $(printf '%s\n' $changed | sort -u)
     for pair in $PORTS; do
         lp="${pair%%:*}"
         systemctl enable "sigmond-vm6proxy@${lp}.socket" >/dev/null 2>&1
         systemctl start --no-block "sigmond-vm6proxy@${lp}.socket" >/dev/null 2>&1
     done
+    systemctl enable sigmond-vm6proxy-refresh.timer >/dev/null 2>&1
+    systemctl start --no-block sigmond-vm6proxy-refresh.timer >/dev/null 2>&1
+    say "allow list: $(grep '^IPAddressAllow=' "$DROPIN" | cut -d= -f2-)"
     cmd_status
 }
 
@@ -108,19 +228,23 @@ cmd_status(){
 
 cmd_remove(){
     local pair lp
+    systemctl disable --now sigmond-vm6proxy-refresh.timer >/dev/null 2>&1
     for pair in $PORTS; do
         lp="${pair%%:*}"
         systemctl disable --now "sigmond-vm6proxy@${lp}.socket" >/dev/null 2>&1
         rm -f "${UNITDIR}/sigmond-vm6proxy@${lp}.socket" \
               "${UNITDIR}/sigmond-vm6proxy@${lp}.service"
     done
+    rm -f "${UNITDIR}/sigmond-vm6proxy-refresh.timer" "${UNITDIR}/sigmond-vm6proxy-refresh.service"
+    rm -rf "$DROPDIR"
     systemctl daemon-reload
     say "removed"
 }
 
 case "${1:-status}" in
     install) shift; [ $# -gt 0 ] && VM_IP="$1"; cmd_install ;;
+    allow-refresh) cmd_allow_refresh ;;
     status)  cmd_status ;;
     remove)  cmd_remove ;;
-    *) say "usage: sigmond-vm6proxy {install [vm-ip] | status | remove}"; exit 2 ;;
+    *) say "usage: sigmond-vm6proxy {install [vm-ip] | allow-refresh | status | remove}"; exit 2 ;;
 esac
