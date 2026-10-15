@@ -336,11 +336,12 @@ output to your fleet admin.  An uploads line that shows `FAIL` with `off` or `ho
 some other reason means someone set the switch on purpose.  Leave it alone and ask your
 fleet admin.
 
-Nothing recorded before `smd sink upload` leaves the station, with one exception.  The
-station packs each UTC day's GRAPE and magnetometer data after that day ends, between
-01:00 and about 05:00 UTC.  The packages for the day you turn the uploads on still go
-out, and so do the previous day's if their packing has not finished.  So turn them on
-after about 05:00 UTC if you can.  While a packing job runs, `smd sink upload` refuses,
+When you run `smd sink upload`, the station sends the GRAPE and magnetometer packages
+for today and yesterday (UTC), even if it built them while the switch read off.  Older
+packages stay on the station, and nothing else recorded before the switch ships.  The
+station packs each UTC day's data after that day ends, between 01:00 and about 05:00
+UTC.  If you turn the uploads on before that day's packing finishes, the package goes
+out later, once the station builds it.  While a packing job runs, `smd sink upload` refuses,
 names the job, and asks you to try again when it ends.  About fifteen minutes after,
 search your reporter ID at wsprnet.org (Database) and your callsign at pskreporter.info.
 
