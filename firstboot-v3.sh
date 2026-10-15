@@ -1211,14 +1211,32 @@ uplink_ok(){
 # forever and bury anything else on it (rob, 2026-10-01: "since things could
 # change, especially network interfaces, the panel ought to refresh itself").
 scan_cable(){
-    local d n found="" prev=""
+    local d n found="" prev="" _updev="" _inuse=""
     [ -s "$CABLE" ] && prev=$(head -1 "$CABLE" 2>/dev/null)
+    # ⛔ A CABLE THAT IS ALREADY THE UPLINK IS NOT "UNUSED".  The only test
+    # here used to be "no IPv4 gateway", which is true of every healthy
+    # IPv6-only site -- so on AI6VN (v3.72, 2026-10-15) the panel told the
+    # operator that enp1s0 "has a cable, UNUSED" and offered a command to
+    # adopt it, while enp1s0 WAS vmbr0's bridge port and was carrying the
+    # host's IPv6 default route at that moment.  Advice to adopt the
+    # interface you are already using is worse than silence: it reads as a
+    # fault on a station that is fine.  Resolve whichever device actually
+    # holds a default route (v4 or v6), map a bridge back to its port, and
+    # never advertise that one.
+    _updev=$( (ip -4 route show default; ip -6 route show default) 2>/dev/null \
+              | sed -n 's/.* dev \([^ ]*\).*/\1/p' | head -1)
+    case "$_updev" in
+      vmbr*) _inuse=$(awk "/^iface $_updev/{f=1} f&&/bridge-ports/{print \$2; exit}" \
+                      "${SIGMOND_IFACES:-/etc/network/interfaces}" 2>/dev/null) ;;
+      ?*)    _inuse="$_updev" ;;
+    esac
     if [ -z "$(usable_gw4 2>/dev/null)" ]; then
         for d in "$SYSNET"/*; do
             n=${d##*/}
             case "$n" in lo|vmbr*|tap*|fwbr*|fwln*|fwpr*|veth*|bond*|dummy*|wg*|tun*|clat*|nat64*) continue ;; esac
             [ -e "$d/device" ] || continue
             [ -e "$d/wireless" ] && continue          # a radio is not a cable
+            [ "$n" = "$_inuse" ] && continue          # already the uplink
             [ "$(cat "$d/carrier" 2>/dev/null)" = "1" ] && { found="$n"; break; }
         done
     fi
@@ -1450,6 +1468,90 @@ Unit=sigmond-netwatch.service
 WantedBy=timers.target
 NWTMREOF
 systemctl enable sigmond-netwatch.timer 2>/dev/null
+
+# ── prefer the WIRED uplink when the host is dual-homed on IPv6 ────────────
+# AI6VN, 2026-10-15.  The host had both a cable and an associated radio, each
+# getting a global address and a default route from its own router.  Both
+# routers advertise `pref medium`, so the kernel installed BOTH default routes
+# at metric 1024 -- a dead tie that it then breaks arbitrarily.  The radio won,
+# and nothing about the station was misconfigured; it simply had no basis to
+# prefer either.  rob: "it should be choosing the wired interface as its
+# preferred route."
+#
+# ⛔ ra_defrtr_metric, NOT accept_ra_defrtr=0.  Setting accept_ra_defrtr=0 on
+# the radio also makes wired win -- by DELETING the Wi-Fi default route, which
+# leaves the station with no path at all the moment the cable is pulled.
+# Raising the radio's metric makes wired win deterministically while the Wi-Fi
+# route stays installed and takes over on its own.  Verified on AI6VN by
+# deleting the wired route: the radio took over and carried traffic.
+# Needs Linux 5.11+; the appliance ships 6.x.
+#
+# ⛔ NOT /etc/sysctl.d.  systemd-sysctl runs BEFORE network-pre.target, when
+# ifupdown has not yet created vmbr0, so a per-interface key for a device that
+# does not exist is skipped with a warning and never retried.  The preference
+# would silently not survive a reboot.  Hence a unit ordered after the network.
+cat > /usr/local/sbin/sigmond-prefer-wired <<'PWEOF'
+#!/bin/bash
+# sigmond-prefer-wired — on a dual-homed host, make the cable the preferred
+# IPv6 default route and leave the radio installed as an automatic fallback.
+set -u
+WIRED_BR="${SIGMOND_PREFER_WIRED_BRIDGE:-vmbr0}"
+SYSNET="${SIGMOND_PREFER_WIRED_SYSNET:-/sys/class/net}"
+PROC6="${SIGMOND_PREFER_WIRED_PROC:-/proc/sys/net/ipv6/conf}"
+say(){ logger -t sigmond-prefer-wired -- "$*"; }
+
+# The radio is whichever interface actually has a wireless node.
+WIFI=""
+for d in "$SYSNET"/*; do
+    [ -e "$d/wireless" ] || continue
+    WIFI=${d##*/}; break
+done
+[ -n "$WIFI" ] || { say "no Wi-Fi interface on this host - nothing to prefer over"; exit 0; }
+
+[ -e "$PROC6/$WIFI/ra_defrtr_metric" ] || {
+    say "ra_defrtr_metric unsupported on $(uname -r) - leaving routes alone"; exit 0; }
+
+# ⛔ ONLY WHEN BOTH ARE REALLY UP.  Most DASI stations run cable-free on
+# purpose; demoting the radio there would strand the station outright.
+_c(){ cat "$SYSNET/$1/carrier" 2>/dev/null; }
+wired_up=$(_c "$WIRED_BR"); wifi_up=$(_c "$WIFI")
+if [ "$wired_up" != 1 ] || [ "$wifi_up" != 1 ]; then
+    say "wired carrier=${wired_up:-none} wifi carrier=${wifi_up:-none} - not both up, leaving routes alone"
+    exit 0
+fi
+
+sysctl -qw "net.ipv6.conf.$WIFI.accept_ra_defrtr=1"      # keep the fallback
+sysctl -qw "net.ipv6.conf.$WIFI.ra_defrtr_metric=2048"   # ...but make it worse
+sysctl -qw "net.ipv6.conf.$WIRED_BR.ra_defrtr_metric=1024"
+
+# The sysctl governs how the NEXT RA is processed, so retire the route the
+# radio already holds and re-solicit; otherwise the old metric persists until
+# the router's lifetime happens to expire.
+ip -6 route del default dev "$WIFI" 2>/dev/null
+rdisc6 -1 "$WIFI"      >/dev/null 2>&1
+rdisc6 -1 "$WIRED_BR"  >/dev/null 2>&1
+sleep 5
+say "preferred uplink is now $(ip -6 route show default | sort -k7 -n | head -1 | sed -n 's/.* dev \([^ ]*\).*/\1/p') (wifi kept as fallback)"
+exit 0
+PWEOF
+chmod +x /usr/local/sbin/sigmond-prefer-wired
+
+cat > /etc/systemd/system/sigmond-prefer-wired.service <<'PWSVCEOF'
+[Unit]
+Description=Prefer the wired uplink for the IPv6 default route (radio kept as fallback)
+After=network-online.target sigmond-netfix.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+TimeoutStartSec=60
+ExecStart=/usr/local/sbin/sigmond-prefer-wired
+
+[Install]
+WantedBy=multi-user.target
+PWSVCEOF
+systemctl enable sigmond-prefer-wired.service 2>/dev/null
 
 # ── split console: keyboard is in the VM, the MONITOR is here ─────────────
 # ⛔ This host has no keyboard and no USB at all -- both controllers are
@@ -3235,10 +3337,16 @@ _rchannels="${RAC_ADMIN:+
      $RAC_USER}"
 case "$RSTATE" in
   on)
+    # ⛔ WHEN IT IS ON AND WORKING, DO NOT EXPLAIN HOW TO SWITCH IT OFF.
+    # rob, 2026-10-15: "Remote access useful, turn off -- forget about turning
+    # it off."  The off-switch line was the single widest row on the panel
+    # (it embeds the VM ssh command, and so a whole second copy of the 39-char
+    # IPv6 literal) in service of something nobody standing at a working
+    # station wants to do.  The OFF states keep their "to turn it on" line --
+    # that one is the way out of a state the operator is actually stuck in.
     RACBLOCK="
  Remote access   ON — RAC ${RACN:-?} on ${RSRV:-<no server>}${RTIER:+  ($RTIER)}
-   status   $RUP/$RDECL channels up${RREG:+ · registrar $RREG}
-   to turn it off, $(_rhow off)${_rchannels}
+   status   $RUP/$RDECL channels up${RREG:+ · registrar $RREG}${_rchannels}
 "
     ;;
   off)
@@ -3434,8 +3542,7 @@ PANEL=$(cat <<PEOF
  The station is the DECODER VM below — this screen is its hypervisor.
  Press Enter here for a hypervisor login; typing does not echo, which is normal.
 ${NETWARN}${BRINGUP}${RXWARN}
- Proxmox host   ssh root@${HOSTIP:-<no-ip-yet>}
-                web UI  https://$(ipurl "${HOSTIP:-<no-ip-yet>}"):8006
+ Proxmox host   ssh root@${HOSTIP:-<no-ip-yet>}   ·   web UI  https://$(ipurl "${HOSTIP:-<no-ip-yet>}"):8006
 
  Decoder VM   ${VMIP:-<starting — this panel refreshes every 5 min>}${VMNOTE}${VMBEHIND}
    from here      ssh sigmond@${VMIP:-<starting>}   (or: sigmond-vm;  also hamsci@)

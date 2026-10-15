@@ -124,12 +124,21 @@ VMLINE="log in to the decoder VM (ssh -p 2222 sigmond@192.168.1.50) and type:"
 HOSTON="type on another computer:  ssh root@192.168.1.50 'sigmond-setup --rac-on'"
 HOSTOFF="type on another computer:  ssh root@192.168.1.50 'sigmond-setup --rac-off'"
 
-echo "── on: the tunnel runs, and the panel says how to turn it off ─────"
+echo "── on: the tunnel runs, and the panel does NOT explain switching it off ─"
+# ⛔ THIS ASSERTION IS INVERTED ON PURPOSE (rob, 2026-10-15: "Remote access
+# useful, turn off -- forget about turning it off").  Until v3.72 the ON block
+# printed a full off-switch command.  It was the widest row on the panel: when
+# the host is paired it embeds the VM ssh command, and therefore a SECOND copy
+# of the 39-character IPv6 literal, all so a reader standing at a working
+# station can learn how to break their own access.  The OFF states keep their
+# "to turn it on" line (asserted further down) -- that one is the way out of a
+# state the operator is actually stuck in.
 d=$(scene on 507 state=on registered=yes tunnel=running channels_up=6 channels_declared=6 changed_at=2026-10-09T18:22:05Z "checked_at=$(at 0)")
 out=$(panel "$d")
 has   "it reads ON with the RAC number and gateway" "$out" "Remote access   ON — RAC 507 on gw2.wsprdaemon.org  (wsprdaemon (secure))"
 has   "it counts the channels the switch counted"   "$out" "status   6/6 channels up"
-has   "it names the command, and where to type it"  "$out" "log in to the decoder VM (ssh -p 2222 sigmond@192.168.1.50) and type:  smd remote off"
+lacks "it does NOT tell a working station how to turn itself off" "$out" "to turn it off"
+lacks "...and so carries no second copy of the host address"      "$out" "smd remote off"
 has   "the admin channels keep their whole command" "$out" "ssh -p 51307 root@gw2.wsprdaemon.org"
 has   "the audience split survives"                 "$out" "ADMINISTRATORS ONLY"
 has   "all four VM channels are listed"             "$out" "magnetometer :50307"
@@ -203,8 +212,11 @@ echo "── the VM's command only where a pairing stands ───────�
 # the VM answering "holds no pairing".  There the panel names the host's own
 # switch, which works on every host.  One line of the wizard's decides:
 # marks/rac-pairing, first word `paired`.
+# ⛔ `u-on` IS DELIBERATELY ABSENT FROM THIS TABLE.  A healthy ON station now
+# prints no switch line at all, so there is no command here to attribute to
+# either the host or the VM.  It gets its own check below instead, which is
+# stronger: NEITHER command may appear, under EVERY pairing state.
 states=(
- "u-on|507|state=on registered=yes tunnel=running channels_up=6 channels_declared=6|to turn it off, |off"
  "u-off|507|state=off registered=yes tunnel=stopped channels_up=0 channels_declared=6 changed_at=2026-10-09T18:22:05Z|==> to turn it on, |on"
  "u-off-never|-|state=off registered=no tunnel=stopped wish_source=units|==> to turn it on, |on"
  "u-off-open|507|state=off registered=yes tunnel=running channels_up=6 channels_declared=6|==> to close it, |off"
@@ -234,6 +246,23 @@ for row in "${states[@]}"; do
     has   "$name, paired: the VM's command"            "$out" "${lead}${VMLINE}  smd remote $word"
     lacks "$name, paired: not the host's own switch"   "$out" "sigmond-setup --rac-"
 done
+# A healthy ON station offers NO off-switch, whatever its pairing state --
+# the one case where pairing genuinely makes no difference, because neither
+# command is printed. (rob 2026-10-15)
+for how in none failed paired; do
+    d=$(scene "u-on-noswitch-$how" 507 state=on registered=yes tunnel=running \
+              channels_up=6 channels_declared=6 "checked_at=$(at 0)")
+    [ "$how" = paired ] || unpaired "$d" "$how"
+    out=$(panel "$d")
+    lacks "ON/$how: no off-switch command at all"   "$out" "to turn it off"
+    lacks "ON/$how: not the VM's smd remote off"    "$out" "smd remote off"
+    lacks "ON/$how: not the host's own switch"      "$out" "sigmond-setup --rac-off"
+    # ...but it must still say it is ON and count the channels, or we have
+    # deleted the block rather than trimmed it.
+    has   "ON/$how: still reports the state"        "$out" "Remote access   ON — RAC 507"
+    has   "ON/$how: still counts the channels"      "$out" "status   6/6 channels up"
+done
+
 # Only the first word `paired` earns the VM's command.
 for text in "" "paired" "pairedX 2026-10-09T18:20:00Z" "  paired 2026-10-09T18:20:00Z" "PAIRED 2026-10-09T18:20:00Z" \
             "not-paired 2026-10-09T18:20:00Z paired once before" $'\npaired 2026-10-09T18:20:00Z'; do
@@ -341,7 +370,10 @@ on_out=$(panel "$d")
 d=$(scene lists-legacy 507); touch "$d/no-switch" "$d/unit-active"
 echo wd-registrar > "$d/marks/rac-registrar"
 legacy_out=$(panel "$d")
-on_tail=$(printf '%s\n' "$on_out" | tail -n +5)         # past: blank, header, status, to-turn-off
+# Both blocks now open with the same three lines -- blank, header, status.
+# The ON block used to carry a fourth (the off-switch command), which is why
+# these offsets differed; it was dropped in v3.73 (rob 2026-10-15).
+on_tail=$(printf '%s\n' "$on_out" | tail -n +4)         # past: blank, header, status
 legacy_tail=$(printf '%s\n' "$legacy_out" | tail -n +4) # past: blank, header, status
 if [ -n "$on_tail" ] && [ "$on_tail" = "$legacy_tail" ]; then ok "the lists and the audience split match v3.70 byte for byte"
 else bad "the lists and the audience split match v3.70 byte for byte" "$(diff <(printf '%s\n' "$legacy_tail") <(printf '%s\n' "$on_tail") | head -5)"; fi

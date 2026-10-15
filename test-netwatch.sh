@@ -54,6 +54,7 @@ cat > "$WORK/bin/ip" <<'IP'
 #!/bin/bash
 case "$*" in
   *"-6 route show default"*) printf '%s\n' "${FAKE_V6ROUTE:-}" ;;
+  *"-4 route show default"*) printf '%s\n' "${FAKE_V4ROUTE:-}" ;;
   *) : ;;
 esac
 IP
@@ -75,8 +76,10 @@ run(){ # run -> stdout: the systemctl calls this tick made
     SIGMOND_NETLIB="$WORK/netlib.sh" SIGMOND_SYSNET="$WORK/sysnet" \
     SIGMOND_NETWATCH_STATE="$WORK/state" SIGMOND_NETWATCH_LOG="$WORK/log" \
     SIGMOND_NETWATCH_COOLDOWN="${CD:-900}" \
+    SIGMOND_IFACES="$WORK/interfaces" \
     FAKE_GW4="${FAKE_GW4:-}" FAKE_PING4="${FAKE_PING4:-0}" \
     FAKE_PING6="${FAKE_PING6:-0}" FAKE_V6ROUTE="${FAKE_V6ROUTE:-}" \
+    FAKE_V4ROUTE="${FAKE_V4ROUTE:-}" \
         bash "$WORK/sigmond-netwatch"
     grep -c 'start .*sigmond-netfix' "$WORK/calls" 2>/dev/null | tr -d ' '; }
 
@@ -152,6 +155,50 @@ reset; nic wlp3s0 1 wireless
 run >/dev/null
 chk "associated Wi-Fi is not advertised as a cable" \
     "$(cat "$WORK/state/cable-available" 2>/dev/null)" ""
+
+echo "── a cable that IS the uplink is not 'UNUSED' ─────────────────────────"
+# ⛔ AI6VN, v3.72, 2026-10-15.  The only gate here was "no IPv4 gateway",
+# which is true of EVERY healthy IPv6-only site.  So the panel announced
+#   ++ enp1s0 has a cable, UNUSED (this host is not on IPv4)
+# and offered a command to adopt it -- while enp1s0 was vmbr0's bridge port
+# and was carrying the host's IPv6 default route at that moment.  Telling an
+# operator to adopt the interface the machine is already using reads as a
+# fault on a station that is fine.
+reset; nic enp1s0 1
+printf 'iface vmbr0 inet static\n    bridge-ports enp1s0\n\n' > "$WORK/interfaces"
+export FAKE_V6ROUTE="default via fe80::1 dev vmbr0 proto ra metric 1024"
+run >/dev/null
+chk "the bridge port carrying the v6 default route is NOT advertised" \
+    "$(cat "$WORK/state/cable-available" 2>/dev/null)" ""
+
+# ⛔ THE NULL.  If the guard simply suppressed everything, the case above
+# would pass for the wrong reason.  A SECOND cable, in a port that is not the
+# uplink, is still a genuine unused uplink and must still be advertised.
+reset; nic enp1s0 1; nic enp2s0 1
+printf 'iface vmbr0 inet static\n    bridge-ports enp1s0\n\n' > "$WORK/interfaces"
+export FAKE_V6ROUTE="default via fe80::1 dev vmbr0 proto ra metric 1024"
+run >/dev/null
+chk "a cable in a port that is NOT the uplink is still advertised" \
+    "$(cat "$WORK/state/cable-available" 2>/dev/null)" "enp2s0"
+
+# And with no default route at all, the original behaviour stands: the cable
+# really is unused, and the panel should say so.
+reset; nic enp1s0 1
+printf 'iface vmbr0 inet static\n    bridge-ports enp1s0\n\n' > "$WORK/interfaces"
+export FAKE_V6ROUTE=""
+run >/dev/null
+chk "with NO default route the cable is advertised as before" \
+    "$(cat "$WORK/state/cable-available" 2>/dev/null)" "enp1s0"
+
+# A non-bridged uplink (the device itself holds the route) is also in use.
+reset; nic enp1s0 1
+: > "$WORK/interfaces"
+export FAKE_V4ROUTE="default via 192.168.1.1 dev enp1s0"
+export FAKE_V6ROUTE=""
+run >/dev/null
+chk "a bare NIC holding the default route is not advertised" \
+    "$(cat "$WORK/state/cable-available" 2>/dev/null)" ""
+unset FAKE_V4ROUTE FAKE_V6ROUTE
 
 echo
 printf '%d passed, %d failed\n' "$PASS" "$FAIL"
