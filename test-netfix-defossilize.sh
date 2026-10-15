@@ -129,5 +129,31 @@ unit | grep -q '^KillMode=process' \
     || bad "netfix lost KillMode=process" \
            "the lease dies ~20 min later and the host silently loses IPv4"
 
+echo "── an IPv6 address is not fossilized ──────────────────────────────"
+# cur_ip() reports IPv6 when that is all the host has. AI6VN's vmbr0 held
+# fd4f:a955:ac3d:1:... from RA — the router refreshes it, so there is nothing
+# for `iface ... inet dhcp` to repair, and dhclient has no server to ask.
+grep -q '\*:\*)' "$TMP/netfix.code" \
+    && ok "the branch skips on an IPv6 address" \
+    || bad "no IPv6 guard" \
+           "an RA address triggers a DHCP conversion with no server to answer"
+
+echo "── and only when vmbr0 actually carries the default route ─────────"
+grep -q '_defoss_rt' "$TMP/netfix.code" \
+    && ok "the branch consults the default route before converting" \
+    || bad "no uplink guard" \
+           "a DASI station runs cable-free on purpose; vmbr0 is often not the uplink"
+# all three guards must sit BEFORE the conversion
+cv=$(grep -n 'converting to DHCP so it cannot fossilize' "$TMP/netfix.code" | head -1 | cut -d: -f1)
+for g in '_defoss_port/carrier' '\*:\*)' '_defoss_rt'; do
+  gl=$(grep -n "$g" "$TMP/netfix.code" | head -1 | cut -d: -f1)
+  if [ -n "$gl" ] && [ -n "$cv" ] && [ "$gl" -lt "$cv" ]; then
+      ok "guard '$g' is at line $gl, before the conversion at $cv"
+  else
+      bad "guard '$g' does not precede the conversion (g=$gl conv=$cv)" \
+          "a guard after the rewrite is no guard"
+  fi
+done
+
 printf '\n%s: %d passed, %d failed\n' "$(basename "$0")" "$pass" "$fail"
 [ "$fail" -eq 0 ]

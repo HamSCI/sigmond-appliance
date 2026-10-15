@@ -372,6 +372,43 @@ case "$IP" in
             exit 0
         fi
 
+        # ⛔ DE-FOSSILIZING IS ABOUT THE INSTALLER'S STATIC *IPv4* FALLBACK.
+        # cur_ip() reports an IPv6 address when that is all the host has (it
+        # learned to, deliberately, so the panel is not blank on a v6-only
+        # site).  But an address from RA/SLAAC is not fossilized: the router
+        # refreshes it, and there is nothing for `iface ... inet dhcp` to fix.
+        # Converting on the strength of one just starts dhclient against a
+        # network that has no DHCP server of either family.
+        case "$IP" in
+            *:*)
+                say "vmbr0 keeps $IP: that is an IPv6 address, which comes from"
+                say "  RA and cannot fossilize. De-fossilizing targets the PVE"
+                say "  installer's static IPv4 fallback, so there is nothing to do."
+                exit 0 ;;
+        esac
+
+        # ⛔ AND ONLY WHEN vmbr0 IS ACTUALLY THE UPLINK.
+        # A DASI station runs cable-free on purpose -- an Ethernet run into the
+        # shack is a conducted-noise path into the HF receiver -- so the uplink
+        # is routinely the Wi-Fi radio while vmbr0 keeps a local address.
+        # Rewriting a bridge that carries no default route, and then waiting for
+        # a lease on it, repairs nothing and costs the whole unit timeout.
+        # AI6VN on v3.71, 2026-10-15: the default route was on wlp3s0 and netfix
+        # spent 5 min on vmbr0 regardless, with the console showing the stock
+        # Proxmox banner the entire time.
+        _defoss_rt=$(ip route show default 2>/dev/null; ip -6 route show default 2>/dev/null)
+        case "$_defoss_rt" in
+            *" dev vmbr0"*) : ;;                      # vmbr0 IS the uplink — proceed
+            "")  say "vmbr0 keeps $IP: no default route at all yet, so nothing"
+                 say "  here can be judged the uplink. Not converting."
+                 exit 0 ;;
+            *)   _defoss_via=$(printf '%s\n' "$_defoss_rt" | sed -n 's/.* dev \([^ ]*\).*/\1/p' | head -1)
+                 say "vmbr0 keeps $IP: the uplink is ${_defoss_via:-another interface},"
+                 say "  not vmbr0, so converting this bridge to DHCP repairs nothing"
+                 say "  and would wait out the timeout. Not converting."
+                 exit 0 ;;
+        esac
+
         say "vmbr0 has $IP but is configured STATIC — converting to DHCP so it cannot fossilize"
         cp -a "$IFACES" "$IFACES.netfix-static-bak"
         sed -i -e '/^iface vmbr0 inet static/,/^[[:space:]]*$/{/^[[:space:]]*address[[:space:]]/d;/^[[:space:]]*gateway[[:space:]]/d;}' \
