@@ -395,6 +395,18 @@ relay status
 grep -q 'UNRESTRICTED rule still live' "$T/out" && ok "a rule of the operator's, to the VM, outside the chain" \
     || bad "a rule of the operator's, to the VM, outside the chain" "$(cat "$T/out")"
 iptables -t nat -D PREROUTING -i vmbr0 -p tcp --dport 9001 -j DNAT --to-destination 10.99.0.2:9001
+for dest in 10.99.0.2 10.99.0.2-10.99.0.3; do
+    iptables -t nat -A PREROUTING -i vmbr0 -p tcp --dport 9002 -j DNAT --to-destination "$dest"
+    relay status
+    grep -q "UNRESTRICTED rule still live: .*--to-destination $dest" "$T/out" && ok "flagged: DNAT to $dest (no port)" \
+        || bad "flagged: DNAT to $dest (no port)" "$(cat "$T/out")"
+    iptables -t nat -D PREROUTING -i vmbr0 -p tcp --dport 9002 -j DNAT --to-destination "$dest"
+done
+# 10.99.0.20 is another address, not the VM's.
+iptables -t nat -A PREROUTING -i vmbr0 -p tcp --dport 9003 -j DNAT --to-destination 10.99.0.20:9003
+relay status
+grep -q 'UNRESTRICTED' "$T/out" && bad "10.99.0.20 is not the VM" "$(cat "$T/out")" || ok "10.99.0.20 is not the VM"
+iptables -t nat -D PREROUTING -i vmbr0 -p tcp --dport 9003 -j DNAT --to-destination 10.99.0.20:9003
 iptables -t nat -A PREROUTING -i vmbr0 -p tcp --dport 9001 -j DNAT --to-destination 192.168.1.77:9001
 relay status
 grep -q 'UNRESTRICTED' "$T/out" && bad "a DNAT to another host is not the relay's business" "$(cat "$T/out")" \

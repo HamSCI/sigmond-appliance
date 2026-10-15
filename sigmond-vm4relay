@@ -10,7 +10,6 @@
 # a public IPv4 address with no NAT in front of it, so did the whole internet,
 # ssh included.
 #
-#
 # Now the DNAT lives in a chain of its own, SIGMOND-VM4 in the nat table.
 # PREROUTING enters it only from the uplink (below).  The chain forwards only
 # these sources:
@@ -414,7 +413,11 @@ cmd_status(){
     # whoever added it.
     loose=$(printf '%s\n' "$all" | awk -v c="$CHAIN" -v vm="$VM_IP" '
         $1 == "-A" && $2 != c && / -j DNAT / {
-            for (i = 1; i < NF; i++) if ($i == "--to-destination" && index($(i + 1), vm ":") == 1) print }')
+            for (i = 1; i < NF; i++) if ($i == "--to-destination") {
+                d = $(i + 1)
+                # vm, vm:port, or a range that starts at vm (vm-x, vm-x:port)
+                if (d == vm || index(d, vm ":") == 1 || index(d, vm "-") == 1) print
+            } }')
     if [ -n "$loose" ]; then
         printf '%s\n' "$loose" | while IFS= read -r l; do say "  UNRESTRICTED rule still live: $l"; done
         say "  fix: sudo $SELF install (it removes the five old rules; any other one is yours to remove)"
