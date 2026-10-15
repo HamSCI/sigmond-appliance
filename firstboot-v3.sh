@@ -2154,7 +2154,8 @@ fi
 # PREROUTING DNAT rules with no interface and no source, so a Tailscale peer
 # of this host, or the internet at a site with a public IPv4 and no NAT,
 # reached the VM, ssh included.  sigmond-vm4relay puts them in a chain entered
-# from the uplink only, for this host's own LAN subnets and RFC 1918; its boot
+# from the uplink only, for RFC 1918 and any prefix an administrator lists in
+# /etc/sigmond/vm4relay-allow.conf; its boot
 # oneshot and 15-minute timer keep the chain in place.  It applies the rules
 # itself and starts no unit synchronously.
 if [ -x /usr/local/sbin/sigmond-vm4relay ]; then

@@ -352,8 +352,10 @@ IPv6 address.  The receiver page shows a waterfall with signals; the station pag
 the callsign, the grid, and the timing and GRAPE pages.  The pages answer only computers
 on the station's own network, over IPv4 and IPv6 alike.  A computer elsewhere on the
 internet, or a VPN peer of the host, gets no answer, even when it can reach the host's
-address.  For IPv4, "own network" means the private ranges (10.x, 172.16-31.x, 192.168.x)
-and the subnet the host itself sits on; `sigmond-vm4relay status` shows the list.
+address.  For IPv4, "own network" means the private ranges (10.x, 172.16-31.x, 192.168.x).
+If your LAN uses public addresses, list its prefix, for example `129.24.8.0/22`, as one line
+in `/etc/sigmond/vm4relay-allow.conf` on the host (owned by root, writable by root only).
+`sigmond-vm4relay status` shows the list and where each entry came from.
 If your site numbers its computers by DHCPv6 (one /128 address each), the host cannot tell
 which network it sits on.  Add your LAN's prefix, for example `2601:db8:1:2::/64`, as one
 line in `/etc/sigmond/vm6proxy-allow.conf` on the host (owned by root, writable by root
