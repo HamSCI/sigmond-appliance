@@ -34,13 +34,21 @@
 # (ip_forward=1) and Proxmox leaves FORWARD at ACCEPT, so a neighbour on the
 # uplink's link (at a public-IPv4 site) or a VPN peer that routes 10.99.0.0/30
 # reached every port of the VM at its own address, no DNAT involved.  So a
-# second chain, SIGMOND-VM4F in the filter table, guards the host-only link.
-# FORWARD's first rule sends everything bound out vmbr1 into it, and it lets
-# through only replies to the VM's own connections (ESTABLISHED, RELATED) and
-# connections the relay translated (ctstate DNAT); those RETURN to FORWARD,
-# so whatever FORWARD did with them before still decides.  The rest is
+# second chain, SIGMOND-VM4F, guards the host-only link.  It lives in the
+# MANGLE table's FORWARD, which the kernel runs before the filter table's: an
+# ACCEPT that Tailscale (ts-forward), Docker or pve-firewall puts at the top
+# of filter FORWARD cannot get past it, and none of them touches mangle.
+# Mangle FORWARD's first rule sends everything bound out vmbr1 into it, and it
+# lets through only replies to the VM's own connections (ESTABLISHED,
+# RELATED) and connections the relay translated (ctstate DNAT); those RETURN,
+# so whatever filter FORWARD did with them before still decides.  The rest is
 # dropped.  The VM's own outbound traffic leaves by vmbr0 or clat, never out
-# vmbr1, so the guard never sees it.  The VM has no IPv6 address to reach.
+# vmbr1, so the guard never sees it.  The VM has no IPv6 address to reach
+# (only link-local, which no router forwards).
+#
+# The guard goes in on its own commit, before anything nat, so a nat fault
+# never holds it back; the boot oneshot runs before pve-guests.service.
+# remove takes the relay away and keeps the guard (and the units that keep it).
 #
 # Uplinks are identified by what the device IS, never by its name: vmbr0
 # always; another device that carries the IPv4 default route only when sysfs
@@ -70,7 +78,8 @@
 #   sigmond-vm4relay install [vm-ip]   units, then refresh
 #   sigmond-vm4relay refresh           rebuild the chain if it changed
 #   sigmond-vm4relay status            what is live, and anything unrestricted
-#   sigmond-vm4relay remove            chain, jumps and units (no IPv4 relay);
+#   sigmond-vm4relay remove            the DNAT chain and its jumps (no IPv4
+#                                      relay); the guard and its units stay;
 #                                      leaves a mark pm-align respects
 set -u
 # The filter generation pm-align demands before it carries or runs this
@@ -248,9 +257,9 @@ wanted_fchain(){   # the guard's rules, as `iptables -S` prints them
 
 # True when the guard stands: its chain holds exactly the wanted rules, and
 # FORWARD's first rule is the one jump into it, with no other copy.
-guard_ok(){   # $1: `iptables -S FORWARD`
+guard_ok(){   # $1: `iptables -t mangle -S FORWARD`
     local fwd="$1"
-    [ "$(iptables -w -S "$FCHAIN" 2>/dev/null | grep '^-A ')" = "$(wanted_fchain)" ] || return 1
+    [ "$(iptables -w -t mangle -S "$FCHAIN" 2>/dev/null | grep '^-A ')" = "$(wanted_fchain)" ] || return 1
     [ "$(printf '%s\n' "$fwd" | grep -m1 '^-A ')" = "$FJUMP" ] || return 1
     [ "$(printf '%s\n' "$fwd" | grep -cE -- "-j $FCHAIN\$")" = 1 ]
 }
@@ -270,16 +279,41 @@ old_rules(){   # reads `iptables -S PREROUTING` on stdin
     done
 }
 
-# One iptables-restore --noflush commit; on refusal nothing changed.
-apply_restore(){
+# One iptables-restore --noflush commit of one table; on refusal that
+# table did not change.
+apply_restore(){   # <payload> <what it holds>
     if ! printf '%s\n' "$1" | iptables-restore -w --noflush 2>&1; then
-        say "sigmond-vm4relay: iptables-restore refused the new rules; nothing changed"
+        say "sigmond-vm4relay: iptables-restore refused $2; they stay as they were"
         return 1
     fi
 }
 
+# The guard (v3.72 #24), on its own commit, before anything nat: a nat
+# fault never holds it back.  Prints only when it changed something.
+guard_refresh(){
+    local fwd payload j
+    fwd=$(iptables -w -t mangle -S FORWARD 2>/dev/null) || { say "sigmond-vm4relay: cannot read the mangle table (run as root)"; return 1; }
+    guard_ok "$fwd" && return 0
+    # Every live jump goes, then one goes in first: FORWARD's order decides.
+    payload="*mangle
+:$FCHAIN - [0:0]
+$(wanted_fchain)"
+    while IFS= read -r j; do
+        [ -n "$j" ] && payload="$payload
+-D ${j#-A }"
+    done < <(printf '%s\n' "$fwd" | grep -E -- "-j $FCHAIN\$")
+    payload="$payload
+-I FORWARD 1 ${FJUMP#-A FORWARD }
+COMMIT"
+    apply_restore "$payload" "the FORWARD guard" || return 1
+    say "IPv4 relay: FORWARD to the VM's link takes only relayed and returning traffic"
+}
+
 refresh_locked(){
-    local pre cur_chain cur_jumps want_chain want_jumps old payload n j ov extra fwd nat_ok=1 guard=1
+    local pre cur_chain cur_jumps want_chain want_jumps old payload n j ov extra rc=0
+    guard_refresh || rc=1
+    # Removed by the operator: the guard stays, nothing is relayed.
+    [ -e "$REMOVED" ] && return $rc
     ov=$(override_lines)
     extra=$(printf '%s\n' "$ov" | awk '$1 == "P" {print $2}')
     note_warnings "$(printf '%s\n' "$ov" | sed -n 's/^W //p')"
@@ -289,34 +323,11 @@ refresh_locked(){
     old=$(printf '%s\n' "$pre" | old_rules)
     want_chain=$(wanted_chain "$extra")
     want_jumps=$(wanted_jumps | sort -u)
-    fwd=$(iptables -w -S FORWARD 2>/dev/null) || { say "sigmond-vm4relay: cannot read the filter table (run as root)"; return 1; }
     # Compared with every copy: a duplicate jump is a difference to fix.
     if [ "$cur_chain" = "$want_chain" ] && [ "$cur_jumps" = "$want_jumps" ] && [ -z "$old" ]; then
-        nat_ok=0
+        return $rc
     fi
-    guard_ok "$fwd" && guard=0
-    [ "$nat_ok" = 0 ] && [ "$guard" = 0 ] && return 0
-    payload=""
-    if [ "$guard" = 1 ]; then
-        # Every live jump goes, then one goes in first: FORWARD's order decides.
-        payload="*filter
-:$FCHAIN - [0:0]
-$(wanted_fchain)"
-        while IFS= read -r j; do
-            [ -n "$j" ] && payload="$payload
--D ${j#-A }"
-        done < <(printf '%s\n' "$fwd" | grep -E -- "-j $FCHAIN\$")
-        payload="$payload
--I FORWARD 1 ${FJUMP#-A FORWARD }
-COMMIT
-"
-    fi
-    if [ "$nat_ok" = 0 ]; then
-        apply_restore "$payload" || return 1
-        say "IPv4 relay: FORWARD to the VM's link takes only relayed and returning traffic"
-        return 0
-    fi
-    payload="$payload*nat
+    payload="*nat
 :$CHAIN - [0:0]
 $want_chain"
     # Each live jump: keep one copy when it is wanted, delete the rest.
@@ -340,11 +351,10 @@ $want_chain"
     done <<<"$old"
     payload="$payload
 COMMIT"
-    apply_restore "$payload" || return 1
-    [ "$guard" = 1 ] && say "IPv4 relay: FORWARD to the VM's link takes only relayed and returning traffic"
+    apply_restore "$payload" "the DNAT rules" || return 1
     say "IPv4 relay: answers $(printf '%s\n' "$want_chain" | awk '{print $4}' | sort -u | tr '\n' ' ')on $(uplinks | tr '\n' ' ')-> $VM_IP"
     [ -n "$old" ] && say "IPv4 relay: removed $(printf '%s\n' "$old" | grep -c .) unrestricted rule(s)"
-    return 0
+    return $rc
 }
 
 # Comment out the five old DNAT post-up lines (DNAT to THIS VM's address) in
@@ -420,6 +430,8 @@ cmd_install(){
 Description=Decoder VM IPv4 relay: the station's own network only
 # After the bridges exist.  Never ordered before network-online.target: that deadlocks.
 After=networking.service
+# The guard stands before any guest starts.
+Before=pve-guests.service
 
 [Service]
 Type=oneshot
@@ -475,7 +487,7 @@ cmd_status(){
                 # vm, vm:port, or a range that starts at vm (vm-x, vm-x:port)
                 if (d == vm || index(d, vm ":") == 1 || index(d, vm "-") == 1) print
             } }')
-    if guard_ok "$(iptables -w -S FORWARD 2>/dev/null)"; then
+    if guard_ok "$(iptables -w -t mangle -S FORWARD 2>/dev/null)"; then
         say "  guarded: FORWARD to vmbr1 takes only relayed and returning traffic ($FCHAIN)"
     else
         say "  UNGUARDED: FORWARD to vmbr1 is not led by the $FCHAIN guard; anyone who routes"
@@ -497,25 +509,17 @@ cmd_status(){
 cmd_remove(){
     take_lock || return 1
     local j
-    systemctl disable --now sigmond-vm4relay.timer >/dev/null 2>&1
-    systemctl disable sigmond-vm4relay.service >/dev/null 2>&1
+    # The units stay: with the mark below, they keep only the FORWARD guard.
+    mkdir -p "$STATEDIR" && printf 'removed %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$REMOVED"
     iptables -w -t nat -S PREROUTING 2>/dev/null | grep -E -- "-j $CHAIN\$" | while IFS= read -r j; do
         # shellcheck disable=SC2086  # the rule's own words
         iptables -w -t nat -D ${j#-A }
     done
     iptables -w -t nat -F "$CHAIN" 2>/dev/null
     iptables -w -t nat -X "$CHAIN" 2>/dev/null
-    iptables -w -S FORWARD 2>/dev/null | grep -E -- "-j $FCHAIN\$" | while IFS= read -r j; do
-        # shellcheck disable=SC2086  # the rule's own words
-        iptables -w -D ${j#-A }
-    done
-    iptables -w -F "$FCHAIN" 2>/dev/null
-    iptables -w -X "$FCHAIN" 2>/dev/null
-    rm -f "$UNITDIR/sigmond-vm4relay.service" "$UNITDIR/sigmond-vm4relay.timer"
-    systemctl daemon-reload
-    mkdir -p "$STATEDIR" && printf 'removed %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$REMOVED"
+    guard_refresh
     say "removed: the decoder VM's ports no longer answer over IPv4 through this host"
-    say "  and FORWARD to its link is no longer guarded (Proxmox's default: ACCEPT)"
+    say "  the FORWARD guard stays, and its units keep it at boot and every 15 min"
     say "  pm-align leaves it removed; to bring it back: sudo $SELF install"
 }
 
