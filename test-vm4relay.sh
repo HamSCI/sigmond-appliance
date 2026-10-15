@@ -138,8 +138,8 @@ write_ifaces(){
 echo "the script"
 [ -f "$HERE/sigmond-vm4relay" ] && bash -n "$HERE/sigmond-vm4relay" 2>/dev/null \
     && ok "sigmond-vm4relay ships and parses" || bad "sigmond-vm4relay ships and parses"
-grep -qx 'VM4RELAY_FILTER=1' "$HERE/sigmond-vm4relay" 2>/dev/null \
-    && ok "it carries the marker VM4RELAY_FILTER=1" || bad "it carries the marker VM4RELAY_FILTER=1"
+grep -qx 'VM4RELAY_FILTER=2' "$HERE/sigmond-vm4relay" 2>/dev/null \
+    && ok "it carries the marker VM4RELAY_FILTER=2" || bad "it carries the marker VM4RELAY_FILTER=2"
 if LC_ALL=C grep -qP '[^\x00-\x7F]' "$HERE/sigmond-vm4relay" 2>/dev/null; then
     bad "it is ASCII"
 else
@@ -450,9 +450,79 @@ for badip in '1.2.3.4; id' '256.1.1.1' 'evil' '010.99.0.2' '10.099.0.2' '0.1.2.3
 done
 
 echo
+echo "the FORWARD guard: nothing reaches the VM's link unless relayed or returning (v3.72 #24)"
+GUARD_RULES='-A SIGMOND-VM4F -m conntrack --ctstate RELATED,ESTABLISHED -j RETURN
+-A SIGMOND-VM4F -m conntrack --ctstate DNAT -j RETURN
+-A SIGMOND-VM4F -j DROP'
+FJ='-A FORWARD -o vmbr1 -j SIGMOND-VM4F'
+reset_filter(){ iptables -F; iptables -X 2>/dev/null; :; }
+fsnap(){ iptables -S FORWARD > "$T/fwd"; iptables -S SIGMOND-VM4F 2>/dev/null | grep '^-A ' > "$T/fchain"; }
+first_fwd(){ grep -m1 '^-A ' "$T/fwd"; }
+reset_nat; reset_filter
+echo "2: vmbr0    inet 192.168.1.50/24 scope global vmbr0\\  x" > "$IP4_ADDRS"
+echo "default via 192.168.1.1 dev vmbr0 proto dhcp src 192.168.1.50 metric 100" > "$IP4_DEFAULT"
+# An operator's own FORWARD rule, there before the relay.
+iptables -A FORWARD -i vmbr0 -o vmbr0 -j ACCEPT
+relay status
+grep -q 'UNGUARDED' "$T/out" && ok "status reads an unguarded host as UNGUARDED" || bad "status reads an unguarded host as UNGUARDED" "$(cat "$T/out")"
+relay install; rc=$?; fsnap
+[ "$rc" = 0 ] && ok "install exits 0" || bad "install exits 0" "rc=$rc $(cat "$T/out")"
+[ "$(cat "$T/fchain")" = "$GUARD_RULES" ] && ok "the guard holds exactly: established, DNAT, drop" \
+    || bad "the guard holds exactly: established, DNAT, drop" "$(cat "$T/fchain")"
+[ "$(first_fwd)" = "$FJ" ] && ok "FORWARD's first rule leads out vmbr1 into the guard" || bad "FORWARD's first rule leads out vmbr1 into the guard" "$(cat "$T/fwd")"
+has "the operator's FORWARD rule stays" "$T/fwd" "-A FORWARD -i vmbr0 -o vmbr0 -j ACCEPT"
+grep -q 'FORWARD to the VM' "$T/out" && ok "install says it guarded FORWARD" || bad "install says it guarded FORWARD" "$(cat "$T/out")"
+relay status
+grep -q '  guarded: FORWARD to vmbr1' "$T/out" && ! grep -q UNGUARDED "$T/out" && ok "status reads it as guarded" \
+    || bad "status reads it as guarded" "$(cat "$T/out")"
+relay refresh
+[ -s "$T/out" ] || [ -s "$RESTORE_LOG" ] && bad "a guarded host refreshes quietly, with no restore" "$(cat "$T/out")" \
+    || ok "a guarded host refreshes quietly, with no restore"
+
+# Something (a firewall reload) puts an ACCEPT above the guard.
+iptables -I FORWARD 1 -o vmbr1 -j ACCEPT
+iptables -t nat -S > "$T/nat.before"
+relay status
+grep -q 'UNGUARDED' "$T/out" && ok "status reads a displaced guard as UNGUARDED" || bad "status reads a displaced guard as UNGUARDED" "$(cat "$T/out")"
+relay refresh; fsnap; iptables -t nat -S > "$T/nat.after"
+[ "$(first_fwd)" = "$FJ" ] && ok "refresh puts the guard first again" || bad "refresh puts the guard first again" "$(cat "$T/fwd")"
+[ "$(grep -c -- '-j SIGMOND-VM4F$' "$T/fwd")" = 1 ] && ok "one jump" || bad "one jump" "$(cat "$T/fwd")"
+has "and keeps the rule it moved past" "$T/fwd" "-A FORWARD -o vmbr1 -j ACCEPT"
+cmp -s "$T/nat.before" "$T/nat.after" && ok "a guard-only repair leaves the nat table alone" \
+    || bad "a guard-only repair leaves the nat table alone" "$(diff "$T/nat.before" "$T/nat.after")"
+grep -q 'answers' "$T/out" && bad "and says nothing about the DNAT" "$(cat "$T/out")" || ok "and says nothing about the DNAT"
+iptables -D FORWARD -o vmbr1 -j ACCEPT
+
+iptables -A FORWARD -o vmbr1 -j SIGMOND-VM4F; iptables -A FORWARD -o vmbr1 -j SIGMOND-VM4F
+relay refresh; fsnap
+[ "$(grep -c -- '-j SIGMOND-VM4F$' "$T/fwd")" = 1 ] && [ "$(first_fwd)" = "$FJ" ] && ok "duplicate guard jumps converge to one, first" \
+    || bad "duplicate guard jumps converge to one, first" "$(cat "$T/fwd")"
+
+# Someone deletes the DROP, or adds an ACCEPT inside the guard.
+iptables -D SIGMOND-VM4F -j DROP; iptables -A SIGMOND-VM4F -j ACCEPT
+relay refresh; fsnap
+[ "$(cat "$T/fchain")" = "$GUARD_RULES" ] && ok "a tampered guard is rebuilt exactly" || bad "a tampered guard is rebuilt exactly" "$(cat "$T/fchain")"
+
+# A jump from another device is not the guard.
+iptables -D FORWARD -o vmbr1 -j SIGMOND-VM4F; iptables -I FORWARD 1 -o vmbr0 -j SIGMOND-VM4F
+relay refresh; fsnap
+[ "$(first_fwd)" = "$FJ" ] && [ "$(grep -c -- '-j SIGMOND-VM4F$' "$T/fwd")" = 1 ] && ok "a jump on the wrong device is replaced by the right one" \
+    || bad "a jump on the wrong device is replaced by the right one" "$(cat "$T/fwd")"
+
+iptables -D FORWARD -o vmbr1 -j SIGMOND-VM4F
+touch "$RESTORE_FAIL"
+relay refresh; rc=$?; fsnap
+rm -f "$RESTORE_FAIL"
+[ "$rc" != 0 ] && grep -q 'nothing changed' "$T/out" && ! grep -q -- '-j SIGMOND-VM4F$' "$T/fwd" \
+    && ok "a refused guard repair exits non-zero and changes nothing" || bad "a refused guard repair exits non-zero and changes nothing" "rc=$rc $(cat "$T/out")"
+relay refresh
+
+echo
 echo "remove"
 relay install; relay remove; snap
 grep -q 'SIGMOND-VM4' "$T/nat" && bad "chain and jumps are gone" "$(cat "$T/nat")" || ok "chain and jumps are gone"
+iptables -S > "$T/filter"
+grep -q 'SIGMOND-VM4F' "$T/filter" && bad "the guard and its jump are gone" "$(cat "$T/filter")" || ok "the guard and its jump are gone"
 [ -e "$T/units/sigmond-vm4relay.service" ] && bad "units are gone" || ok "units are gone"
 
 echo
