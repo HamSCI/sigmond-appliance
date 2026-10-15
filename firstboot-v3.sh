@@ -1344,7 +1344,7 @@ case "${1:-show}" in
             sysctl -q -p "$V6CONF" 2>/dev/null
             echo "IPv6 disabled (persists across reboot; undo: sigmond-netsel ipv6 on)"
             echo "⚠ clatd and the IPv6→VM relays are now inert. VM services stay reachable"
-            echo "  on this host's IPv4 via the vmbr1 DNAT rules."
+            echo "  on this host's IPv4 via sigmond-vm4relay (from the station's own network)."
             show ;;
         on)
             rm -f "$V6CONF"
@@ -1796,6 +1796,15 @@ else
     say "WARNING: sigmond-vm6proxy not on the media — on an IPv6-only site the"
     say "  decoder VM's web ports will be unreachable (DNAT cannot cross families)"
 fi
+# The IPv4 relay: the decoder VM's ports, from the station's own network only
+# (v3.72 #23).  The importer below runs it; copy it now, while the media is here.
+if [ -f /mnt/sig-media/sigmond-vm4relay ]; then
+    install -m 755 /mnt/sig-media/sigmond-vm4relay /usr/local/sbin/sigmond-vm4relay
+    say "IPv4->VM relay installed: /usr/local/sbin/sigmond-vm4relay"
+else
+    say "WARNING: sigmond-vm4relay not on the media -- the decoder VM's pages will"
+    say "  not answer over IPv4 from the LAN"
+fi
 if [ -f /mnt/sig-media/sigmond-wait-nat64 ]; then
     install -m 755 /mnt/sig-media/sigmond-wait-nat64 /usr/local/sbin/sigmond-wait-nat64
     say "clat gate installed: /usr/local/sbin/sigmond-wait-nat64"
@@ -2080,11 +2089,8 @@ iface vmbr1 inet static
     # VM dead before, working immediately after.  Harmless where clat never
     # exists -- iptables accepts an interface name that is not present yet.
     post-up iptables -t nat -C POSTROUTING -s ${MGMT_NET} -o clat -j MASQUERADE 2>/dev/null || iptables -t nat -A POSTROUTING -s ${MGMT_NET} -o clat -j MASQUERADE
-    post-up iptables -t nat -C PREROUTING -p tcp --dport 8000 -j DNAT --to-destination ${MGMT_VM}:8000 2>/dev/null || iptables -t nat -A PREROUTING -p tcp --dport 8000 -j DNAT --to-destination ${MGMT_VM}:8000
-    post-up iptables -t nat -C PREROUTING -p tcp --dport 8081 -j DNAT --to-destination ${MGMT_VM}:8081 2>/dev/null || iptables -t nat -A PREROUTING -p tcp --dport 8081 -j DNAT --to-destination ${MGMT_VM}:8081
-    post-up iptables -t nat -C PREROUTING -p tcp --dport 8082 -j DNAT --to-destination ${MGMT_VM}:8082 2>/dev/null || iptables -t nat -A PREROUTING -p tcp --dport 8082 -j DNAT --to-destination ${MGMT_VM}:8082
-    post-up iptables -t nat -C PREROUTING -p tcp --dport 8765 -j DNAT --to-destination ${MGMT_VM}:8765 2>/dev/null || iptables -t nat -A PREROUTING -p tcp --dport 8765 -j DNAT --to-destination ${MGMT_VM}:8765
-    post-up iptables -t nat -C PREROUTING -p tcp --dport 2222 -j DNAT --to-destination ${MGMT_VM}:22 2>/dev/null || iptables -t nat -A PREROUTING -p tcp --dport 2222 -j DNAT --to-destination ${MGMT_VM}:22
+    # No DNAT here: sigmond-vm4relay forwards the VM's ports, from the
+    # station's own network only, and its boot oneshot puts them back (v3.72 #23).
 NETEOF
   say "import: host-only bridge vmbr1 (${MGMT_PM}/30) added to /etc/network/interfaces"
 fi
@@ -2143,11 +2149,20 @@ fi
 # 8765 is mag-usb's live sample feed: the magnetometer page is on 8082 and its
 # websocket is on 8765, so forwarding one without the other gives a dashboard
 # that loads and then reports "disconnected" for ever (AI6VN 2026-09-30).
-for _pf in 8000:8000 8081:8081 8082:8082 8765:8765 2222:22; do
-  _hp=${_pf%%:*}; _gp=${_pf##*:}
-  iptables -t nat -C PREROUTING -p tcp --dport "$_hp" -j DNAT --to-destination "${MGMT_VM}:${_gp}" 2>/dev/null \
-    || iptables -t nat -A PREROUTING -p tcp --dport "$_hp" -j DNAT --to-destination "${MGMT_VM}:${_gp}"
-done
+#
+# FROM THE STATION'S OWN NETWORK ONLY (v3.72 #23).  The five ports used to be
+# PREROUTING DNAT rules with no interface and no source, so a Tailscale peer
+# of this host, or the internet at a site with a public IPv4 and no NAT,
+# reached the VM, ssh included.  sigmond-vm4relay puts them in a chain entered
+# from the uplink only, for this host's own LAN subnets and RFC 1918; its boot
+# oneshot and 15-minute timer keep the chain in place.  It applies the rules
+# itself and starts no unit synchronously.
+if [ -x /usr/local/sbin/sigmond-vm4relay ]; then
+  SIGMOND_MGMT_VM="$MGMT_VM" /usr/local/sbin/sigmond-vm4relay install 2>&1 \
+    | while IFS= read -r _l; do say "vm4relay: $_l"; done
+else
+  say "import: WARNING - sigmond-vm4relay missing; the VM's pages do not answer over IPv4"
+fi
 # The same ports over IPv6, for EVERY host.  DNAT cannot cross address
 # families, so sigmond-vm6proxy relays them in userspace.  It used to be
 # installed only by the IPv6-only gateway below, which left a dual-stack site

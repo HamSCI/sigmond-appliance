@@ -493,7 +493,8 @@ awk '/^cat > \/usr\/local\/sbin\/sigmond-import.sh <<.IMPEOF.$/{f=1;next} /^IMPE
     "$HERE/firstboot-v3.sh" > "$IMPORTER"
 bash -n "$IMPORTER" 2>/dev/null && ok "the importer parses" || bad "the importer parses"
 # Outside the v6 gateway, right after the IPv4 DNAT loop, with the same address.
-_dnat=$(grep -n 'for _pf in 8000:8000 8081:8081 8082:8082 8765:8765 2222:22' "$IMPORTER" | head -1 | cut -d: -f1)
+# The IPv4 relay (sigmond-vm4relay, v3.72 #23) now writes the DNAT rules.
+_dnat=$(grep -n 'SIGMOND_MGMT_VM="$MGMT_VM" /usr/local/sbin/sigmond-vm4relay install' "$IMPORTER" | head -1 | cut -d: -f1)
 _inst=$(grep -n 'SIGMOND_MGMT_VM="$MGMT_VM" /usr/local/sbin/sigmond-vm6proxy install' "$IMPORTER" | head -1 | cut -d: -f1)
 _gw=$(grep -n '/usr/local/sbin/sigmond-v6-gateway 2>&1' "$IMPORTER" | head -1 | cut -d: -f1)
 if [ -n "$_dnat" ] && [ -n "$_inst" ] && [ -n "$_gw" ] && [ "$_dnat" -lt "$_inst" ] && [ "$_inst" -lt "$_gw" ]; then

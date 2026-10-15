@@ -1,0 +1,316 @@
+#!/bin/bash
+# sigmond-vm4relay -- the decoder VM's IPv4 ports answer the station's own
+# network only (v3.72 #23).
+#
+# The host forwards five ports to the decoder VM on its host-only link
+# (8000 station-web, 8081 ka9q-web, 8082 gmag-webui, 8765 the magnetometer
+# feed, 2222 -> the VM's ssh on 22).  Up to v3.72 that was five PREROUTING
+# DNAT rules with no interface and no source match.  So a Tailscale or
+# ZeroTier peer of the host reached the VM, and at a site where the host holds
+# a public IPv4 address with no NAT in front of it, so did the whole internet,
+# ssh included.
+#
+# Now the DNAT lives in a chain of its own, SIGMOND-VM4 in the nat table.
+# PREROUTING enters it only from the uplink: vmbr0, plus the device that
+# carries the IPv4 default route when that is not vmbr0 (a Wi-Fi station),
+# never vmbr1, lo or a tunnel (wg*, tun*, tailscale*, zt*, frp*, clat*).  The
+# chain forwards only these sources:
+#   - 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16 (RFC 1918), and
+#   - the subnets of this host's OWN IPv4 addresses on the uplink, /16 to /30
+#     (a campus LAN numbered from public space) -- from its addresses, never
+#     from its routes;
+#   - never 100.64.0.0/10 (Tailscale, carrier-grade NAT), never 0.0.0.0/0.
+# Anything else gets no DNAT and falls to the host itself, which listens on
+# none of these ports (its own sshd on 22 is not touched).  FORWARD is not
+# touched either: this changes which packets are translated, nothing more.
+#
+# refresh rebuilds the chain only when the wanted rules differ from the live
+# ones, in ONE iptables-restore --noflush commit (atomic: it applies whole or
+# not at all), and removes the five old unrestricted rules in that same
+# commit.  A oneshot at boot and a 15-minute timer run it, so the chain is
+# back after a reboot and follows a renumbered LAN.  It prints only when it
+# changed something.
+#
+# install also comments out the five old DNAT post-up lines of the vmbr1
+# stanza in /etc/network/interfaces, which would otherwise put the
+# unrestricted rules back at every boot.  It matches those exact lines only,
+# keeps the original as interfaces.pre-vm4relay, and replaces the file in one
+# rename.  install never waits on a unit: it enables the service and the
+# timer and starts only the timer, with --no-block (firstboot's rule).
+#
+#   sigmond-vm4relay install [vm-ip]   units, interfaces lines, then refresh
+#   sigmond-vm4relay refresh           rebuild the chain if it changed
+#   sigmond-vm4relay status
+#   sigmond-vm4relay remove            chain, jumps and units (no IPv4 relay)
+set -u
+# The filter generation pm-align demands before it carries or runs this
+# script.  An older script, or one without this exact line, is never run.
+VM4RELAY_FILTER=1
+VM_IP="${SIGMOND_MGMT_VM:-10.99.0.2}"
+UNITDIR=/etc/systemd/system
+IFACES=/etc/network/interfaces
+LOCK=/run/sigmond-vm4relay.lock
+# The tests point these elsewhere, and only with their flag set.
+if [ "${SIGMOND_VM4RELAY_TEST:-}" = 1 ]; then
+    UNITDIR="${SIGMOND_VM4RELAY_UNITDIR:-$UNITDIR}"
+    IFACES="${SIGMOND_VM4RELAY_INTERFACES:-$IFACES}"
+fi
+# listen:target, as the IPv6 relay (sigmond-vm6proxy) has them.
+PORTS="8000:8000 8081:8081 8082:8082 8765:8765 2222:22"
+CHAIN=SIGMOND-VM4
+FIXED="10.0.0.0/8 172.16.0.0/12 192.168.0.0/16"
+SELF=/usr/local/sbin/sigmond-vm4relay
+
+say(){ printf '%s\n' "$*"; }
+
+valid_ipv4(){
+    local ip="$1" o
+    [[ "$ip" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]] || return 1
+    local IFS=.
+    for o in $ip; do [ $((10#$o)) -le 255 ] || return 1; done
+    return 0
+}
+
+# The uplink devices, one per line: vmbr0 and the IPv4 default-route devices.
+uplinks(){
+    { echo vmbr0
+      ip -4 route show default 2>/dev/null \
+        | awk '{ for (i = 1; i < NF; i++) if ($i == "dev") print $(i + 1) }'
+    } | grep -vE '^(lo|vmbr1|wg.*|tun.*|tailscale.*|zt.*|frp.*|clat.*)$' | sort -u
+}
+
+# The subnets of this host's own IPv4 addresses on the uplink, /16 to /30,
+# outside RFC 1918 (already allowed) and outside 100.64.0.0/10.  Runs as root,
+# so python is isolated: /usr/bin/python3 -I from /.  Without it: none (the
+# RFC 1918 ranges still answer).
+own_subnets(){
+    [ -x /usr/bin/python3 ] || return 0
+    # shellcheck disable=SC2046  # one argument per device
+    ( cd / && ip -4 -o addr show scope global 2>/dev/null | /usr/bin/python3 -I -c '
+import ipaddress, sys
+UPLINKS = set(sys.argv[1:])
+NEVER = [ipaddress.ip_network(n) for n in
+         ("100.64.0.0/10", "0.0.0.0/8", "127.0.0.0/8", "169.254.0.0/16", "224.0.0.0/4", "240.0.0.0/4")]
+FIXED = [ipaddress.ip_network(n) for n in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16")]
+out = set()
+for line in sys.stdin:
+    f = line.split()
+    if "inet" not in f or len(f) < 4 or f[1].split("@")[0] not in UPLINKS:
+        continue
+    try:
+        net = ipaddress.IPv4Interface(f[f.index("inet") + 1]).network
+    except ValueError:
+        continue
+    if not 16 <= net.prefixlen <= 30:
+        continue
+    if any(net.overlaps(n) for n in NEVER) or any(net.subnet_of(n) for n in FIXED):
+        continue
+    out.add(net)
+for net in sorted(out):
+    print(net)
+' $(uplinks) )
+}
+
+wanted_chain(){   # the chain's rules, as `iptables -S` prints them
+    local src pair
+    for src in $FIXED $(own_subnets); do
+        for pair in $PORTS; do
+            printf -- '-A %s -s %s -p tcp -m tcp --dport %s -j DNAT --to-destination %s:%s\n' \
+                "$CHAIN" "$src" "${pair%%:*}" "$VM_IP" "${pair##*:}"
+        done
+    done
+}
+
+wanted_jumps(){ local d; for d in $(uplinks); do printf -- '-A PREROUTING -i %s -j %s\n' "$d" "$CHAIN"; done; }
+
+# The rules firstboot used to write: one of the five ports, no interface, no
+# source, DNAT to any VM address on the matching port.  Only these exact rules.
+old_rules(){   # reads `iptables -t nat -S PREROUTING` on stdin
+    local line pair re
+    while IFS= read -r line; do
+        for pair in $PORTS; do
+            re="^-A PREROUTING -p tcp -m tcp --dport ${pair%%:*} -j DNAT --to-destination [0-9]{1,3}\\.[0-9]{1,3}\\.[0-9]{1,3}\\.[0-9]{1,3}:${pair##*:}\$"
+            [[ "$line" =~ $re ]] && { printf '%s\n' "$line"; break; }
+        done
+    done
+}
+
+cmd_refresh(){
+    exec 9>"$LOCK" && flock -w 30 9 || { say "sigmond-vm4relay: another run holds $LOCK"; return 1; }
+    local pre cur_chain cur_jumps want_chain want_jumps old payload j
+    pre=$(iptables -t nat -S PREROUTING 2>/dev/null) || { say "sigmond-vm4relay: cannot read the nat table (run as root)"; return 1; }
+    cur_chain=$(iptables -t nat -S "$CHAIN" 2>/dev/null | grep '^-A ')
+    cur_jumps=$(printf '%s\n' "$pre" | grep -E -- "-j $CHAIN\$" | sort)
+    old=$(printf '%s\n' "$pre" | old_rules)
+    want_chain=$(wanted_chain)
+    want_jumps=$(wanted_jumps | sort)
+    if [ "$cur_chain" = "$want_chain" ] && [ "$cur_jumps" = "$want_jumps" ] && [ -z "$old" ]; then
+        return 0
+    fi
+    payload="*nat
+:$CHAIN - [0:0]
+$want_chain"
+    while IFS= read -r j; do
+        [ -n "$j" ] || continue
+        printf '%s\n' "$want_jumps" | grep -qxF -- "$j" || payload="$payload
+-D ${j#-A }"
+    done <<<"$cur_jumps"
+    while IFS= read -r j; do
+        [ -n "$j" ] || continue
+        printf '%s\n' "$cur_jumps" | grep -qxF -- "$j" || payload="$payload
+-I PREROUTING 1 ${j#-A PREROUTING }"
+    done <<<"$want_jumps"
+    while IFS= read -r j; do
+        [ -n "$j" ] && payload="$payload
+-D ${j#-A }"
+    done <<<"$old"
+    payload="$payload
+COMMIT"
+    if ! printf '%s\n' "$payload" | iptables-restore --noflush 2>&1; then
+        say "sigmond-vm4relay: iptables-restore refused the new rules; nothing changed"
+        return 1
+    fi
+    say "IPv4 relay: answers $(printf '%s\n' "$want_chain" | awk '{print $4}' | sort -u | tr '\n' ' ')on $(uplinks | tr '\n' ' ')-> $VM_IP"
+    [ -n "$old" ] && say "IPv4 relay: removed $(printf '%s\n' "$old" | grep -c .) unrestricted rule(s)"
+    return 0
+}
+
+# Comment out the five old DNAT post-up lines in the interfaces file, so a
+# reboot does not put the unrestricted rules back.  Exact lines only; the
+# original is kept once as <file>.pre-vm4relay; one atomic rename.
+neutralize_interfaces(){
+    [ -f "$IFACES" ] || return 0
+    [ -x /usr/bin/python3 ] || { say "WARNING: no /usr/bin/python3; $IFACES left as it is"; return 0; }
+    ( cd / && /usr/bin/python3 -I -c '
+import os, re, sys
+path, pairs = sys.argv[1], {tuple(p.split(":")) for p in sys.argv[2].split()}
+if os.path.islink(path):
+    print(f"WARNING: {path} is a symlink; left as it is"); sys.exit(0)
+PAT = re.compile(r"^(\s*)(post-up iptables -t nat -C PREROUTING -p tcp --dport (\d+) -j DNAT "
+                 r"--to-destination (\d{1,3}(?:\.\d{1,3}){3}):(\d+) 2>/dev/null \|\| "
+                 r"iptables -t nat -A PREROUTING -p tcp --dport \3 -j DNAT --to-destination \4:\5)\s*$")
+with open(path, "rb") as fh:
+    raw = fh.read()
+lines = raw.decode("utf-8", "surrogateescape").splitlines(keepends=True)
+out, n = [], 0
+for line in lines:
+    body = line.rstrip("\r\n")
+    m = PAT.match(body)
+    if m and (m.group(3), m.group(5)) in pairs:
+        out.append(f"{m.group(1)}# disabled by sigmond-vm4relay (v3.72 #23): {m.group(2)}" + line[len(body):])
+        n += 1
+    else:
+        out.append(line)
+if n == 0:
+    sys.exit(0)
+new = "".join(out).encode("utf-8", "surrogateescape")
+backup = path + ".pre-vm4relay"
+st = os.stat(path)
+if not os.path.exists(backup):
+    with open(backup, "wb") as fh:
+        fh.write(raw)
+    os.chmod(backup, st.st_mode & 0o7777)
+tmp = path + ".vm4relay-new"
+with open(tmp, "wb") as fh:
+    fh.write(new)
+    fh.flush()
+    os.fsync(fh.fileno())
+os.chmod(tmp, st.st_mode & 0o7777)
+os.chown(tmp, st.st_uid, st.st_gid)
+os.replace(tmp, path)
+print(f"{path}: commented out {n} unrestricted DNAT post-up line(s); original kept as {backup}")
+' "$IFACES" "$PORTS" )
+}
+
+put_unit(){   # write stdin to $1 only when the bytes differ
+    local dest="$1" tmp="$1.vm4new"
+    { cat > "$tmp"; } 2>/dev/null || { rm -f "$tmp"; say "cannot write $dest"; return 1; }
+    if [ -f "$dest" ] && cmp -s "$tmp" "$dest"; then rm -f "$tmp"; return 0; fi
+    mv -f "$tmp" "$dest" || { rm -f "$tmp"; say "cannot write $dest"; return 1; }
+}
+
+cmd_install(){
+    put_unit "$UNITDIR/sigmond-vm4relay.service" <<EOF || return 1
+[Unit]
+Description=Decoder VM IPv4 relay: the station's own network only
+# After the bridges exist.  Never ordered before network-online.target: that deadlocks.
+After=networking.service
+
+[Service]
+Type=oneshot
+Environment=SIGMOND_MGMT_VM=${VM_IP}
+ExecStart=${SELF} refresh
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    put_unit "$UNITDIR/sigmond-vm4relay.timer" <<EOF || return 1
+[Unit]
+Description=Follow this host's LAN subnets into the decoder VM IPv4 relay
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=15min
+
+[Install]
+WantedBy=timers.target
+EOF
+    local rc=0
+    cmd_refresh || rc=1
+    # Only once the chain stands: a host whose chain cannot be built keeps
+    # the lines it has.
+    [ "$rc" = 0 ] && neutralize_interfaces
+    systemctl daemon-reload
+    systemctl enable sigmond-vm4relay.service >/dev/null 2>&1
+    systemctl enable sigmond-vm4relay.timer >/dev/null 2>&1
+    systemctl start --no-block sigmond-vm4relay.timer >/dev/null 2>&1
+    return $rc
+}
+
+cmd_status(){
+    local pre old n
+    pre=$(iptables -t nat -S PREROUTING 2>/dev/null) || { say "cannot read the nat table (run as root)"; return 1; }
+    say "IPv4 relay to $VM_IP, entered from: $(printf '%s\n' "$pre" | grep -E -- "-j $CHAIN\$" | awk '{print $4}' | tr '\n' ' ')"
+    say "  wanted uplinks: $(uplinks | tr '\n' ' ')"
+    say "  sources answered: $(iptables -t nat -S "$CHAIN" 2>/dev/null | awk '$1 == "-A" {print $4}' | sort -u | tr '\n' ' ')"
+    old=$(printf '%s\n' "$pre" | old_rules)
+    if [ -n "$old" ]; then
+        n=$(printf '%s\n' "$old" | grep -c .)
+        say "  UNRESTRICTED: $n old PREROUTING DNAT rule(s) forward to the VM from anywhere"
+        say "  fix: sudo $SELF install"
+    else
+        say "  restricted: no unrestricted PREROUTING DNAT rule for these ports"
+    fi
+    if grep -qE '^[[:space:]]*post-up iptables -t nat -C PREROUTING -p tcp --dport (8000|8081|8082|8765|2222) ' "$IFACES" 2>/dev/null; then
+        say "  WARNING: $IFACES still has DNAT post-up lines; a reboot brings the old rules back until the next refresh"
+    fi
+}
+
+cmd_remove(){
+    local j
+    systemctl disable --now sigmond-vm4relay.timer >/dev/null 2>&1
+    systemctl disable sigmond-vm4relay.service >/dev/null 2>&1
+    iptables -t nat -S PREROUTING 2>/dev/null | grep -E -- "-j $CHAIN\$" | while IFS= read -r j; do
+        # shellcheck disable=SC2086  # the rule's own words
+        iptables -t nat -D ${j#-A }
+    done
+    iptables -t nat -F "$CHAIN" 2>/dev/null
+    iptables -t nat -X "$CHAIN" 2>/dev/null
+    rm -f "$UNITDIR/sigmond-vm4relay.service" "$UNITDIR/sigmond-vm4relay.timer"
+    systemctl daemon-reload
+    say "removed: the decoder VM's ports no longer answer over IPv4 through this host"
+}
+
+CMD="${1:-status}"; [ $# -gt 0 ] && shift
+[ "$CMD" = install ] && [ $# -gt 0 ] && VM_IP="$1"
+if ! valid_ipv4 "$VM_IP"; then
+    say "sigmond-vm4relay: not an IPv4 address: $(printf '%s' "$VM_IP" | LC_ALL=C tr -c ' -~' '?')"
+    exit 2
+fi
+case "$CMD" in
+    install) cmd_install ;;
+    refresh) cmd_refresh ;;
+    status)  cmd_status ;;
+    remove)  cmd_remove ;;
+    *) say "usage: sigmond-vm4relay {install [vm-ip] | refresh | status | remove}"; exit 2 ;;
+esac

@@ -523,10 +523,15 @@ $SSHN "sysctl -n net.ipv4.ip_forward | grep -q 1" \
   && say "host routes for the VM ✓" || { say "FATAL: ip_forward off — the VM has no route out"; exit 1; }
 $SSHN "iptables -t nat -S POSTROUTING | grep -q '10.99.0.0/30.*MASQUERADE'" \
   && say "host NATs for the VM ✓" || { say "FATAL: no MASQUERADE for 10.99.0.0/30"; $SSHN "iptables -t nat -S"; exit 1; }
+# v3.72 #23: the DNAT lives in SIGMOND-VM4, entered from vmbr0 only.
+$SSHN "iptables -t nat -S PREROUTING | grep -qx -- '-A PREROUTING -i vmbr0 -j SIGMOND-VM4'" \
+  || { say "FATAL: PREROUTING does not enter SIGMOND-VM4 from vmbr0"; $SSHN "iptables -t nat -S"; exit 1; }
 for _p in 8000 8081 8082 2222; do
-  $SSHN "iptables -t nat -S PREROUTING | grep -q 'dport $_p .*DNAT'" \
-    || { say "FATAL: port $_p not forwarded to the VM — an operator-facing service vanished from the LAN"; $SSHN "iptables -t nat -S PREROUTING"; exit 1; }
+  $SSHN "iptables -t nat -S SIGMOND-VM4 | grep -q -- '-s 192.168.0.0/16 .*dport $_p .*DNAT'" \
+    || { say "FATAL: port $_p not forwarded to the VM -- an operator-facing service vanished from the LAN"; $SSHN "iptables -t nat -S"; exit 1; }
 done
+$SSHN "iptables -t nat -S PREROUTING | grep -q 'dport .*-j DNAT --to-destination 10.99.0.2'" \
+  && { say "FATAL: an unrestricted PREROUTING DNAT rule to the VM remains"; exit 1; }
 say "operator ports 8000/8081/8082/2222 forwarded from the host ✓"
 # Reachability last, and at LAYER 3 -- the config can be perfect and the link
 # still dead.  ⚠ Not TCP 22: at this point the wizard has not run, so the

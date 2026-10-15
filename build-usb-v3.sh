@@ -177,7 +177,7 @@ say "wizard sourced from sigmond $_wiz_head ($(wc -l < sigmond-wizard.sh) lines)
 # nothing comparing it to the tag (v3.68 pre-build review, 2026-10-05).
 for _f in firstboot-v3.sh QUICKSTART.txt \
           sigmond-site-timing sigmond-operator.sh sigmond-location-check \
-          sigmond-net-probe sigmond-wifi sigmond-wait-nat64 sigmond-vm6proxy; do
+          sigmond-net-probe sigmond-wifi sigmond-wait-nat64 sigmond-vm6proxy sigmond-vm4relay; do
     [ -f "$REPO/$_f" ] || { say "FATAL: $_f missing from $REPO"; exit 1; }
     if [ -e "$_f" ] && ! cmp -s "$REPO/$_f" "$_f"; then
         say "rig copy of $_f differs from the checkout -- taking the checkout's"
@@ -399,6 +399,7 @@ BUILT_UTC="$(date -u -Iseconds)"
     # The IPv6 relay pm-align carries to hosts in the field (v3.72 #15).  It
     # fetches the file at appliance_commit and checks it against this line.
     echo "vm6proxy_sha256: $(sha256sum sigmond-vm6proxy | cut -d" " -f1)"
+    echo "vm4relay_sha256: $(sha256sum sigmond-vm4relay | cut -d" " -f1)"
     echo "built_utc: $BUILT_UTC"
     # Explained here, not just in this build script's comments, because a
     # field engineer reads THIS file, not build-usb-v3.sh. Sits above the
@@ -463,6 +464,8 @@ WSEED=""
 # the host's own sshd answers fine.  Measured on AI6VN-PM v3.59, 2026-09-30:
 # station-web and ka9q-web unreachable, `ip6tables -t nat -S PREROUTING` empty.
 [ -f sigmond-vm6proxy ] && cp sigmond-vm6proxy /tmp/sigpay.$$/
+# The IPv4 relay: the VM's ports from the station's own network only (v3.72 #23).
+[ -f sigmond-vm4relay ] && cp sigmond-vm4relay /tmp/sigpay.$$/
 # Offline .deb payload.  A greenfield IPv6-only install cannot use apt: reaching
 # the IPv4 mirrors needs the CLAT, the CLAT is clatd, and installing clatd needs
 # apt.  A host with no Ethernet has the same problem with wpasupplicant.  So the
@@ -602,6 +605,7 @@ MANIFEST="${IMG%.img}.manifest.txt"
     # The IPv6 relay pm-align carries to hosts in the field (v3.72 #15).  It
     # fetches the file at appliance_commit and checks it against this line.
     echo "vm6proxy_sha256: $(sha256sum sigmond-vm6proxy | cut -d" " -f1)"
+    echo "vm4relay_sha256: $(sha256sum sigmond-vm4relay | cut -d" " -f1)"
     echo "built_utc: $BUILT_UTC"
     echo "image_sha256: $(cut -d' ' -f1 < "${IMG%.img}.sha256")"
     echo
