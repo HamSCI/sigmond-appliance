@@ -343,6 +343,35 @@ case "$IP" in
         # when netfix took over was a regression the nested test caught
         # ("FATAL: vmbr0 not on DHCP (static-fossilization bug)").
         grep -q '^iface vmbr0 inet static' "$IFACES" 2>/dev/null || exit 0
+
+        # ⛔ A BRIDGE WITH NO CARRIER CANNOT GET A LEASE.  De-fossilizing means
+        # rewriting vmbr0 to DHCP and waiting for one; if the bridge's port has
+        # no cable in it, nothing will ever answer and the wait is the whole
+        # unit timeout.  AI6VN on v3.71, 2026-10-15: uplink was Wi-Fi
+        # (wlp3s0 held the default route, up in 4 s), vmbr0's port enp1s0 was
+        # unplugged, and netfix converted the bridge anyway and sat on dhclient
+        # for 5 min 0.1 s before systemd killed it -- leaving three orphaned
+        # dhclients hammering a dead port.  Because netfix is ordered before
+        # the rest of boot, the console showed the stock Proxmox banner, with
+        # the hypervisor's address and an unusable login prompt, that whole
+        # time.  rob: "it looks like it's hung ... users aren't gonna tolerate
+        # that, that system looks like it was dead."
+        #
+        # This is the same rule netfix already applies above -- an address on a
+        # dead bridge is not an uplink -- read in the other direction: a dead
+        # bridge is not somewhere to go looking for one.  Keeping a static
+        # address we cannot replace beats trading it for no address at all,
+        # which is exactly what the restore-on-failure branch below concludes
+        # 60 s later anyway.
+        _defoss_port=$(awk '/^iface vmbr0/,/^$/{if($1=="bridge-ports")print $2}' "$IFACES" 2>/dev/null)
+        if [ -n "$_defoss_port" ] && [ "$_defoss_port" != none ] \
+           && [ "$(cat "/sys/class/net/$_defoss_port/carrier" 2>/dev/null)" != 1 ]; then
+            say "vmbr0 keeps $IP: its port $_defoss_port has NO CARRIER, so no DHCP"
+            say "  server can answer. Not converting — plug a cable in and reboot"
+            say "  to de-fossilize, or ignore this if the uplink is Wi-Fi."
+            exit 0
+        fi
+
         say "vmbr0 has $IP but is configured STATIC — converting to DHCP so it cannot fossilize"
         cp -a "$IFACES" "$IFACES.netfix-static-bak"
         sed -i -e '/^iface vmbr0 inet static/,/^[[:space:]]*$/{/^[[:space:]]*address[[:space:]]/d;/^[[:space:]]*gateway[[:space:]]/d;}' \
@@ -1039,7 +1068,19 @@ KillMode=process
 # Never fail the boot over it: a host that will not finish booting is worse
 # than one on the wrong address, and this runs again next boot.
 SuccessExitStatus=0 1
-TimeoutStartSec=5min
+# ⛔ 90s, NOT 5min.  This unit is ordered before the rest of boot, so its start
+# timeout is the longest the console can show the stock Proxmox banner — the
+# hypervisor's own address and a login prompt that cannot be used, because both
+# USB controllers belong to the decoder VM.  AI6VN on v3.71, 2026-10-15, spent
+# the FULL 5 min here waiting for a DHCP lease on a bridge with no cable in it,
+# and the operator watched an apparently dead machine.  rob: "users aren't
+# gonna tolerate that, that system looks like it was dead."  Repair that has
+# not worked in 90 s is not going to; let boot continue and leave the evidence.
+#
+# ⚠ This is the ONLY TimeoutStartSec in this unit, deliberately.  A second one
+# was briefly added above and systemd silently took the LAST assignment, so the
+# fix was a no-op until mutation testing caught it.  Keep it to one.
+TimeoutStartSec=90
 [Install]
 WantedBy=multi-user.target
 NFSVCEOF
@@ -2563,11 +2604,22 @@ cat > /usr/local/sbin/sigmond-issue <<'ISSEOF'
 # second concurrent run has nothing to contribute: take the lock or leave.
 # The fd stays open for the life of the process; the kernel drops the lock
 # when it exits, including when it is killed.
-exec 9>/run/sigmond-issue.lock 2>/dev/null
-flock -n 9 2>/dev/null || {
-    logger -t sigmond-issue "another refresh is already running — skipping this one" 2>/dev/null
-    exit 0
-}
+# ⛔ "CANNOT LOCK" IS NOT "SOMEONE ELSE IS RUNNING".  The first version was
+# `exec 9>...; flock -n 9 || exit 0`, which conflates them: if the lock file
+# cannot be OPENED at all — read-only /run, a full filesystem, a changed path —
+# fd 9 never exists, flock fails, and the panel exits 0 announcing a refresh
+# that is not happening.  The screen then keeps whatever it had, forever, with
+# no error anywhere.  That is the same shape as every other bug in this file:
+# a failure wearing the costume of a benign condition.  Deduplication is worth
+# having; it is not worth being the reason the console goes dark.
+if exec 9>/run/sigmond-issue.lock 2>/dev/null; then
+    flock -n 9 2>/dev/null || {
+        logger -t sigmond-issue "another refresh is already running — skipping this one" 2>/dev/null
+        exit 0
+    }
+else
+    logger -t sigmond-issue "cannot open /run/sigmond-issue.lock — refreshing WITHOUT deduplication" 2>/dev/null
+fi
 
 . /usr/local/lib/sigmond-net.sh 2>/dev/null || {
     # Never leave the panel blank: a console with no address on it is how an
@@ -2643,6 +2695,61 @@ qga_note_reset(){
     mkdir -p "$(dirname "$QGA_NOTE")" 2>/dev/null
     printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$1" 2>/dev/null >"$QGA_NOTE"
 }
+
+# ⛔ PAINT SOMETHING *BEFORE* THE GUEST-AGENT LOOP, OR THE OPERATOR SEES NOTHING.
+# getty paints /etc/issue ONCE, early in boot, before this script runs, and the
+# console keyboard is dead so no keypress can ever force a redraw.  Everything
+# the operator sees therefore comes from our own paint onto VT1 -- and that
+# paint used to sit BEHIND the VMIP loop below, which retries the guest agent
+# six times at `timeout 10` + `sleep 10`.  So for up to ~2 minutes after every
+# power-up the screen held the STOCK Proxmox banner: the hypervisor's own
+# address rather than the station's, and a `login:` prompt that cannot be used
+# because both USB controllers are passed through to the decoder VM.
+#
+# rob, on KPH's first v3.71 boot: "it sits there at the login prompt for
+# minutes so a user could rightly wonder what's wrong ... it looks like it's
+# hung".  It was not hung; it was waiting, silently, on a screen saying the
+# wrong thing.  Say so instead.
+_paint_vt1(){
+    # Never over the wizard/finalizer transcript, a live split-console session,
+    # or a real tty1 login.  One copy of this rule: the final paint calls the
+    # same function, so the two cannot drift apart.
+    [ -f /etc/sigmond-appliance/.finalized ] || return 0
+    systemctl is-active --quiet sigmond-wizard.service 2>/dev/null && return 0
+    systemctl is-active --quiet sigmond-finalize.service 2>/dev/null && return 0
+    _live_console_session && return 0
+    who 2>/dev/null | grep -qw tty1 && return 0
+    { printf '\033[H\033[2J'; printf '%s\n' "$1"; } > /dev/tty1 2>/dev/null
+}
+
+
+_STARTING=$(cat <<SEOF
+════ Sigmond appliance ════ starting ════════════════════════════════════════
+
+  This machine is the Proxmox HYPERVISOR.  The radio station runs inside the
+  decoder VM, and its address is the one you want.  It is not up yet.
+
+    this host (hypervisor) : ${HOSTIP:-no address yet}
+    decoder VM             : starting — its address appears here when the
+                             guest agent answers, up to ~2 min after power-up
+
+  ⚠ THERE IS NO KEYBOARD ON THIS HOST.  Both USB controllers are passed
+    through to the decoder VM, so the login prompt above cannot be used and
+    nothing you type here will appear.
+
+  This screen refreshes BY ITSELF.  Nothing is hung — it is waiting for the
+  VM.  When the station is up this panel is replaced by the full one, with
+  the VM address and every way in.
+
+════ end Sigmond panel ════  $VERSION ${CONF:+· station ${CONF%% *} }════
+SEOF
+)
+_paint_vt1 "$_STARTING"
+for f in /etc/issue /etc/motd; do
+    sed -i '/^════ Sigmond appliance /,/^════ end Sigmond panel/d' "$f" 2>/dev/null
+    printf '\n%s\n' "$_STARTING" >> "$f"
+done
+
 VMIP=""; VMNOTE=""
 for i in 1 2 3 4 5 6; do
   # Print the VM address THIS HOST can actually reach.  Taking whichever
@@ -3301,13 +3408,7 @@ _live_console_session(){
 # sigmond-console-paint, which holds this flag for its duration.  Without the
 # check the panel would overwrite the operator's shell every refresh -- and
 # they cannot see the VM side to know why their screen keeps clearing.
-if [ -f /etc/sigmond-appliance/.finalized ] \
-   && ! systemctl is-active --quiet sigmond-wizard.service 2>/dev/null \
-   && ! systemctl is-active --quiet sigmond-finalize.service 2>/dev/null \
-   && ! _live_console_session \
-   && ! who 2>/dev/null | grep -qw tty1; then
-    { printf '\033[H\033[2J'; printf '%s\n' "$PANEL"; } > /dev/tty1 2>/dev/null
-fi
+_paint_vt1 "$PANEL"
 exit 0
 ISSEOF
 chmod +x /usr/local/sbin/sigmond-issue

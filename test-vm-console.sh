@@ -71,8 +71,12 @@ chk "one session at a time (bytes would interleave)" \
 # a flag nobody sets -- so assert both, not a total.
 chk "the paint script holds the session flag" \
     "$(grep -c 'FLAG=/run/sigmond/console-session' "$SRC")" "1"
+# The guard moved into _paint_vt1 (2026-10-15) so BOTH the boot-time
+# "starting" paint and the final panel honour it from one copy. Match the
+# call in either spelling rather than pinning the old `! _live_console_session`
+# form, but still require it to be exactly one -- two copies would drift.
 chk "and the panel refuses to repaint over it" \
-    "$(grep -c '! _live_console_session' "$SRC")" "1"
+    "$(grep -cE '(! )?_live_console_session( && return 0)?$' "$SRC")" "1"
 # ⛔ PRESENCE IS NOT LIVENESS.  The first version checked only that the flag
 # FILE existed, and a trap does not run on SIGKILL or when socat reaps the
 # child. Measured on AI6VN-PM 2026-10-01: the flag was held with no paint

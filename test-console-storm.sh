@@ -50,7 +50,11 @@ code "$TMP/paint" > "$TMP/paint.code"
 
 echo "── 1. the pile-up: sigmond-issue must refuse to run twice ─────────"
 # Behavioural: run the real lock idiom concurrently and count survivors.
-sed -n '/^exec 9>/,/^}/p' "$TMP/issue" > "$TMP/lock.sh" 2>/dev/null
+# `exec 9>` is now wrapped in an `if`, because "cannot OPEN the lock" must not
+# be read as "someone else holds it" (that silently stopped the panel painting
+# at all). Match either shape.
+sed -n '/exec 9>\/run\/sigmond-issue.lock/,/^fi$/p' "$TMP/issue" > "$TMP/lock.sh" 2>/dev/null
+[ -s "$TMP/lock.sh" ] || sed -n '/^exec 9>/,/^}/p' "$TMP/issue" > "$TMP/lock.sh" 2>/dev/null
 if [ -s "$TMP/lock.sh" ]; then
     cat > "$TMP/holder.sh" <<EOF
 #!/bin/bash
