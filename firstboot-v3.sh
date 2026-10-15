@@ -146,8 +146,16 @@ cat > /usr/local/sbin/sigmond-netfix <<'NETFIXEOF'
 # heals the machine by itself.
 set -u
 LOG=/var/log/sigmond-firstboot.log
-say(){ local m="[netfix $(date '+%T')] $*"; echo "$m" >>"$LOG" 2>/dev/null
-       echo "$m" >/dev/console 2>/dev/null; echo "$m"; }
+# ⛔ THE CONSOLE IS NOT THE LOG.  Every say() used to go to /dev/console, so a
+# routine repair printed a wall of plumbing at the one screen an operator is
+# watching during boot.  rob, AI6VN v3.72 first boot: "there's three netfix
+# lines ... the only one that's useful is to see that the Wi-Fi link is live
+# and what the address is."  Everything still goes to the LOG; only lines that
+# an operator standing at the screen can act on go to the console, via
+# say_console().  Keep that distinction when adding messages: if the reader
+# cannot do anything with it, it is a log line.
+say(){ local m="[netfix $(date '+%T')] $*"; echo "$m" >>"$LOG" 2>/dev/null; echo "$m"; }
+say_console(){ say "$*"; echo "[netfix] $*" >/dev/console 2>/dev/null; }
 
 IFACES=/etc/network/interfaces
 FALLBACK_NET='192\.168\.100\.'
@@ -302,7 +310,14 @@ if [ -z "$WIFI_UP" ] && [ -s /var/lib/sigmond/wifi-ssid ] \
     timeout "${SIGMOND_WIFI_BACKSTOP_WAIT:-90}" /usr/local/sbin/sigmond-wifi up >>"$LOG" 2>&1
     WIFI_UP="$(wifi_uplink || true)"
 fi
-[ -n "$WIFI_UP" ] && say "Wi-Fi uplink is live: $WIFI_UP"
+# The one netfix line an operator at the screen can act on: it says the radio
+# associated and names the address they will use.  rob asked for the route too
+# -- an address without a way out is the exact failure netfix exists to catch.
+if [ -n "$WIFI_UP" ]; then
+    _wifi_rt=$( (ip route show default; ip -6 route show default) 2>/dev/null \
+                | sed -n 's/.* dev \([^ ]*\).*/\1/p' | head -1)
+    say_console "Wi-Fi uplink is live: $WIFI_UP${_wifi_rt:+  (default route via $_wifi_rt)}"
+fi
 
 # ── is there anything to do? ────────────────────────────────────────────────
 # Only act when vmbr0 has NO address or is sitting on the installer's
@@ -3491,6 +3506,46 @@ WantedBy=timers.target
 ITEOF
 systemctl daemon-reload 2>/dev/null
 systemctl enable sigmond-issue.service sigmond-issue.timer 2>/dev/null
+
+# ⛔ MASK pvebanner, OR THE FIRST THING THE OPERATOR SEES IS WRONG.
+# pvebanner.service rewrites /etc/issue from scratch at every boot and getty
+# paints THAT -- the hypervisor's own address, which on a station is not the
+# address anyone wants, next to a `login:` prompt that cannot be used because
+# both USB controllers belong to the decoder VM.  Our panel is appended later,
+# below it and usually off-screen, and sigmond-issue cannot run until
+# multi-user.target is reached.  Measured on AI6VN's v3.72 first boot: booted
+# 13:44:28, sigmond-issue did not start until 13:46:17 -- 110 seconds of wrong
+# information on the only screen an operator is watching.  rob: "this is bad
+# information to present for a long many seconds to the user ... the Proxmox
+# banner should be changed from its default."
+#
+# Masked, /etc/issue keeps what sigmond-issue last wrote, so getty's FIRST
+# paint is our panel. Its addresses are one boot old, which is why the panel
+# carries its own timestamp and refreshes within seconds of the unit starting.
+# A stale Sigmond panel that says what it is beats a fresh banner that is
+# confidently wrong.
+systemctl mask pvebanner.service 2>/dev/null \
+    && echo "### pvebanner masked: /etc/issue belongs to the Sigmond panel"
+
+# And seed /etc/issue NOW, so even the very first boot after install paints a
+# Sigmond screen rather than an empty one.
+if ! grep -q 'Sigmond appliance' /etc/issue 2>/dev/null; then
+    cat >> /etc/issue <<'SEEDEOF'
+
+════ Sigmond appliance ════ starting ════════════════════════════════════════
+
+  This machine is the Proxmox HYPERVISOR.  The radio station runs inside the
+  decoder VM; its address is the one you want, and it is not up yet.
+
+  ⚠ THERE IS NO KEYBOARD ON THIS HOST.  Both USB controllers are passed
+    through to the decoder VM, so any login prompt here cannot be used.
+
+  This screen is replaced automatically once the station answers.  Nothing
+  is hung — first boot takes a few minutes.
+
+════ end Sigmond panel ════  (seeded at install)
+SEEDEOF
+fi
 
 cat > /etc/udev/rules.d/99-sigmond-import.rules <<'UDEVEOF'
 ACTION=="add", SUBSYSTEM=="block", ENV{DEVTYPE}=="disk", ENV{ID_FS_TYPE}=="iso9660", ENV{ID_FS_LABEL}=="PVE", RUN+="/usr/bin/systemctl start --no-block sigmond-import.service"

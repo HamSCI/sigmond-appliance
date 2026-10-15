@@ -118,5 +118,24 @@ n=$(grep -c 'is-active --quiet sigmond-wizard.service' "$TMP/issue.sh")
     || bad "the standoff rule appears $n times" \
            "two copies drift; that is how half of this file's bugs started"
 
+echo "── the FIRST paint must be ours, not the stock PVE banner ─────────"
+# getty paints /etc/issue once at boot and sigmond-issue cannot run until
+# multi-user.target. AI6VN v3.72: booted 13:44:28, sigmond-issue started
+# 13:46:17 — 110 s of the hypervisor's address beside an unusable login prompt.
+# Masking pvebanner leaves /etc/issue holding OUR panel across the reboot.
+grep -q 'systemctl mask pvebanner.service' "$FB" \
+    && ok "pvebanner is masked, so /etc/issue keeps the Sigmond panel" \
+    || bad "pvebanner still rewrites /etc/issue every boot" \
+           "getty paints the hypervisor address + an unusable login prompt first"
+grep -q 'Sigmond appliance ════ starting' "$FB" \
+    && ok "/etc/issue is seeded at install, so even boot #1 paints ours" \
+    || bad "no seeded panel" "the very first boot has nothing of ours to paint"
+# the seed must carry the same markers the live panel replaces
+awk '/cat >> \/etc\/issue <<.SEEDEOF/,/^SEEDEOF$/' "$FB" > /tmp/seed.$$ 2>/dev/null
+grep -q '^════ Sigmond appliance ' /tmp/seed.$$ && grep -q '^════ end Sigmond panel' /tmp/seed.$$ \
+    && ok "the seed carries both markers, so the live panel replaces it" \
+    || bad "seeded panel lacks the markers" "it would never be removed and panels would stack"
+rm -f /tmp/seed.$$
+
 printf '\n%s: %d passed, %d failed\n' "$(basename "$0")" "$pass" "$fail"
 [ "$fail" -eq 0 ]
