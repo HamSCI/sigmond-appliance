@@ -319,6 +319,37 @@ if [ -n "$WIFI_UP" ]; then
     say_console "Wi-Fi uplink is live: $WIFI_UP${_wifi_rt:+  (default route via $_wifi_rt)}"
 fi
 
+# ── repair a bridge an OLDER netfix converted to DHCP and left there ───────
+# Every image through v3.72 could convert vmbr0 to `inet dhcp` on a site with
+# no DHCPv4 server and then fail to restore it, because the restore was gated
+# on cur_ip -- which answers with the IPv6 address (see the long note at the
+# conversion below).  The damage is one line in /etc/network/interfaces and it
+# only bites at the NEXT boot: ifup waits out networking.service's own
+# TimeoutStartSec=5min, the host comes up with no network, and on an appliance
+# there is no keyboard to fix it with.  AI6VN was stranded exactly this way on
+# 2026-10-15 and had to be recovered from the GRUB command line.
+#
+# So any station that ran an affected image is carrying a live fault that will
+# not show until someone reboots it.  Repair it here, where we can see that
+# the lease really is absent, rather than waiting for the next power cut.
+# Conditions are deliberately narrow: the stanza must say dhcp, the bridge
+# must hold NO IPv4 address, and the backup that netfix itself wrote must
+# exist and be a static stanza with an address in it.
+if grep -q '^iface vmbr0 inet dhcp' "$IFACES" 2>/dev/null \
+   && [ -z "$(ip -4 -o addr show vmbr0 2>/dev/null | awk '{print $4}' | cut -d/ -f1 \
+              | grep -v '^192\.168\.100\.' | grep -m1 .)" ] \
+   && [ -s "$IFACES.netfix-static-bak" ] \
+   && grep -q '^iface vmbr0 inet static' "$IFACES.netfix-static-bak" 2>/dev/null \
+   && grep -qE '^[[:space:]]*address[[:space:]]' "$IFACES.netfix-static-bak" 2>/dev/null; then
+    say "vmbr0 is configured DHCP but holds no IPv4 lease, and a static backup exists."
+    say "  An older netfix converted it and could not restore it. Restoring now, so the"
+    say "  NEXT boot does not sit in networking.service waiting for a lease that cannot come."
+    cp -a "$IFACES" "$IFACES.netfix-dhcp-bak" 2>/dev/null
+    cp -a "$IFACES.netfix-static-bak" "$IFACES"
+    reload_net
+    say "vmbr0 restored from $IFACES.netfix-static-bak"
+fi
+
 # ── is there anything to do? ────────────────────────────────────────────────
 # Only act when vmbr0 has NO address or is sitting on the installer's
 # fallback.  A station with a real lease is never touched -- this must not
@@ -429,7 +460,27 @@ case "$IP" in
         sed -i -e '/^iface vmbr0 inet static/,/^[[:space:]]*$/{/^[[:space:]]*address[[:space:]]/d;/^[[:space:]]*gateway[[:space:]]/d;}' \
                -e 's/^iface vmbr0 inet static/iface vmbr0 inet dhcp/' "$IFACES"
         reload_net
-        for i in $(seq 1 12); do NEW="$(cur_ip)"; [ -n "$NEW" ] && break; sleep 5; done
+        # ⛔ ASK FOR AN IPv4 LEASE, NOT FOR "ANY ADDRESS".  cur_ip falls back to
+        # the global IPv6 address, and the whole point of this wait is to find
+        # out whether a DHCPv4 server answered.  On a host that already holds an
+        # RA address the two are not the same question, and conflating them
+        # defeats the restore below -- the one safety net that exists to undo
+        # this very conversion.
+        #
+        # AI6VN, 2026-10-15, with v3.72: vmbr0 was converted to DHCP on an
+        # IPv6-only site, cur_ip returned fd4f:a955:ac3d:1:... on the FIRST
+        # iteration, netfix logged "vmbr0 now takes DHCP; lease fd4f:..." and
+        # took the success branch.  /etc/network/interfaces was left reading
+        # `iface vmbr0 inet dhcp` on a network with no DHCPv4 server at all.
+        # The running system did not care -- the bridge was already up -- so
+        # nothing looked wrong until the next boot, when ifup sat waiting for a
+        # lease that cannot exist.  networking.service carries its own
+        # TimeoutStartSec=5min, the host never reached the network, and with
+        # both USB controllers bound to vfio-pci there is no keyboard to rescue
+        # it with.  One unreachable station, from one word in a probe.
+        _v4_lease(){ ip -4 -o addr show vmbr0 2>/dev/null | awk '{print $4}' \
+                     | cut -d/ -f1 | grep -v '^192\.168\.100\.' | grep -m1 . ; }
+        for i in $(seq 1 12); do NEW="$(_v4_lease)"; [ -n "$NEW" ] && break; sleep 5; done
         if [ -n "${NEW:-}" ]; then
             say "vmbr0 now takes DHCP; lease $NEW"
             H=$(hostname)
@@ -1468,6 +1519,28 @@ Unit=sigmond-netwatch.service
 WantedBy=timers.target
 NWTMREOF
 systemctl enable sigmond-netwatch.timer 2>/dev/null
+
+# ── networking.service must never cost us the whole machine ────────────────
+# ⛔ THE REAL LESSON OF AI6VN, 2026-10-15.  One wrong word in
+# /etc/network/interfaces (`dhcp` on a site with no DHCPv4 server) made the
+# host unreachable for over an hour, because ifup sat inside
+# networking.service for its stock TimeoutStartSec=5min while the console
+# showed nothing and no keyboard existed to interrupt it -- both USB
+# controllers belong to the decoder VM.  A kernel-cmdline
+# systemd.default_timeout_start_sec does NOT help: the unit sets its own
+# timeout, and an explicit value always beats the default.
+#
+# 45 s is well past a healthy ifup and far short of stranding anybody.  The
+# bridge still comes up and still takes its RA address, so an IPv6 site keeps
+# working and the RAC tunnel still registers -- which is the difference
+# between "degraded, fix it remotely" and "drive to the site".  We would
+# rather boot with a broken interface than not boot.
+mkdir -p /etc/systemd/system/networking.service.d
+cat > /etc/systemd/system/networking.service.d/10-sigmond-timeout.conf <<'NETTOEOF'
+[Service]
+TimeoutStartSec=45
+NETTOEOF
+echo "### networking.service start timeout capped at 45s (was 5min)"
 
 # ── prefer the WIRED uplink when the host is dual-homed on IPv6 ────────────
 # AI6VN, 2026-10-15.  The host had both a cable and an associated radio, each
