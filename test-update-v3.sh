@@ -23,6 +23,11 @@
 #             first, then a restart of hs-uploader.  watermarks.db must sit
 #             at the release's schema version with nothing pending, and the
 #             daemon must start after the migrate and stay up.
+#             It also reads the journal: stop, migrate, start, in that order;
+#             pipelines.toml holds psk-recorder-pskreporter and
+#             meteor-scatter-pskreporter (whichever client is installed) and no
+#             psk-pskreporter; `hs-uploader status` marks sqlite:psk.spots
+#             superseded.
 #   PHASE E-ter — remote access on a station already in the field: the
 #             updated guest's `smd remote` names the one host command while
 #             unpaired; the new wizard, placed on the old host as pm-align
@@ -36,6 +41,8 @@
 #             release's daemon: the restored smd reads pipelines.toml as up
 #             to date, and the restored daemon starts on the store E-bis
 #             migrated, which keeps its version.
+#   PHASE G-ter — a second update: both split pipelines and both send
+#             records stand, and migrate --check has nothing to write.
 #
 # Log conventions match the sibling: append-only, one line per step, phases
 # announced with ════ banners and closed with a PASS line, so bless-release
@@ -89,6 +96,8 @@
 #   "  pending <name>",                 _cmd_migrate (v3.70).  An older
 #   "newer than this hs-uploader"       hs-uploader exits 2 with
 #                                       "invalid choice: 'migrate'"
+#   "[SUPERSEDED by ..."                hs-uploader src/hs_uploader/cli.py _cmd_status
+#   "refusing pipeline"                 hs-uploader src/hs_uploader/daemon.py split_refused
 #   "is up to date"                     lib/sigmond/commands/uploader.py
 #                                       cmd_uploader_manifest, check mode
 #   "holds no pairing with its Proxmox host", exit 5
@@ -1098,6 +1107,48 @@ echo "MONO:$(python3 -c 'import time; print(time.monotonic_ns() // 1000)')"
 UPLEOF
 )
 
+# The key split (v3.73 row 1).  One KEY:N line per fact, as the probes above.
+# With W0=<epoch> on a line ahead of it, the journal facts cover the unit's
+# stop and start since that moment: JSTOP and JSTART are the first "Stopping"
+# line and the first "Started" line after it (epoch seconds), MIGAT the
+# store's own migrated_at stamp for the pskreporter split (UTC, epoch
+# seconds).  Pipelines are counted in the rendered manifest by name.
+UPL_SPLIT=$(cat <<'UPLEOF'
+W=/var/lib/hs-uploader/watermarks.db
+EXE=/opt/hs-uploader/venv/bin/hs-uploader
+M=/etc/hs-uploader/pipelines.toml
+cnt(){ grep -cE "^[[:space:]]*name[[:space:]]*=[[:space:]]*\"$1\"" "$M" 2>/dev/null; }
+echo "PIPE_OLD:$(cnt psk-pskreporter)"
+echo "PIPE_PSK:$(cnt psk-recorder-pskreporter)"
+echo "PIPE_MS:$(cnt meteor-scatter-pskreporter)"
+if [ -e "$W" ]; then
+    cd / && runuser -u hsupload -- /usr/bin/env PYTHONDONTWRITEBYTECODE=1 /usr/bin/python3 -c '
+import datetime, pathlib, sqlite3, sys
+p = pathlib.Path(sys.argv[1]).resolve()
+c = sqlite3.connect(p.as_uri() + "?mode=ro", uri=True, timeout=30)
+q = lambda sql: c.execute(sql).fetchone()[0]
+print("OLDKEY:%d" % q("SELECT count(*) FROM watermarks WHERE source_id = \"sqlite:psk.spots\" AND dest_id LIKE \"pskreporter%\""))
+print("NEWPSK:%d" % q("SELECT count(*) FROM watermarks WHERE source_id = \"sqlite:psk.spots@psk-recorder\" AND dest_id LIKE \"pskreporter%\""))
+print("NEWMS:%d" % q("SELECT count(*) FROM watermarks WHERE source_id = \"sqlite:psk.spots@meteor-scatter\" AND dest_id LIKE \"pskreporter%\""))
+try:
+    print("SUPER:%d" % q("SELECT count(*) FROM superseded_keys WHERE old_source_id = \"sqlite:psk.spots\""))
+    t = c.execute("SELECT min(migrated_at) FROM superseded_keys").fetchone()[0]
+    if t:
+        print("MIGAT:%d" % int(datetime.datetime.fromisoformat(t).timestamp()))
+except sqlite3.OperationalError:
+    print("SUPER:0")' "$W" 2>&1 | sed -n '/^[A-Z]*:[0-9]*$/p'
+fi
+if [ "${W0:-0}" -gt 0 ]; then
+    journalctl -u hs-uploader.service --since "@$W0" -o short-unix --no-pager 2>/dev/null > /tmp/rig-upl-journal.txt
+    awk '/Stopping hs-uploader/ && !a {split($1,t,"."); print "JSTOP:" t[1]; a=1}' /tmp/rig-upl-journal.txt
+    awk '/Stopping hs-uploader/ {s=1} s && /Started hs-uploader/ && !a {split($1,t,"."); print "JSTART:" t[1]; a=1}' /tmp/rig-upl-journal.txt
+    echo "REFUSED:$(grep -c 'refusing pipeline' /tmp/rig-upl-journal.txt)"
+    rm -f /tmp/rig-upl-journal.txt
+fi
+exit 0
+UPLEOF
+)
+
 # ── the store before the manifest step ─────────────────────────────────
 gx_ok 120 eb0-store-pre "$UPL_STORE" "E-bis: the send-record store before the manifest step"
 sed 's/^/      /' "$GX_OUT"
@@ -1106,11 +1157,16 @@ EB_PRE_VER="$(gx_tok "$GX_OUT" MIGVER)"
 [ -n "$EB_PRE_FILE" ] || fatal "$GX_OUT" "E-bis: the store probe returned no answer (the snippet died before its first line; not a verdict)"
 [ "$EB_PRE_FILE" = 1 ] || fatal "$GX_OUT" "no watermarks.db before the manifest step: the base image's daemon never created its store, so this rig cannot exercise the migrate"
 say "before the manifest step: watermarks.db at version ${EB_PRE_VER:-? (migrate --check gave none)}"
+gx_ok 120 eb0-split-pre "$UPL_SPLIT" "E-bis: the pskreporter send records before the manifest step"
+sed 's/^/      /' "$GX_OUT"
+EB_PRE_OLD="$(gx_tok "$GX_OUT" OLDKEY)"
+[ -n "$EB_PRE_OLD" ] || fatal "$GX_OUT" "E-bis: the send-record probe returned no answer (not a verdict)"
 
 # ── bring-up's manifest step, as align runs it ─────────────────────────
 say "── smd admin uploader manifest --write --enable (from v3.70 it runs hs-uploader migrate before it touches the daemon)"
 EB_MANIFEST=$(cat <<'UPLEOF'
 mono(){ python3 -c 'import time; print(time.monotonic_ns() // 1000)'; }
+echo "W0:$(date +%s)"
 echo "T0:$(mono)"
 smd admin uploader manifest --write --enable
 rc=$?
@@ -1120,7 +1176,7 @@ UPLEOF
 )
 gx_ok 900 eb1-manifest "$EB_MANIFEST" "E-bis: smd admin uploader manifest --write --enable"
 EB_RC="$GX_RC"
-grep -vE '^T[01]:[0-9]+$' "$WORK/eb1-manifest.out" | sed 's/^/      /'
+grep -vE '^(T[01]|W0):[0-9]+$' "$WORK/eb1-manifest.out" | sed 's/^/      /'
 if grep -q 'Traceback (most recent call last)' "$WORK/eb1-manifest.out"; then
     fatal "$WORK/eb1-manifest.out" "smd admin uploader manifest --write --enable printed a Python traceback"
 fi
@@ -1209,6 +1265,59 @@ EB_A2="$(gx_tok "$GX_OUT" ACTIVE2)"; EB_S2="$(gx_tok "$GX_OUT" START2)"
 [ "$EB_S1" -gt "$EB_T0" ] \
     || fatal "$GX_OUT" "hs-uploader last started at $EB_S1 µs, before the manifest step began at $EB_T0 µs: the daemon running now never restarted after the migrate"
 say "hs-uploader active, started $(( (EB_S1 - EB_T0) / 1000000 )) s after the manifest step began, and still up 45 s later ✓"
+
+
+# ── the key split: order, pipelines, the old key ───────────────────────
+# The manifest step stops the daemon, migrates, lands the manifest and starts
+# the daemon (spec-key-split-v373 §5.2).  The journal shows stop then start,
+# and the store's own migrated_at stamp falls between them.  A daemon that
+# started before the migrate would log "refusing pipeline", which must not
+# appear.  The stamp has second resolution, so equality at either end passes.
+EB_W0="$(gx_tok "$WORK/eb1-manifest.out" W0)"
+[ -n "$EB_W0" ] || fatal "$WORK/eb1-manifest.out" "E-bis: no guest wall-clock reading before the manifest step (not a verdict)"
+gx_ok 120 eb6-split "W0=$EB_W0
+$UPL_SPLIT" "E-bis: the key split after the manifest step"
+sed 's/^/      /' "$GX_OUT"
+EB_JSTOP="$(gx_tok "$GX_OUT" JSTOP)"; EB_JSTART="$(gx_tok "$GX_OUT" JSTART)"
+EB_REF="$(gx_tok "$GX_OUT" REFUSED)"
+EB_P_OLD="$(gx_tok "$GX_OUT" PIPE_OLD)"; EB_P_PSK="$(gx_tok "$GX_OUT" PIPE_PSK)"; EB_P_MS="$(gx_tok "$GX_OUT" PIPE_MS)"
+[ -n "$EB_REF" ] && [ -n "$EB_P_OLD" ] && [ -n "$EB_P_PSK" ] && [ -n "$EB_P_MS" ] \
+    || fatal "$GX_OUT" "E-bis: the key-split probe returned no answer (not a verdict)"
+[ -n "$EB_JSTOP" ] || fatal "$GX_OUT" "the journal shows no stop of hs-uploader.service during the manifest step: the step did not stop the daemon before it migrated"
+[ -n "$EB_JSTART" ] || fatal "$GX_OUT" "the journal shows a stop of hs-uploader.service but no start after it"
+[ "$EB_JSTOP" -le "$EB_JSTART" ] || fatal "$GX_OUT" "hs-uploader started ($EB_JSTART) before it stopped ($EB_JSTOP)"
+[ "$EB_REF" = 0 ] || fatal "$GX_OUT" "the daemon refused a producer pipeline since the manifest step began: it started on a store not yet migrated"
+EB_MIGAT="$(gx_tok "$GX_OUT" MIGAT)"
+if [ -n "$EB_MIGAT" ]; then
+    { [ "$EB_JSTOP" -le "$EB_MIGAT" ] && [ "$EB_MIGAT" -le "$EB_JSTART" ]; } \
+        || fatal "$GX_OUT" "migrate ran at $EB_MIGAT, outside the daemon's stop ($EB_JSTOP) and start ($EB_JSTART): the order is not stop, migrate, start"
+    say "journal: stop $EB_JSTOP, migrate $EB_MIGAT, start $EB_JSTART (epoch s): stop, migrate, start ✓"
+else
+    say "journal: stop $EB_JSTOP, start $EB_JSTART ✓; the store holds no migrated_at stamp (no old pskreporter record to copy), so the migrate's place between them is not timed"
+fi
+
+# pipelines.toml: the renderer split the shared pipeline.  A station without
+# one client renders only the other, so each of the two counts 0 or 1 and at
+# least one is 1.
+[ "$EB_P_OLD" = 0 ] || fatal "$GX_OUT" "pipelines.toml still holds psk-pskreporter after the manifest step: the renderer did not split it"
+{ [ "$EB_P_PSK" -le 1 ] && [ "$EB_P_MS" -le 1 ] && [ $((EB_P_PSK + EB_P_MS)) -ge 1 ]; } \
+    || fatal "$GX_OUT" "pipelines.toml holds psk-recorder-pskreporter x$EB_P_PSK and meteor-scatter-pskreporter x$EB_P_MS: want at least one, each at most once"
+say "pipelines.toml: psk-recorder-pskreporter x$EB_P_PSK, meteor-scatter-pskreporter x$EB_P_MS, no psk-pskreporter ✓"
+EB_SPLIT_PSK="$EB_P_PSK"; EB_SPLIT_MS="$EB_P_MS"
+
+# The old key is superseded.  That needs an old record: a base whose store
+# never held a pskreporter send record has nothing to supersede, and the rig
+# says so loudly instead of failing or passing.
+if [ "${EB_PRE_OLD:-0}" -ge 1 ]; then
+    gx_ok 120 eb7-status 'cd /opt/hs-uploader && runuser -u hsupload -- /usr/bin/env PYTHONDONTWRITEBYTECODE=1 /opt/hs-uploader/venv/bin/hs-uploader --state /var/lib/hs-uploader/watermarks.db status 2>&1' "E-bis: hs-uploader status"
+    sed 's/^/      /' "$GX_OUT"
+    grep -E 'sqlite:psk\.spots( |→)' "$GX_OUT" | grep -q 'SUPERSEDED by' \
+        || fatal "$GX_OUT" "hs-uploader status does not list the old key sqlite:psk.spots as superseded"
+    say "hs-uploader status lists sqlite:psk.spots as superseded ✓"
+else
+    say "⚠ SUPERSEDED CHECK NOT EVALUATED — the base store held no sqlite:psk.spots pskreporter record before the manifest step"
+    KS_UNCHECKED="the superseded old key in hs-uploader status (the base store held no pskreporter send record)"
+fi
 
 say "PHASE E-bis PASS — watermarks.db at version $EB_VER with nothing pending; hs-uploader restarted after the migrate and stayed up"
 
@@ -1658,6 +1767,18 @@ grep -q 'is up to date' "$GX_OUT" \
     || fatal "$GX_OUT" "the restored smd's manifest check exited 0 without 'is up to date'; the check's contract changed"
 say "the restored smd reads pipelines.toml as up to date ✓"
 
+# The restored release predates the split, so its renderer writes the shared
+# pipeline again and none of the split pipelines.
+gx_ok 120 gb1-split "$UPL_SPLIT" "G-bis: the pipelines the restored smd rendered"
+sed 's/^/      /' "$GX_OUT"
+GB_P_OLD="$(gx_tok "$GX_OUT" PIPE_OLD)"; GB_P_PSK="$(gx_tok "$GX_OUT" PIPE_PSK)"; GB_P_MS="$(gx_tok "$GX_OUT" PIPE_MS)"
+[ -n "$GB_P_OLD" ] && [ -n "$GB_P_PSK" ] && [ -n "$GB_P_MS" ] || fatal "$GX_OUT" "G-bis: the pipeline probe returned no answer (not a verdict)"
+if [ "${EB_SPLIT_PSK:-0}" -ge 1 ] || [ "${EB_SPLIT_MS:-0}" -ge 1 ]; then
+    [ "$GB_P_OLD" = 1 ] || fatal "$GX_OUT" "after the rollback pipelines.toml holds psk-pskreporter x$GB_P_OLD, want 1: the restored smd did not render the shared pipeline again"
+    [ "$GB_P_PSK" = 0 ] && [ "$GB_P_MS" = 0 ] || fatal "$GX_OUT" "after the rollback pipelines.toml still holds a split pipeline (psk-recorder-pskreporter x$GB_P_PSK, meteor-scatter-pskreporter x$GB_P_MS)"
+    say "after the rollback the manifest renders psk-pskreporter again, and no split pipeline ✓"
+fi
+
 # ── the restored daemon starts, after the restore ──────────────────────
 gx_ok 60 gb2-unit "$UPL_UNIT" "G-bis: hs-uploader after the restore"
 GB_ACT="$(gx_tok "$GX_OUT" ACTIVE1)"
@@ -1700,9 +1821,51 @@ GB_UV="$(gx_tok "$GX_OUT" USERVER)"
 say "watermarks.db still at version $GB_UV under the restored daemon ✓"
 
 say "PHASE G-bis PASS — the restored release re-rendered its manifest, and its daemon runs on the version-$GB_UV store"
+
+# ════════════════════════════════════════════════════════════════════════
+say "════ PHASE G-ter: a second update leaves both split keys in place ════"
+
+# The rollback left the store at its migrated version, with the split
+# records and the frozen old record.  Rolling forward again renders the split
+# pipelines and finds nothing to migrate.
+gx_ok 3600 gt1-update-apply "systemd-run --quiet --wait --pipe --collect --unit=rig-update-apply2 /bin/bash -lc 'smd update --apply'" "smd update --apply (second)"
+GT_RC="$GX_RC"
+sed 's/^/      /' "$WORK/gt1-update-apply.out" | tail -15
+case "$GT_RC" in
+    0|3) say "second smd update --apply exit $GT_RC" ;;
+    *) fatal "$WORK/gt1-update-apply.out" "the second smd update --apply exited $GT_RC" ;;
+esac
+gx_ok 900 gt2-manifest 'smd admin uploader manifest --write --enable' "G-ter: smd admin uploader manifest --write --enable"
+sed 's/^/      /' "$WORK/gt2-manifest.out"
+[ "$GX_RC" -eq 0 ] || fatal "$WORK/gt2-manifest.out" "the second manifest step exited $GX_RC"
+gx_ok 120 gt3-split "$UPL_SPLIT" "G-ter: the key split after the second update"
+sed 's/^/      /' "$GX_OUT"
+GT_P_OLD="$(gx_tok "$GX_OUT" PIPE_OLD)"; GT_P_PSK="$(gx_tok "$GX_OUT" PIPE_PSK)"; GT_P_MS="$(gx_tok "$GX_OUT" PIPE_MS)"
+GT_N_PSK="$(gx_tok "$GX_OUT" NEWPSK)"; GT_N_MS="$(gx_tok "$GX_OUT" NEWMS)"
+[ -n "$GT_P_OLD" ] && [ -n "$GT_P_PSK" ] && [ -n "$GT_P_MS" ] || fatal "$GX_OUT" "G-ter: the key-split probe returned no answer (not a verdict)"
+[ "$GT_P_OLD" = 0 ] || fatal "$GX_OUT" "after the second update pipelines.toml still holds psk-pskreporter"
+{ [ "$GT_P_PSK" = "${EB_SPLIT_PSK:-0}" ] && [ "$GT_P_MS" = "${EB_SPLIT_MS:-0}" ]; } \
+    || fatal "$GX_OUT" "after the second update the split pipelines read psk-recorder-pskreporter x$GT_P_PSK, meteor-scatter-pskreporter x$GT_P_MS; the first update left x${EB_SPLIT_PSK:-0}, x${EB_SPLIT_MS:-0}"
+if [ "${EB_PRE_OLD:-0}" -ge 1 ]; then
+    [ -n "$GT_N_PSK" ] && [ -n "$GT_N_MS" ] || fatal "$GX_OUT" "G-ter: the store probe returned no send-record counts (not a verdict)"
+    [ "$GT_N_PSK" -ge 1 ] && [ "$GT_N_MS" -ge 1 ] \
+        || fatal "$GX_OUT" "after the second update the store holds sqlite:psk.spots@psk-recorder x$GT_N_PSK and @meteor-scatter x$GT_N_MS: both send records must remain"
+    say "both send records stand: @psk-recorder x$GT_N_PSK, @meteor-scatter x$GT_N_MS ✓"
+fi
+gx_ok 120 gt4-store "$UPL_STORE" "G-ter: the send-record store after the second update"
+GT_MRC="$(gx_tok "$GX_OUT" MIGRC)"; GT_PEND="$(gx_tok "$GX_OUT" MIGPEND)"
+[ "$GT_MRC" = 0 ] && [ "$GT_PEND" = 0 ] || fatal "$GX_OUT" "migrate --check exits ${GT_MRC:-?} with ${GT_PEND:-?} pending after the second update: the store should need nothing"
+say "migrate --check: nothing to write after the second update ✓"
+gx_ok 60 gt5-unit "$UPL_UNIT" "G-ter: hs-uploader after the second update"
+[ "$(gx_tok "$GX_OUT" ACTIVE1)" = 1 ] || fatal "$GX_OUT" "hs-uploader is not active after the second update"
+say "PHASE G-ter PASS — pipelines and send records of both producers stand after the second update"
+
 # What PHASE E-ter left unchecked, said once more beside the verdict.
 if [ -n "${ETER_UNCHECKED:-}" ]; then
     say "⚠ PHASE E-ter NOT EVALUATED: $ETER_UNCHECKED"
+fi
+if [ -n "${KS_UNCHECKED:-}" ]; then
+    say "⚠ KEY SPLIT NOT EVALUATED: $KS_UNCHECKED"
 fi
 say "UPDATE RIG COMPLETE — $IMGBASE rolled forward to $TARGET_SHA and back, both directions verified"
 say "evidence: $WORK   log: $LOG"
