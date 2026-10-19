@@ -1127,11 +1127,13 @@ import datetime, pathlib, sqlite3, sys
 p = pathlib.Path(sys.argv[1]).resolve()
 c = sqlite3.connect(p.as_uri() + "?mode=ro", uri=True, timeout=30)
 q = lambda sql: c.execute(sql).fetchone()[0]
-print("OLDKEY:%d" % q("SELECT count(*) FROM watermarks WHERE source_id = \"sqlite:psk.spots\" AND dest_id LIKE \"pskreporter%\""))
-print("NEWPSK:%d" % q("SELECT count(*) FROM watermarks WHERE source_id = \"sqlite:psk.spots@psk-recorder\" AND dest_id LIKE \"pskreporter%\""))
-print("NEWMS:%d" % q("SELECT count(*) FROM watermarks WHERE source_id = \"sqlite:psk.spots@meteor-scatter\" AND dest_id LIKE \"pskreporter%\""))
+dest = "pskreporter%"
+n = lambda src: c.execute("SELECT count(*) FROM watermarks WHERE source_id = ? AND dest_id LIKE ?", (src, dest)).fetchone()[0]
+print("OLDKEY:%d" % n("sqlite:psk.spots"))
+print("NEWPSK:%d" % n("sqlite:psk.spots@psk-recorder"))
+print("NEWMS:%d" % n("sqlite:psk.spots@meteor-scatter"))
 try:
-    print("SUPER:%d" % q("SELECT count(*) FROM superseded_keys WHERE old_source_id = \"sqlite:psk.spots\""))
+    print("SUPER:%d" % c.execute("SELECT count(*) FROM superseded_keys WHERE old_source_id = ?", ("sqlite:psk.spots",)).fetchone()[0])
     t = c.execute("SELECT min(migrated_at) FROM superseded_keys").fetchone()[0]
     if t:
         print("MIGAT:%d" % int(datetime.datetime.fromisoformat(t).timestamp()))
@@ -1140,8 +1142,16 @@ except sqlite3.OperationalError:
 fi
 if [ "${W0:-0}" -gt 0 ]; then
     journalctl -u hs-uploader.service --since "@$W0" -o short-unix --no-pager 2>/dev/null > /tmp/rig-upl-journal.txt
-    awk '/Stopping hs-uploader/ && !a {split($1,t,"."); print "JSTOP:" t[1]; a=1}' /tmp/rig-upl-journal.txt
-    awk '/Stopping hs-uploader/ {s=1} s && /Started hs-uploader/ && !a {split($1,t,"."); print "JSTART:" t[1]; a=1}' /tmp/rig-upl-journal.txt
+    awk -f /dev/stdin /tmp/rig-upl-journal.txt <<'AWKEOF'
+# >>> upl_journal_awk
+# journalctl -u hs-uploader.service -o short-unix: systemd writes the unit's
+# Description, not its name ("Stopping <Description>..."), so match systemd's
+# own lines and leave the description out.  The -u filter already limits the
+# lines to this unit.
+$3 ~ /^systemd\[[0-9]+\]:$/ && $4 == "Stopping" && !stop { split($1,t,"."); print "JSTOP:" t[1]; stop=1 }
+$3 ~ /^systemd\[[0-9]+\]:$/ && $4 == "Started" && stop && !start { split($1,t,"."); print "JSTART:" t[1]; start=1 }
+# <<< upl_journal_awk
+AWKEOF
     echo "REFUSED:$(grep -c 'refusing pipeline' /tmp/rig-upl-journal.txt)"
     rm -f /tmp/rig-upl-journal.txt
 fi
