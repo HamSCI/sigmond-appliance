@@ -36,7 +36,9 @@
 #   PHASE F — adopt the release manifest with --allow-superset (the updated
 #             guest is a sanctioned superset of the blessed baseline).
 #   PHASE G — `smd admin manifest restore` back to the blessed SHAs, then a
-#             STRICT adopt of the same manifest: the round-trip proof.
+#             STRICT adopt of the same manifest: the round-trip proof.  The
+#             sigmond units must then stand as the restored release installs
+#             them, with no drop-in drift the base image lacked.
 #   PHASE G-bis — the rollback's own re-render (D11), then the restored
 #             release's daemon: the restored smd reads pipelines.toml as up
 #             to date, and the restored daemon starts on the store E-bis
@@ -85,6 +87,10 @@
 #                                       lib/sigmond/manifest_adopt.py:104
 #   "admin manifest restore: restored to manifest — <n> component(s) moved"
 #                                       bin/smd:4085
+#   "<name>: install.sh exit 0" (restore) bin/smd cmd_manifest_restore
+#   "radiod-dropins-missing", "qga-dropin-stale" (doctor kinds)
+#                                       bin/smd _radiod_dropins_findings,
+#                                       _qga_dropin_findings
 #   "adopt-strict verifies clean"       REMOVED by sigmond ac01bb7; accepted
 #                                       only to report a pre-ac01bb7 guest
 #   /etc/sigmond-appliance/manifest.txt bin/smd:168; firstboot-v3.sh:155
@@ -391,6 +397,28 @@ components_rows(){
         }
     ' "$1" > "$2"
 }
+# UNIT_CMP: one UDIFF:<name> line for each sigmond unit file whose installed
+# copy in /etc/systemd/system differs from the checkout's systemd/ copy, or is
+# missing.  install.sh copies every systemd/sigmond-*.service and .timer, so
+# on a host the checkout's own install.sh last wrote, nothing prints.  The rig
+# runs it before the update and after the rollback, and the rollback may
+# leave no difference the base image did not already carry (v3.73 row 4:
+# v3.72's consumers unit survived a rollback to v3.71).
+UNIT_CMP=$(cat <<'UCEOF'
+S=/opt/git/sigmond/sigmond/systemd
+n=0
+for f in "$S"/sigmond-*.service "$S"/sigmond-*.timer; do
+    [ -f "$f" ] || continue
+    n=$((n+1))
+    b=$(basename "$f")
+    cmp -s "$f" "/etc/systemd/system/$b" || echo "UDIFF:$b"
+done
+echo "UNITS_SEEN:$n"
+exit 0
+UCEOF
+)
+udiffs(){ sed -n 's/^UDIFF:\(.*\)$/\1/p' "$1" | sort -u > "$2"; }
+
 MIN_ROWS=10        # sigmond.doctor.MIN_COMPONENT_ROWS — a thinner block is
                    # what a truncated capture looks like, not a small host
 rows_count(){ awk 'END{print NR}' "$1"; }
@@ -879,6 +907,11 @@ doctor_kinds "$WORK/doctor-pre.txt" "$WORK/kinds-pre.txt"
 assert_kinds_parsed "pre-update doctor" "$DOCTOR_PRE_RC" "$WORK/kinds-pre.txt" "$WORK/doctor-pre.txt"
 say "pre-update smd doctor exit $DOCTOR_PRE_RC; finding kinds: $(tr '\n' ' ' < "$WORK/kinds-pre.txt")"
 excerpt "$WORK/doctor-pre.txt" 20
+gx_ok 120 e2-units-pre "$UNIT_CMP" "pre-state: sigmond units against the checkout"
+UNITS_PRE_SEEN="$(sed -n 's/^UNITS_SEEN:\([0-9][0-9]*\)$/\1/p' "$GX_OUT" | head -1)"
+[ "${UNITS_PRE_SEEN:-0}" -ge 5 ] || fatal "$GX_OUT" "pre-state unit probe saw ${UNITS_PRE_SEEN:-no} sigmond unit files in the checkout (floor 5): the probe measured nothing"
+udiffs "$GX_OUT" "$WORK/units-pre.txt"
+say "pre-state: $UNITS_PRE_SEEN sigmond unit files, installed copies differing: $(tr '\n' ' ' < "$WORK/units-pre.txt")"
 
 # ── the update itself, through the production channel ───────────────────
 say "── smd update --apply (this is the channel that crashed on runuser/PATH)"
@@ -1738,6 +1771,26 @@ case "$MOVED" in
             || fatal "$WORK/doctor-post-restore.txt" "restore reported $MOVED component(s) moved but smd doctor finds NO 'detached' checkout — restore pins with 'git checkout --detach', so either it did not move them or doctor stopped seeing it"
         say "expected 'detached' finding present after $MOVED moved component(s) — restore pinned the checkouts as designed ✓" ;;
 esac
+# A rollback must leave the units as the older release installs them (v3.73
+# row 4): restore runs each moved component's install.sh.  So a drop-in
+# finding that the base image did not carry fails the rig even when
+# U2_ALLOW_NEW_KINDS names it.  The v3.72 run had to sanction
+# radiod-dropins-missing this way; from v3.73 that sanction no longer works.
+UNIT_KINDS_NEW="$(comm -13 "$WORK/kinds-pre.txt" "$WORK/kinds-restored.txt" | grep -xE 'radiod-dropins-missing|qga-dropin-stale' | tr '\n' ' ')"
+if [ -n "$UNIT_KINDS_NEW" ]; then
+    excerpt "$WORK/doctor-post-restore.txt" 40
+    fatal - "after the rollback smd doctor finds unit drift the base image did not carry: $UNIT_KINDS_NEW. The restore ran no install.sh, or the older install.sh did not rewrite the units the newer release changed. U2_ALLOW_NEW_KINDS cannot sanction this"
+fi
+gx_ok 120 g6-units "$UNIT_CMP" "post-restore: sigmond units against the restored checkout"
+udiffs "$GX_OUT" "$WORK/units-restored.txt"
+UNITS_NEW="$(comm -13 "$WORK/units-pre.txt" "$WORK/units-restored.txt" | tr '\n' ' ')"
+[ -z "$UNITS_NEW" ] || fatal "$GX_OUT" "after the rollback these installed sigmond units differ from the restored checkout, and did not before the update: $UNITS_NEW. A rollback must leave the units as the older release installs them"
+say "every sigmond unit stands as the restored release installs it ✓"
+if grep -q 'sigmond: checked out' "$WORK/g3-restore-apply.out"; then
+    grep -q 'sigmond: install.sh exit 0' "$WORK/g3-restore-apply.out" \
+        || fatal "$WORK/g3-restore-apply.out" "restore moved sigmond but printed no 'sigmond: install.sh exit 0': it did not run the older release's install"
+    say "restore ran the restored sigmond's install.sh ✓"
+fi
 NEWG="$(new_kinds "$WORK/kinds-pre.txt" "$WORK/kinds-restored.txt" detached | tr '\n' ' ')"
 if [ -n "$NEWG" ]; then
     excerpt "$WORK/doctor-post-restore.txt" 40
