@@ -220,6 +220,27 @@ else
     echo "no-hamsci-ssh-key" | sudo tee /etc/sigmond-appliance-novmkey >/dev/null 2>&1 || true
 fi
 
+# journald size: an explicit cap, not the default (10% of the disk, at most
+# 4G).  On AC0G-B4 timestd-fusion alone wrote 124,000 lines an hour; the
+# journal hit 3.9G and dropped 10-15 13:33Z..10-16 23:41Z (v3.73 row 18).
+# The producers now log a persisting condition once, then as a count, which
+# cuts B4 to about 15 MB an hour on disk.  4G then holds about 11 days, and
+# takes under 2% of the usual 256G decoder disk.  journald's default
+# SystemKeepFree (15%) still protects the 32G floor disk.
+sudo mkdir -p /etc/systemd/journald.conf.d
+sudo tee /etc/systemd/journald.conf.d/50-sigmond-journal-size.conf >/dev/null <<'JOURNALD_EOF'
+# sigmond-appliance: explicit journal cap (v3.73 row 18).  See
+# provision-components.sh for the sizing.
+[Journal]
+SystemMaxUse=4G
+JOURNALD_EOF
+if systemd-analyze cat-config systemd/journald.conf 2>/dev/null | grep -qx 'SystemMaxUse=4G'; then
+    echo "### journald cap baked: SystemMaxUse=4G"
+else
+    echo "### FATAL: journald drop-in written but SystemMaxUse=4G is not in the merged config"
+    exit 1
+fi
+
 echo "### stage 3: capture-prep (scrub identity/secrets/data for golden image)"
 sudo mkdir -p /etc/systemd/network
 printf '[Match]\nName=en* eth*\n\n[Network]\nDHCP=yes\n' | sudo tee /etc/systemd/network/99-dhcp-all.network >/dev/null
