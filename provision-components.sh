@@ -234,10 +234,18 @@ sudo tee /etc/systemd/journald.conf.d/50-sigmond-journal-size.conf >/dev/null <<
 [Journal]
 SystemMaxUse=4G
 JOURNALD_EOF
-if systemd-analyze cat-config systemd/journald.conf 2>/dev/null | grep -qx 'SystemMaxUse=4G'; then
-    echo "### journald cap baked: SystemMaxUse=4G"
+# Judge the EFFECTIVE value: journald applies the last SystemMaxUse= in the
+# merged config, so a later drop-in that overrides ours must fail the build.
+# SYSTEMD_ANALYZE lets test-journald-cap.sh point this at a scratch root.
+journald_effective_max() {
+    ${SYSTEMD_ANALYZE:-systemd-analyze} cat-config systemd/journald.conf 2>/dev/null \
+        | sed -n 's/^[[:space:]]*SystemMaxUse=[[:space:]]*//p' | tail -1
+}
+_jmax="$(journald_effective_max)"
+if [ "$_jmax" = 4G ]; then
+    echo "### journald cap baked: SystemMaxUse=4G (effective)"
 else
-    echo "### FATAL: journald drop-in written but SystemMaxUse=4G is not in the merged config"
+    echo "### FATAL: journald's effective SystemMaxUse is '${_jmax:-unset}', not 4G (a later drop-in overrides ours?)"
     exit 1
 fi
 

@@ -19,8 +19,27 @@ awk '
 fail=0
 grep -qx '\[Journal\]' "$T/body" || { echo "FAIL: no [Journal] section in the drop-in"; fail=1; }
 grep -qx 'SystemMaxUse=4G' "$T/body" || { echo "FAIL: no SystemMaxUse=4G in the drop-in"; fail=1; }
-# The script must also prove the cap took effect inside the build VM.
-grep -q 'systemd-analyze cat-config systemd/journald.conf' "$SRC" \
-    || { echo "FAIL: provision-components.sh never checks the merged journald config"; fail=1; }
+# The script must prove the cap took effect inside the build VM, and judge
+# the EFFECTIVE value: the last SystemMaxUse= in the merged config.  A later
+# drop-in that overrides the cap must fail the build.  Run the script's own
+# journald_effective_max() against a scratch root, with and without one.
+awk '/^journald_effective_max\(\) \{/ { f = 1 } f { print } f && /^\}/ { exit }' "$SRC" > "$T/fn.sh"
+if ! grep -q 'journald_effective_max' "$T/fn.sh"; then
+    echo "FAIL: provision-components.sh defines no journald_effective_max()"; fail=1
+elif ! command -v systemd-analyze >/dev/null; then
+    echo "FAIL: systemd-analyze not found — cannot verify the merged value"; fail=1
+else
+    # shellcheck disable=SC1091
+    . "$T/fn.sh"
+    R="$T/root"; mkdir -p "$R/etc/systemd/journald.conf.d"
+    cp "$T/body" "$R/etc/systemd/journald.conf.d/50-sigmond-journal-size.conf"
+    got=$(SYSTEMD_ANALYZE="systemd-analyze --root=$R" journald_effective_max)
+    [ "$got" = 4G ] || { echo "FAIL: effective cap reads '$got' with our drop-in alone, want 4G"; fail=1; }
+    printf '[Journal]\nSystemMaxUse=1G\n' > "$R/etc/systemd/journald.conf.d/90-later.conf"
+    got=$(SYSTEMD_ANALYZE="systemd-analyze --root=$R" journald_effective_max)
+    [ "$got" = 1G ] || { echo "FAIL: a later override reads '$got', want 1G (the check would pass a build it must fail)"; fail=1; }
+    grep -q '"$(journald_effective_max)" = 4G\|"$_jmax" = 4G' "$SRC" \
+        || { echo "FAIL: provision-components.sh does not gate the build on journald_effective_max"; fail=1; }
+fi
 [ "$fail" -eq 0 ] && echo "ok: golden VM ships SystemMaxUse=4G"
 exit "$fail"
