@@ -1223,8 +1223,11 @@ say "════ PHASE E-ter: remote access on a station already in the field �
 #      command that removes it;
 #   2. the target's wizard, placed on the host the way pm-align places it,
 #      pairs the two machines with that one command;
-#   3. the owner of this station said No at install (the rig's own answer), so
-#      remote access must still read off afterwards, with nothing registered.
+#   3. remote access is OFF before the pairing and must read off after it.  A
+#      base from before v3.71, or an owner who said No at install, is off and
+#      never registered.  A v3.71 base's install leaves remote access ON, so
+#      the rig turns it off first (step 1b) with the host's own switch,
+#      `sigmond-setup --rac-off`, and the same strict check runs.
 # A guest whose smd has no `remote` verb is a target from before v3.71; the
 # phase then says so and checks nothing.
 #
@@ -1277,8 +1280,50 @@ else
     ET_BEFORE_LINE="$(grep -m1 '^Remote access:' "$GX_OUT" | tr -d '\r')"
     [ -n "$ET_BEFORE_LINE" ] || fatal "$GX_OUT" "E-ter: smd remote status before the pairing printed no 'Remote access:' line (not a verdict)"
     ET_BEFORE_OFF=0
-    { [ "$ET_BEFORE_RC" -eq 0 ] || [ "$ET_BEFORE_RC" -eq 5 ]; } && grep -q 'never registered\|holds no pairing' "$GX_OUT" && ET_BEFORE_OFF=1
+    # Only the guest's own words about a held-off switch count here.  An
+    # unpaired guest says "holds no pairing" whatever the host's switch reads,
+    # so that line alone proves nothing about the host: step 1b reads the host.
+    [ "$ET_BEFORE_RC" -eq 0 ] && grep -q 'never registered\|The operator holds it off' "$GX_OUT" && ET_BEFORE_OFF=1
     say "before the pairing: '$ET_BEFORE_LINE' (exit $ET_BEFORE_RC)"
+
+    # ── 1b. a base that left remote access ON is turned OFF first ───────
+    # From v3.71 on, the base's own install round trip registers with the
+    # stand-in gateway and leaves the switch on (ff573df once settled for "the
+    # pairing changes nothing").  A station that is on proves nothing about
+    # the pairing's effect on an owner who holds it off.  So the rig turns it
+    # off with the product's own switch, on the host, the way an owner would:
+    #     sigmond-setup --rac-off
+    # (the base host's own wizard; it needs no pairing).  Then the strict
+    # checks of step 3 run: the pairing must leave an OFF station off.  The
+    # registration a base made stays after an off ("The registration stays"),
+    # so the strict checks for that case expect the config and not the wish.
+    ET_FORCED_OFF=0
+    if [ "$ET_BEFORE_OFF" != 1 ]; then
+        # A host that never registered (no config) is the owner-said-No case
+        # whatever the unpaired guest could not say: it needs no switch.
+        $SSHN "echo ET1A:begin; test -e /etc/sigmond/frpc-host.toml && echo HASTOML:1 || echo HASTOML:0; echo ET1A:end" > "$WORK/et1a-reg.out" 2>&1
+        { grep -qx 'ET1A:begin' "$WORK/et1a-reg.out" && grep -qx 'ET1A:end' "$WORK/et1a-reg.out"; } \
+            || fatal "$WORK/et1a-reg.out" "E-ter: the nested host gave no answer to the registration probe (ssh failed; not a verdict)"
+        grep -qx 'HASTOML:0' "$WORK/et1a-reg.out" && ET_BEFORE_OFF=1
+    fi
+    if [ "$ET_BEFORE_OFF" != 1 ]; then
+        $SSHN "echo ET1B:begin
+            timeout 300 /usr/local/sbin/sigmond-setup --rac-off; echo OFFRC:\$?
+            echo WISH:\$(head -1 /etc/sigmond-appliance/rac-desired 2>/dev/null)
+            test -e /etc/sigmond/frpc-host.toml && echo HASTOML:1 || echo HASTOML:0
+            systemctl is-active --quiet sigmond-rac-host && echo TUNNEL:1 || echo TUNNEL:0
+            echo ET1B:end" > "$WORK/et1b-off.out" 2>&1
+        sed 's/^/      /' "$WORK/et1b-off.out" | tail -12
+        { grep -qx 'ET1B:begin' "$WORK/et1b-off.out" && grep -qx 'ET1B:end' "$WORK/et1b-off.out"; } \
+            || fatal "$WORK/et1b-off.out" "E-ter: the nested host gave no answer to the rac-off switch (ssh failed; not a verdict)"
+        grep -qx 'OFFRC:0' "$WORK/et1b-off.out" || fatal "$WORK/et1b-off.out" "sigmond-setup --rac-off on the base host did not exit 0"
+        grep -qx 'WISH:off' "$WORK/et1b-off.out" || fatal "$WORK/et1b-off.out" "after sigmond-setup --rac-off the host's wish does not read off"
+        grep -qx 'TUNNEL:0' "$WORK/et1b-off.out" || fatal "$WORK/et1b-off.out" "after sigmond-setup --rac-off the tunnel service still runs"
+        ET_FORCED_OFF=1
+        ET_OFF_TOML="$(grep -m1 '^HASTOML:' "$WORK/et1b-off.out" | tr -d '\r')"
+        say "the base left remote access on; turned off with sigmond-setup --rac-off (${ET_OFF_TOML})"
+        ET_BEFORE_OFF=1
+    fi
 
     # ── 2. the target's wizard on the old host pairs with one command ───
     # pm-align installs the release's wizard as /usr/local/sbin/sigmond-setup,
@@ -1342,34 +1387,41 @@ else
     # ── 3. the pairing leaves the station as it found it ────────────────
     gx_ok 120 et3-status 'smd remote status' "E-ter: smd remote status, paired"
     sed 's/^/      /' "$GX_OUT"
-    if [ "$ET_BEFORE_OFF" != 1 ]; then
-        # A base that registered at its own install: the pairing must change
-        # neither the wish nor what the tunnel reports.
-        ET_AFTER_LINE="$(grep -m1 '^Remote access:' "$GX_OUT" | tr -d '\r')"
-        [ "$GX_RC" -eq "$ET_BEFORE_RC" ] && [ "$ET_AFTER_LINE" = "$ET_BEFORE_LINE" ] \
-            || fatal "$GX_OUT" "pairing changed remote access: before '$ET_BEFORE_LINE' (exit $ET_BEFORE_RC), after '${ET_AFTER_LINE:-nothing}' (exit $GX_RC)"
-        say "paired, and remote access stands as the base's install left it: '$ET_AFTER_LINE' ✓"
+    # The station is off here, by one of two roads: the owner said No at
+    # install (never registered), or step 1b turned a registered base off.
+    # Either way the pairing must leave it off, with the wish, the tunnel and
+    # the retry timer as they stood.
+    [ "$GX_RC" -eq 0 ] || fatal "$GX_OUT" "smd remote status on the paired station exited $GX_RC, want 0 (off)"
+    LC_ALL=C grep -qx 'Remote access: off' "$GX_OUT" \
+        || fatal "$GX_OUT" "a station held off before the pairing does not read 'Remote access: off' after it"
+    if [ "$ET_FORCED_OFF" = 1 ]; then
+        LC_ALL=C grep -q 'The registration stays' "$GX_OUT" \
+            || fatal "$GX_OUT" "the answer does not say that the registration stays"
     else
-        [ "$GX_RC" -eq 0 ] || fatal "$GX_OUT" "smd remote status on the paired station exited $GX_RC, want 0 (off)"
-        LC_ALL=C grep -qx 'Remote access: off' "$GX_OUT" \
-            || fatal "$GX_OUT" "a station whose owner declined at install does not read 'Remote access: off' after pairing"
         LC_ALL=C grep -q 'never registered' "$GX_OUT" \
             || fatal "$GX_OUT" "the answer does not say that this station never registered"
-        $SSHN "echo ET3:begin
-            test ! -e /etc/sigmond/frpc-host.toml && echo NOTOML:1 || echo NOTOML:0
-            test ! -e /etc/sigmond-appliance/rac-desired && echo NOWISH:1 || echo NOWISH:0
-            systemctl is-active --quiet sigmond-rac-host && echo NOTUNNEL:0 || echo NOTUNNEL:1
-            systemctl is-enabled --quiet sigmond-rac-register.timer 2>/dev/null && echo NOTIMER:0 || echo NOTIMER:1
-            echo ET3:end" > "$WORK/et3-state.out" 2>&1
-        sed 's/^/      /' "$WORK/et3-state.out"
-        { grep -qx 'ET3:begin' "$WORK/et3-state.out" && grep -qx 'ET3:end' "$WORK/et3-state.out"; } \
-            || fatal "$WORK/et3-state.out" "E-ter: the nested host gave no answer to the state probe (ssh failed; not a verdict)"
-        grep -qx 'NOTOML:1' "$WORK/et3-state.out"   || fatal "$WORK/et3-state.out" "pairing changed the station: it registered (/etc/sigmond/frpc-host.toml exists)"
-        grep -qx 'NOWISH:1' "$WORK/et3-state.out"   || fatal "$WORK/et3-state.out" "pairing changed the station: it recorded a wish (/etc/sigmond-appliance/rac-desired exists)"
-        grep -qx 'NOTUNNEL:1' "$WORK/et3-state.out" || fatal "$WORK/et3-state.out" "pairing changed the station: it started the tunnel (sigmond-rac-host is active)"
-        grep -qx 'NOTIMER:1' "$WORK/et3-state.out"  || fatal "$WORK/et3-state.out" "pairing changed the station: it armed the retry timer (sigmond-rac-register.timer is enabled)"
-        say "paired, and still off: nothing registered, no wish recorded, no timer armed ✓"
     fi
+    $SSHN "echo ET3:begin
+        test ! -e /etc/sigmond/frpc-host.toml && echo NOTOML:1 || echo NOTOML:0
+        test ! -e /etc/sigmond-appliance/rac-desired && echo NOWISH:1 || echo NOWISH:0
+        echo WISH:\$(head -1 /etc/sigmond-appliance/rac-desired 2>/dev/null)
+        systemctl is-active --quiet sigmond-rac-host && echo NOTUNNEL:0 || echo NOTUNNEL:1
+        systemctl is-enabled --quiet sigmond-rac-register.timer 2>/dev/null && echo NOTIMER:0 || echo NOTIMER:1
+        echo ET3:end" > "$WORK/et3-state.out" 2>&1
+    sed 's/^/      /' "$WORK/et3-state.out"
+    { grep -qx 'ET3:begin' "$WORK/et3-state.out" && grep -qx 'ET3:end' "$WORK/et3-state.out"; } \
+        || fatal "$WORK/et3-state.out" "E-ter: the nested host gave no answer to the state probe (ssh failed; not a verdict)"
+    if [ "$ET_FORCED_OFF" = 1 ]; then
+        # Off after a registration: the config stays, the wish still reads off.
+        grep -qx 'NOTOML:0' "$WORK/et3-state.out" || fatal "$WORK/et3-state.out" "pairing changed the station: it removed the registration (/etc/sigmond/frpc-host.toml is gone)"
+        grep -qx 'WISH:off' "$WORK/et3-state.out" || fatal "$WORK/et3-state.out" "pairing changed the station: the wish no longer reads off"
+    else
+        grep -qx 'NOTOML:1' "$WORK/et3-state.out" || fatal "$WORK/et3-state.out" "pairing changed the station: it registered (/etc/sigmond/frpc-host.toml exists)"
+        grep -qx 'NOWISH:1' "$WORK/et3-state.out" || fatal "$WORK/et3-state.out" "pairing changed the station: it recorded a wish (/etc/sigmond-appliance/rac-desired exists)"
+    fi
+    grep -qx 'NOTUNNEL:1' "$WORK/et3-state.out" || fatal "$WORK/et3-state.out" "pairing changed the station: it started the tunnel (sigmond-rac-host is active)"
+    grep -qx 'NOTIMER:1' "$WORK/et3-state.out"  || fatal "$WORK/et3-state.out" "pairing changed the station: it armed the retry timer (sigmond-rac-register.timer is enabled)"
+    say "paired, and still off ($([ "$ET_FORCED_OFF" = 1 ] && echo 'turned off first, registration kept' || echo 'never registered')): no tunnel, no timer, wish unchanged ✓"
     say "PHASE E-ter PASS — a host from $IMGBASE pairs with one command, and the pairing leaves remote access as it stood"
 fi
 
