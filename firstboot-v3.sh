@@ -1800,7 +1800,7 @@ export DISPLAY="${DISPLAY:-:0}"   # older ssh refuses askpass without it
 # got the screen at all. rob, after a cold boot on v3.66: "I have the login
 # prompt but no Sigmond panel."
 #
-# The panel itself says "press Enter for a login to THIS host", so honour that:
+# The panel itself says "Press Enter here for a hypervisor login", so honour that:
 # block on one keystroke FIRST and open nothing until it arrives. While we
 # wait there is no connection, hence no flag, so the panel refreshes normally
 # and owns the display — the correct resting state for an unattended station.

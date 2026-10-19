@@ -251,8 +251,9 @@ fresh machine that can take tens of minutes.
 ⚠ **After this the keyboard no longer types into the host itself. That is normal
 and correct.** The USB ports now belong to the decoder VM, so a keyboard plugged
 into the station types into the VM. The station still carries that typing to a
-login on the host, and the panel's first line says so:
-`KEYBOARD WORKS HERE — press Enter for a login to THIS host`. Press Enter, then
+login on the host, and the panel says so on its second line:
+`Press Enter here for a hypervisor login; typing does not echo, which is normal.`
+Press Enter, then
 type the host's root password when the screen asks for it. Nothing shows while
 you type the password. With that login on the host you can type `sigmond-check`
 (§9), and `sigmond-setup --rac-off`, `sigmond-setup --rac-on` and

@@ -168,8 +168,8 @@ on a fresh machine that can take tens of minutes.
         the recorder.
   The keyboard no longer types into the host
         Normal.  The USB controllers now belong to the VM, so a keyboard
-        on the station types into the VM.  The panel's first line says
-        what it still does:  press Enter for a login to THIS host.
+        on the station types into the VM.  The panel's second line says
+        what it still does:  Press Enter here for a hypervisor login.
         Press Enter, then type the host's root password when the screen
         asks; nothing shows while you type it.  With that login on the
         host you can type   sigmond-setup --rac-off ,

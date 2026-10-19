@@ -119,9 +119,9 @@ done
 # station whose two machines have not paired.  Both read out of firstboot-v3.sh,
 # which draws the panel and installs the split console.
 FB="$HERE/firstboot-v3.sh"
-grep -q 'KEYBOARD WORKS HERE — press Enter for a login to THIS host' "$FB" \
+grep -q 'Press Enter here for a hypervisor login; typing does not echo, which is normal.' "$FB" \
     && grep -q 'TYPE THE PROXMOX HOST ROOT PASSWORD' "$FB" \
-    && echo "  ok   firstboot: the panel's first line offers a login on the host, and the screen asks for its root password" \
+    && echo "  ok   firstboot: the panel's second line offers a login on the host, and the screen asks for its root password" \
     || { echo "  FAIL firstboot-v3.sh no longer prints the keyboard line, or the password prompt, that the documents repeat"; fail=1; }
 grep -qF "printf \"type on another computer:  ssh root@%s 'sigmond-setup --rac-%s'\"" "$FB" \
     && echo "  ok   firstboot: the panel prints the host's own switch as ssh root@<host> '...' on a station that has not paired" \
@@ -129,7 +129,7 @@ grep -qF "printf \"type on another computer:  ssh root@%s 'sigmond-setup --rac-%
 for d in $DOCS; do
     plain "$HERE/$d" "$T/plain"; raw "$HERE/$d" "$T/raw"
     miss=""
-    grep -q 'press Enter for a login to THIS host' "$T/plain" || miss="$miss; does not quote the panel's line (press Enter for a login to THIS host)"
+    grep -q 'Press Enter here for a hypervisor login' "$T/plain" || miss="$miss; does not quote the panel's line (Press Enter here for a hypervisor login)"
     grep -q 'login on the host' "$T/plain"   || miss="$miss; does not say that the keyboard reaches a login on the host"
     grep -qi 'nothing shows while you type' "$T/plain" || miss="$miss; does not say that the password does not show"
     for c in 'sigmond-setup --rac-off' 'sigmond-setup --rac-on' 'sigmond-setup --pair-vm'; do
