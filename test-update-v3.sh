@@ -147,6 +147,14 @@ env overrides (for a scratch rig; never needed for a normal run):
   U2_ALLOW_NEW_KINDS   comma-separated doctor finding kinds an operator has
                        ALREADY ruled on and sanctioned as acceptable-new
                        (default: empty — a new kind is a failure)
+  U2_ALLOW_ROLLBACK_KINDS
+                       the same, for the rollback check in Phase G ALONE;
+                       the forward roll stays strict.  For a finding the
+                       older release's own install.sh leaves, which no
+                       change to the newer release can reach (v3.73: the
+                       v3.72 hf-tec installer rewrites its uv.lock, "dirty").
+                       Cannot sanction radiod-dropins-missing or
+                       qga-dropin-stale.  (default: empty)
 USAGE
 }
 IMGARG=""; TARGET="origin/main"; RESUME=0
@@ -1801,12 +1809,21 @@ if grep -q 'sigmond: checked out' "$WORK/g3-restore-apply.out"; then
         || fatal "$WORK/g3-restore-apply.out" "restore moved sigmond but printed no 'sigmond: install.sh exit 0': it did not run the older release's install"
     say "restore ran the restored sigmond's install.sh ✓"
 fi
-NEWG="$(new_kinds "$WORK/kinds-pre.txt" "$WORK/kinds-restored.txt" detached | tr '\n' ' ')"
+# U2_ALLOW_ROLLBACK_KINDS sanctions kinds here and nowhere else.
+RB_ALLOW="$(printf '%s\n' "${U2_ALLOW_ROLLBACK_KINDS:-}" | tr ', ' '\n' | sed '/^$/d' | sort -u)"
+RB_BAD="$(printf '%s\n' "$RB_ALLOW" | grep -xE 'radiod-dropins-missing|qga-dropin-stale' | tr '\n' ' ')"
+[ -z "$RB_BAD" ] || fatal - "U2_ALLOW_ROLLBACK_KINDS names $RB_BAD: unit drift after a rollback cannot be sanctioned"
+NEWG="$(new_kinds "$WORK/kinds-pre.txt" "$WORK/kinds-restored.txt" detached $RB_ALLOW | tr '\n' ' ')"
 if [ -n "$NEWG" ]; then
     excerpt "$WORK/doctor-post-restore.txt" 40
-    fatal - "smd doctor gained NEW finding kinds across the rollback (beyond the expected 'detached'): $NEWG (pre-E baseline: $(tr '\n' ' ' < "$WORK/kinds-pre.txt")). If one of these is a ruled-on, sanctioned consequence of the rollback's install.sh runs, re-run with U2_ALLOW_NEW_KINDS=$(printf '%s' "$NEWG" | tr ' ' ',' | sed 's/,$//')"
+    fatal - "smd doctor gained NEW finding kinds across the rollback (beyond the expected 'detached'): $NEWG (pre-E baseline: $(tr '\n' ' ' < "$WORK/kinds-pre.txt")). If one of these is a ruled-on, sanctioned consequence of the older release's own install.sh, re-run with U2_ALLOW_ROLLBACK_KINDS=$(printf '%s' "$NEWG" | tr ' ' ',' | sed 's/,$//')"
 fi
-say "no NEW doctor finding kinds across the rollback beyond the expected 'detached' ✓"
+RB_USED="$(comm -13 "$WORK/kinds-pre.txt" "$WORK/kinds-restored.txt" | grep -xF -f <(printf '%s\n' "$RB_ALLOW" | sed '/^$/d') 2>/dev/null | tr '\n' ' ')"
+if [ -n "$RB_USED" ]; then
+    excerpt "$WORK/doctor-post-restore.txt" 40
+    say "⚠ SANCTIONED FOR THE ROLLBACK ALONE: $RB_USED— new after the rollback, allowed by U2_ALLOW_ROLLBACK_KINDS"
+fi
+say "no NEW doctor finding kinds across the rollback beyond the expected 'detached'${RB_USED:+ and the sanctioned $RB_USED}✓"
 
 say "PHASE G PASS — rolled back to the blessed baseline and proved it strictly"
 
