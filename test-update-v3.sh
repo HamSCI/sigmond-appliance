@@ -1341,11 +1341,21 @@ fi
 
 # pipelines.toml: the renderer split the shared pipeline.  A station without
 # one client renders only the other, so each of the two counts 0 or 1 and at
-# least one is 1.
+# least one is 1.  A nest without radiod renders neither: the manifest step
+# skips each pskreporter pipeline for an unresolved radiod_status identity,
+# before the update and after it.  The rig then says so loudly instead of
+# failing or passing; B4's acceptance proves the rendering.
 [ "$EB_P_OLD" = 0 ] || fatal "$GX_OUT" "pipelines.toml still holds psk-pskreporter after the manifest step: the renderer did not split it"
-{ [ "$EB_P_PSK" -le 1 ] && [ "$EB_P_MS" -le 1 ] && [ $((EB_P_PSK + EB_P_MS)) -ge 1 ]; } \
-    || fatal "$GX_OUT" "pipelines.toml holds psk-recorder-pskreporter x$EB_P_PSK and meteor-scatter-pskreporter x$EB_P_MS: want at least one, each at most once"
-say "pipelines.toml: psk-recorder-pskreporter x$EB_P_PSK, meteor-scatter-pskreporter x$EB_P_MS, no psk-pskreporter ✓"
+{ [ "$EB_P_PSK" -le 1 ] && [ "$EB_P_MS" -le 1 ]; } \
+    || fatal "$GX_OUT" "pipelines.toml holds psk-recorder-pskreporter x$EB_P_PSK and meteor-scatter-pskreporter x$EB_P_MS: want each at most once"
+if [ $((EB_P_PSK + EB_P_MS)) -ge 1 ]; then
+    say "pipelines.toml: psk-recorder-pskreporter x$EB_P_PSK, meteor-scatter-pskreporter x$EB_P_MS, no psk-pskreporter ✓"
+elif grep -q 'skipping pipeline .*pskreporter.*unresolved identity' "$WORK/eb1-manifest.out"; then
+    say "⚠ SPLIT RENDERING NOT EVALUATED — the manifest step skipped every pskreporter pipeline (unresolved identity: this nest runs no radiod)"
+    KS_UNCHECKED="${KS_UNCHECKED:+$KS_UNCHECKED; }the split pipelines in pipelines.toml (this nest runs no radiod, so no pskreporter pipeline renders)"
+else
+    fatal "$GX_OUT" "pipelines.toml holds neither psk-recorder-pskreporter nor meteor-scatter-pskreporter, and the manifest step named no reason to skip them"
+fi
 EB_SPLIT_PSK="$EB_P_PSK"; EB_SPLIT_MS="$EB_P_MS"
 
 # The old key is superseded.  That needs an old record: a base whose store
@@ -1359,7 +1369,7 @@ if [ "${EB_PRE_OLD:-0}" -ge 1 ]; then
     say "hs-uploader status lists sqlite:psk.spots as superseded ✓"
 else
     say "⚠ SUPERSEDED CHECK NOT EVALUATED — the base store held no sqlite:psk.spots pskreporter record before the manifest step"
-    KS_UNCHECKED="the superseded old key in hs-uploader status (the base store held no pskreporter send record)"
+    KS_UNCHECKED="${KS_UNCHECKED:+$KS_UNCHECKED; }the superseded old key in hs-uploader status (the base store held no pskreporter send record)"
 fi
 
 say "PHASE E-bis PASS — watermarks.db at version $EB_VER with nothing pending; hs-uploader restarted after the migrate and stayed up"
