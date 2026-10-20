@@ -2,7 +2,7 @@
 
 > **Audience:** operator
 > **Status:** current
-> **Verified against:** sigmond-appliance v3.72 (51797f2) with sigmond 072b904, image sha256 2f5e3f11…: the nested rig test (2026-10-15 12:58Z), and a fresh install on AC0G-B4 (2026-10-15): identity restored, the RX-888 brought back by a hand replug after its cold-start latch, `sigmond-check` run at the host's console, uploads turned on, and the station's pages reached from its own LAN while a direct route to the decoder VM was refused
+> **Verified against:** sigmond-appliance v3.73 (9fef206) with sigmond 5c15981, image sha256 5acdb85e…: the rig update test, v3.72 rolled forward to v3.73 and back (2026-10-20 12:55Z); the nested rig test of the image (2026-10-20 14:27Z); and AC0G-B4 updated in place from v3.72 (2026-10-20): the send-record store migrated, the journald cap in force, physics-fusion writing dTEC again, and meteor-scatter on 15 s slots.  No fresh install of v3.73 on hardware yet; the install steps have not changed since v3.72
 > **Canonical for:** burning, booting and first-boot wizard of the appliance image
 
 Day-2 operation, troubleshooting beyond §11, remote access and what-not-to-touch live in the [Operator guide](https://github.com/HamSCI/sigmond/blob/main/docs/operator/README.md).
@@ -69,8 +69,8 @@ fleet admin. Any other name is an ordinary station and nothing here applies.
 
 Ask your fleet admin for the current release — or download links for it:
 
-- `sigmond-appliance-v3.72-20261015-release.img`  (about 5.5 GB)
-- `sigmond-appliance-v3.72-20261015-release.sha256`  (its checksum)
+- `sigmond-appliance-v3.73-20261020-release.img`  (about 5.6 GB)
+- `sigmond-appliance-v3.73-20261020-release.sha256`  (its checksum)
 
 Each release carries its own version and date in the filename; use the names
 you were given wherever this guide shows one.
@@ -79,7 +79,7 @@ The image is published **uncompressed** (`.img`) — there is nothing to
 decompress. With both files in one folder, check it:
 
 ```
-sha256sum -c sigmond-appliance-v3.72-20261015-release.sha256
+sha256sum -c sigmond-appliance-v3.73-20261020-release.sha256
 ```
 
 ---
@@ -91,7 +91,7 @@ USB attributes instead of a letter you type, refuses the disk your computer
 runs from, and reads the stick back to compare every byte:
 
 ```
-./flash-usb.sh sigmond-appliance-v3.72-20261015-release.img
+./flash-usb.sh sigmond-appliance-v3.73-20261020-release.img
 ```
 
 **Any OS, graphical:** balenaEtcher (balena.io/etcher) or Raspberry Pi Imager
@@ -100,7 +100,7 @@ runs from, and reads the stick back to compare every byte:
 **Command line (Linux):**
 ```
 lsblk -dno NAME,SIZE,TRAN,RM,MODEL     # find the stick: check size, removable
-sudo dd if=sigmond-appliance-v3.72-20261015-release.img of=/dev/sdX bs=4M \
+sudo dd if=sigmond-appliance-v3.73-20261020-release.img of=/dev/sdX bs=4M \
         oflag=direct conv=fsync status=progress
 sync
 ```
@@ -110,12 +110,12 @@ sync
 ```
 diskutil list                      # find your stick, e.g. /dev/disk4
 diskutil unmountDisk /dev/disk4
-sudo dd if=sigmond-appliance-v3.72-20261015-release.img of=/dev/rdisk4 bs=4m
+sudo dd if=sigmond-appliance-v3.73-20261020-release.img of=/dev/rdisk4 bs=4m
 ```
 
 **Verify a hand-written stick** by reading back exactly the image's size:
 ```
-IMG=sigmond-appliance-v3.72-20261015-release.img
+IMG=sigmond-appliance-v3.73-20261020-release.img
 sudo head -c "$(stat -c %s $IMG)" /dev/sdX | sha256sum
 sha256sum $IMG                     # the two hashes must match
 ```
