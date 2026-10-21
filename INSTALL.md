@@ -151,16 +151,28 @@ for you — your portal registration carries over.
 2. Power on and **boot from the stick** — press the boot-menu key as it
    starts (usually F7, F11, F12, or Del) and pick the USB entry. If no menu
    appears, enter BIOS setup and turn **Fast Boot OFF**.
-3. **What you'll see:** an installer runs by itself, asking nothing. After a
-   few minutes **the machine turns itself off**. That is your signal.
+3. **A boot menu appears, counting down from 60 seconds.** The first entry
+   is highlighted and reads:
+
+       Install Sigmond: ERASES THE INTERNAL DISK
+
+   Leave it alone and it starts after the countdown. ⚠ **It means what it
+   says:** it erases everything on the machine's internal disk. If that is
+   not what you want, power the machine off now — before the countdown ends.
+   (Jenny Jump, 2026-10-20: the countdown used to be ten seconds behind a
+   title that named a product rather than an action.)
+4. **What you'll see next:** the installer runs by itself, asking nothing.
+   After a few minutes **the machine turns itself off**. That is your signal.
 
    ⚠ **It can sit on "creating LVs" for a long time** when the disk held an
    earlier install. That is the installer working, not a hang. **Do not
    switch the machine off** — wait at least 30 minutes. Cutting power there
    only makes you start again (AC0G-ND, 2026-10-05: the first attempt was
    switched off at this step; the second, left alone, finished).
-4. **REMOVE THE STICK, then power the machine back on.** (Some machines
-   always boot USB first and would install again in a loop.)
+5. **REMOVE THE STICK, then power the machine back on.** (Some machines
+   always boot USB first and would install again in a loop — and the entry
+   above erases the disk, so a stick left in such a machine can reinstall
+   over a working station.)
 
 ---
 

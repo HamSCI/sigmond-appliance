@@ -341,6 +341,18 @@ proxmox-auto-install-assistant prepare-iso "$SRC_ISO" \
     --on-first-boot firstboot-rendered.sh --output pve-sc-v3.iso
 [ -f pve-sc-v3.iso ] || { say "FATAL: prepare-iso produced nothing"; exit 1; }
 
+say "installer menu: 60 s countdown, and the entry names what it does"
+# Chris, Jenny Jump, 2026-10-20 (v3.74 row 1): the stick counts down ten
+# seconds behind a title that reads "Install Proxmox VE (Automated)", then
+# erases the machine's internal disk without asking.  The menu lives in the
+# iso9660 at /boot/grub/grub.cfg -- the ESP below holds only a stub that
+# sources it -- so it is patched here, BEFORE the ESP is located by sector
+# and before the payload offset is read from the volume size.  The patch is
+# length-preserving by construction and refuses to write if the image's
+# length moves, so neither of those is disturbed.
+./patch-installer-menu.sh pve-sc-v3.iso 60 \
+    || { say "FATAL: could not patch the installer boot menu"; exit 1; }
+
 say "ESP FAT12→FAT16 in-place conversion (AMI firmwares silently refuse FAT12"
 say "ESPs on USB media — B4 AZW SER offered no boot option, 2026-07-26)"
 ESP_START=$(sgdisk -i 2 pve-sc-v3.iso 2>/dev/null | awk '/First sector/{print $3}')
