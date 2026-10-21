@@ -256,6 +256,19 @@ P="${QGA_PANEL:-/usr/local/sbin/sigmond-issue}"
 I="${QGA_ISSUE:-/etc/issue}"
 unit(){ timeout 20 qm guest exec "$VMID" --timeout 10 -- /bin/systemctl is-active sigmond-firstrun-bringup 2>/dev/null \
           | grep -oE '"out-data" *: *"[a-z]+' | grep -oE '[a-z]+$' | head -1; }
+# Hold the panel's timer still and wait out a refresh already running, as the
+# deafen probe does.  The heal probe's EXIT trap restarts the timer, and when
+# its 5-minute interval has passed systemd fires a refresh at once; that
+# refresh then holds the panel's lock, our refresh exits on it, and /etc/issue
+# shows only the "starting" placeholder (nested D, 2026-10-21, twice).
+trap 'systemctl start sigmond-issue.timer >/dev/null 2>&1' EXIT
+systemctl stop sigmond-issue.timer >/dev/null 2>&1
+for w in $(seq 1 90); do
+    case "$(systemctl is-active sigmond-issue.service 2>/dev/null)" in
+        activating|active|reloading|deactivating) sleep 1 ;;
+        *) break ;;
+    esac
+done
 u1=$(unit)
 SIGMOND_VMID="$VMID" "$P" >/dev/null 2>&1
 u2=$(unit)
@@ -268,6 +281,9 @@ t RETRY    'BRING-UP FAILED -- it tries again'
 t GAVEUP   'BRING-UP FAILED THREE TIMES'
 t STOPPED  'BRING-UP WAS STOPPED BEFORE IT FINISHED'
 t SILENT   'guest agent does not answer'
+# STARTING:1 means /etc/issue still holds the placeholder: our refresh did not
+# run to the end, so the tokens above say nothing about the panel.
+t STARTING 'It is not up yet\.'
 echo END:1
 QGAEOF
 }
@@ -2123,6 +2139,8 @@ $Q3"
             | grep -o '"out-data" *: *"[a-z-]*' | grep -o '[a-z-]*$' | head -1)
     Q4=$(qga_probe_bringup | $SSHN "bash -s $VMID" 2>&1)
     nh_ok "$Q4" || qga_fatal "guest agent, the panel's bring-up line: the nested host gave no answer (not a verdict)" "$Q4"
+    [ "$(rr_tok STARTING "$Q4")" = 0 ] \
+        || qga_fatal "guest agent, the panel's bring-up line: /etc/issue still holds the starting placeholder, so the probe's refresh did not finish (a rig fault, not a verdict)" "$Q4"
     [ "$(rr_tok SILENT "$Q4")" = 0 ] \
         || qga_fatal "after the heal, the panel says once more that the guest agent does not answer" "$Q4"
     case "${QRES:-none}" in
