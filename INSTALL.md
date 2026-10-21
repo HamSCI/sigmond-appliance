@@ -2,7 +2,7 @@
 
 > **Audience:** operator
 > **Status:** current
-> **Verified against:** sigmond-appliance v3.73 (9fef206) with sigmond 5c15981, image sha256 5acdb85e…: the rig update test, v3.72 rolled forward to v3.73 and back (2026-10-20 12:55Z); the nested rig test of the image (2026-10-20 14:27Z); and AC0G-B4 updated in place from v3.72 (2026-10-20): the send-record store migrated, the journald cap in force, physics-fusion writing dTEC again, and meteor-scatter on 15 s slots.  No fresh install of v3.73 on hardware yet; the install steps have not changed since v3.72
+> **Verified against:** sigmond-appliance v3.76 (built from 4b7ce17): v3.75 was installed on hardware by AI6VN (2026-10-21) at a WIRED IPv6-ONLY site and came up **unreachable** — a forwarding Proxmox host drops every router advertisement unless `accept_ra` is 2, so the station lost its IPv6 default route and never learned the RA's DNS64 resolver, and remote access could not resolve its own server name.  v3.76 is v3.75 plus that fix, which was proven on the live station by hand (the default route and the RDNSS server returned within seconds).  ⚠ **v3.76 has not yet been installed from scratch**; the nested rig test does not exercise this path, because it runs dual-stack with working DNS.  ⛔ Do not install v3.74 or v3.75 at a site with no IPv4.
 > **Canonical for:** burning, booting and first-boot wizard of the appliance image
 
 Day-2 operation, troubleshooting beyond §11, remote access and what-not-to-touch live in the [Operator guide](https://github.com/HamSCI/sigmond/blob/main/docs/operator/README.md).
