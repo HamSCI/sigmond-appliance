@@ -2991,6 +2991,27 @@ qga_note_reset(){
 # minutes so a user could rightly wonder what's wrong ... it looks like it's
 # hung".  It was not hung; it was waiting, silently, on a screen saying the
 # wrong thing.  Say so instead.
+# ⛔ SCRUB /etc/issue AND /etc/motd BEFORE EVERY REWRITE.  We only ever replace
+# our own marked block, so anything outside it is never repaired:
+#   - NUL bytes.  A power cut while a file is being written can leave a run of
+#     zeros in it; pam_motd prints /etc/motd as a C string and STOPS at the
+#     first NUL.  AC1SN (2026-10-18 outage): 2004 zeros sat just above the
+#     panel, and every ssh login -- the RAC's included -- showed the Debian
+#     notice and nothing else, while the console looked fine.
+#   - The install banner ("==== Sigmond appliance vX ====" / "Decoder VM: 100
+#     (...)  Wizard: sigmond-setup") that firstboot used to append.  It
+#     repeated the panel's own header and told an operator nothing (rob,
+#     2026-10-20); firstboot no longer writes it, and this clears old hosts.
+_scrub_panel_file(){
+    local f="$1"
+    [ -f "$f" ] || return 0
+    if ! tr -d '\000' < "$f" | cmp -s - "$f"; then
+        tr -d '\000' < "$f" > "$f.scrub.$$" && cat "$f.scrub.$$" > "$f"
+        rm -f "$f.scrub.$$"
+    fi
+    sed -i -e '/^  ==== Sigmond appliance .* ====$/d' \
+           -e '/^  Decoder VM: [0-9]* (sigmond-decoder-.*Wizard: sigmond-setup$/d' "$f" 2>/dev/null
+}
 _paint_vt1(){
     # Never over the wizard/finalizer transcript, a live split-console session,
     # or a real tty1 login.  One copy of this rule: the final paint calls the
@@ -3027,6 +3048,7 @@ SEOF
 )
 _paint_vt1 "$_STARTING"
 for f in /etc/issue /etc/motd; do
+    _scrub_panel_file "$f"
     sed -i '/^════ Sigmond appliance /,/^════ end Sigmond panel/d' "$f" 2>/dev/null
     printf '\n%s\n' "$_STARTING" >> "$f"
 done
@@ -3710,6 +3732,7 @@ for f in /etc/issue /etc/motd; do
     # old block would never be deleted, and /etc/issue would grow a full panel
     # per refresh.  That is the 1000-line failure below, re-armed by a cosmetic
     # change.  Match the marker, never the whole line.
+    _scrub_panel_file "$f"
     sed -i '/^════ Sigmond appliance /,/^════ end Sigmond panel/d' "$f" 2>/dev/null
     sed -i -e :a -e '/^\n*$/{$d;N;ba' -e '}' "$f" 2>/dev/null
     printf '\n%s\n' "$PANEL" >> "$f"
@@ -3812,11 +3835,10 @@ ACTION=="add", SUBSYSTEM=="block", ENV{DEVTYPE}=="disk", ENV{ID_FS_TYPE}=="iso96
 UDEVEOF
 udevadm control --reload-rules 2>/dev/null; systemctl daemon-reload 2>/dev/null
 
-grep -q "Sigmond appliance" /etc/motd 2>/dev/null || cat >> /etc/motd <<MOTDEOF
-
-  ==== Sigmond appliance $VERSION ====
-  Decoder VM: 100 (sigmond-decoder-${VERSION//./-})   Wizard: sigmond-setup
-MOTDEOF
+# No install banner in /etc/motd: the panel's first line already reads
+# "════ Sigmond appliance vX — station <CALL> ════", and "Decoder VM: 100 (...)
+# Wizard: sigmond-setup" above it told an operator nothing (rob, 2026-10-20).
+# sigmond-issue's _scrub_panel_file removes the old banner from existing hosts.
 
 HOSTIP=$(cur_ip vmbr0)
 # ⚠ NOT `hostname -I | awk '{print $1}'`: that lists EVERY address, and since
