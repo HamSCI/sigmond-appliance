@@ -37,6 +37,9 @@
 #                    test-v3.log (default: $HOME/appliance/v3)
 #   GH_REPO_SLUG    GitHub repo slug (default: HamSCI/sigmond-appliance)
 set -u
+# systemd-run sets no HOME, and set -u would stop at the first use below.
+# Take the account's home from the password database instead.
+: "${HOME:=$(getent passwd "$(id -un)" | cut -d: -f6)}"
 
 say(){ echo "[bless $(date '+%T')] $*"; }
 
