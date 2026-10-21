@@ -114,6 +114,25 @@ $(ip -4 route show default 2>/dev/null)
 GWEOF
     return 1
 }
+
+# ⛔ "THERE IS AN IPv6 DEFAULT ROUTE" IS NOT "THIS BRIDGE HAS ONE".
+# On a dual-homed host -- AI6VN-PM carries a wired vmbr0 and a wlp3s0, each
+# with its own RA and its own default route, both proto ra metric 1024 -- a
+# bare `ip -6 route show default | grep -q .` is true BECAUSE OF THE RADIO
+# even when vmbr0's port is dead.  Anything reading that as "the site runs on
+# IPv6, nothing to fix" would walk away from a bridge that reaches nothing.
+# Ask it of the DEVICE: a global IPv6 of its own that is neither tentative
+# nor deprecated, AND a default route that leaves through it.  The device is
+# matched as a whole awk field, because " dev vmbr0" also substring-matches
+# vmbr0x.  Prints nothing; returns 0 when that device is a live v6 uplink.
+v6_uplink_on(){
+    local _dev="${1:-vmbr0}"
+    ip -6 -o addr show "$_dev" scope global 2>/dev/null \
+        | grep -v -e tentative -e deprecated | grep -q . || return 1
+    ip -6 route show default 2>/dev/null | awk -v d="$_dev" '
+        { for (i = 1; i < NF; i++) if ($i == "dev" && $(i+1) == d) f = 1 }
+        END { exit !f }'
+}
 NETLIBEOF
 chmod 0644 /usr/local/lib/sigmond-net.sh
 
@@ -376,6 +395,40 @@ if [ -n "$IP" ] && [ -n "$_vmbr_port_now" ] && [ "$_vmbr_port_now" != none ] \
     ip addr flush dev vmbr0 scope global 2>/dev/null
     ip route del default dev vmbr0 2>/dev/null
     IP=""
+fi
+
+# ── an IPv6-only site is not a broken site ──────────────────────────────────
+# Chris, Jenny Jump, v3.70, 2026-10-20: first boot printed "vmbr0 is on the
+# PVE installer fallback 192.168.100.2 -- that address is not routable here"
+# and then hunted every port with dhclient.  The station was already up and
+# serving over IPv6; he read the screen and concluded the installer had never
+# got an IPv6 address at all.
+#
+# The hunt below is not merely noisy there, it is SLOW and DESTRUCTIVE: up to
+# 25 s of dhclient per port, and `ip addr flush dev $n` on each candidate, on
+# a machine that is already carrying the station.  And it runs on EVERY boot,
+# because an IPv6-only site never acquires the IPv4 that would quiet it.
+#
+# If vmbr0 is itself a live IPv6 uplink then netfix's one job -- keep vmbr0 on
+# a NIC that can reach the LAN -- is already done, whether its IPv4 is the
+# installer's fossil or absent altogether.  Say so once and stop.  Scoped to
+# vmbr0 by v6_uplink_on(): a v6 default route via the RADIO must never excuse
+# a dead bridge.
+#
+# Written as an `if`, not a second `case "$IP" in`, because the branch tests
+# isolate that arm by regex and a second one would capture them (10-21).
+_v4_unusable=no
+[ -z "$IP" ] && _v4_unusable=yes
+case "$IP" in 192.168.100.*) _v4_unusable=yes ;; esac
+if [ "$_v4_unusable" = yes ] && v6_uplink_on vmbr0; then
+    _v6me=$(ip -6 -o addr show vmbr0 scope global 2>/dev/null \
+        | grep -v -e tentative -e deprecated | awk '{print $4}' \
+        | cut -d/ -f1 | head -1)
+    say "this site runs on IPv6: vmbr0 has $_v6me and an IPv6 default route${IP:+, so the installer fallback $IP does not matter here}"
+    # The rule 6360654 established for IPv4 holds for v6: a host that can
+    # reach the LAN has no business printing NO WORKING NETWORK ADDRESS.
+    rm -f /etc/sigmond-appliance/.network-unreachable 2>/dev/null
+    exit 0
 fi
 case "$IP" in
     "")          say "vmbr0 has no IPv4 — looking for a NIC that does" ;;
