@@ -1638,6 +1638,42 @@ TimeoutStartSec=45
 NETTOEOF
 echo "### networking.service start timeout capped at 45s (was 5min)"
 
+# ── a FORWARDING host must be told to accept router advertisements ─────────
+# ⛔ THE SINGLE ROOT CAUSE OF AI6VN's UNREACHABLE INSTALL, 2026-10-21.
+# A Proxmox host forwards (it routes for the decoder VM), and Linux ignores
+# RAs on a forwarding interface unless accept_ra is 2.  We set that in two
+# places -- netfix at runtime, and the inet6 stanza's post-up -- and NEITHER
+# survives: `net.ipv6.conf.default.accept_ra` is 1, so vmbr0 inherits 1 the
+# moment networking.service creates it, and nothing puts it back.
+#
+# What that cost, measured on a v3.75 install at an IPv6-only site:
+#   - every RA dropped; the router lifetime is 30 s, so the IPv6 default
+#     route expired within half a minute and never returned
+#   - the RA's RDNSS option was never consumed, so rdnssd's file stayed EMPTY
+#     and /etc/resolv.conf kept naming 127.0.0.1, where nothing listens
+#   - frpc could not resolve its own server:
+#       "lookup vpn.hamsci.org on 127.0.0.1:53: server misbehaving"
+#     so remote access read "wanted on, 0 of 6 up" on a station that was
+#     otherwise perfectly healthy -- a drive-to-the-site failure.
+# One `sysctl -w net.ipv6.conf.vmbr0.accept_ra=2` restored the default route
+# and the RDNSS server within seconds, which is what proves the mechanism.
+#
+# ⚠ THE DEFAULT IS THE RIGHT LEVER, AND /etc/sysctl.d IS THE RIGHT PLACE FOR
+# IT -- the opposite of the rule for a per-INTERFACE sysctl.  systemd-sysctl
+# runs before network-pre.target, so a `net.ipv6.conf.vmbr0.*` line here
+# would apply to an interface that does not exist yet and be silently lost.
+# `default.*` has no such problem: it is what every later-created interface
+# inherits, and vmbr0 is created afterwards by networking.service.
+cat > /etc/sysctl.d/99-sigmond-ipv6-ra.conf <<'RACONF'
+# A Proxmox host forwards for the decoder VM, and Linux ignores router
+# advertisements on a forwarding interface unless accept_ra is 2.  vmbr0 is
+# created after systemd-sysctl runs, so it inherits this default.
+net.ipv6.conf.default.accept_ra = 2
+net.ipv6.conf.all.accept_ra = 2
+RACONF
+sysctl -q --system >/dev/null 2>&1
+echo "### accept_ra=2 made the inherited default (a forwarding host drops RAs otherwise)"
+
 # ── prefer the WIRED uplink when the host is dual-homed on IPv6 ────────────
 # AI6VN, 2026-10-15.  The host had both a cable and an associated radio, each
 # getting a global address and a default route from its own router.  Both
