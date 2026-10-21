@@ -1021,6 +1021,16 @@ fi
 #    with no IPv6 route buys only a happy-eyeballs stall before the fallback.
 if command -v dnsmasq >/dev/null 2>&1; then
     up=$(awk '/^nameserver/{print $2; exit}' /etc/resolv.conf)
+    # ⛔ FOLLOW resolv.conf, DO NOT COPY IT.  A pinned server= outlives the
+    # site: AC1SN moved from a school LAN to a home LAN and its VM kept asking
+    # the school's resolver -- no DNS at all until someone edited this file.
+    # dnsmasq re-reads resolv.conf whenever DHCP rewrites it.  Pin only when
+    # resolv.conf names nothing usable (empty or loopback), exactly as before.
+    case "$up" in
+        ""|127.*|::1) dns_upstream="no-resolv
+server=${up}" ;;
+        *) dns_upstream="# upstream: this host's /etc/resolv.conf (followed, not copied)" ;;
+    esac
     mkdir -p /etc/dnsmasq.d
     cat > /etc/dnsmasq.d/sigmond-vm.conf <<CONF
 # Managed by sigmond-v6-gateway. Serves the decoder VM only.
@@ -1028,8 +1038,7 @@ interface=vmbr1
 listen-address=${MGMT_PM_IP}
 bind-interfaces
 no-dhcp-interface=vmbr1
-no-resolv
-server=${up}
+${dns_upstream}
 # The guest is IPv4-only with no IPv6 route; synthesised AAAA are unusable.
 filter-AAAA
 CONF
@@ -2294,6 +2303,10 @@ MGMT_NET=10.99.0.0/30
 # default gateway, which is a resolver on most small networks, and only then
 # to a public one.
 PM_DNS=$(awk '/^nameserver/{print $2; exit}' /etc/resolv.conf 2>/dev/null)
+# Remember whether resolv.conf itself named a usable resolver: if it did, the
+# VM's dnsmasq FOLLOWS that file (below) instead of freezing today's answer.
+PM_DNS_FROM_RESOLV=1
+case "$PM_DNS" in 127.*|"") PM_DNS_FROM_RESOLV=0 ;; esac
 case "$PM_DNS" in
   # ⛔ Not `ip route show default | awk '{print $3}'`.  That takes the FIRST
   # default route of either family, which on this appliance can be the PVE
@@ -2350,6 +2363,23 @@ iptables -t nat -C POSTROUTING -s "$MGMT_NET" -o clat -j MASQUERADE 2>/dev/null 
 # calls its gateway.  One rule on every site in either family, instead of a
 # special case that only exists where someone remembered to add it.
 if command -v dnsmasq >/dev/null 2>&1; then
+    # ⛔ FOLLOW resolv.conf, DO NOT COPY IT.  `no-resolv` + `server=${PM_DNS}`
+    # froze the install site's resolver into the appliance: AC1SN (DASI-017)
+    # was installed on a school LAN (192.168.1.1), moved to a home LAN on
+    # 2026-10-16, and its VM had no DNS at all -- git and every upload failed --
+    # until someone edited this file by hand.  dnsmasq re-reads resolv.conf
+    # whenever DHCP rewrites it, so a unit that moves keeps working.  The pin
+    # stays for the case it was written for: resolv.conf names nothing usable
+    # (empty or loopback), and PM_DNS came from the gateway or the public
+    # fallback above.
+    if [ "$PM_DNS_FROM_RESOLV" = 1 ]; then
+        DNS_UPSTREAM="# upstream: this host's /etc/resolv.conf (followed, not copied)"
+        DNS_SAY="this host's resolv.conf (now ${PM_DNS})"
+    else
+        DNS_UPSTREAM="no-resolv
+server=${PM_DNS}"
+        DNS_SAY="${PM_DNS}"
+    fi
     mkdir -p /etc/dnsmasq.d
     cat > /etc/dnsmasq.d/sigmond-vm.conf <<DNSEOF
 # Managed by sigmond firstboot. Serves the decoder VM and nothing else.
@@ -2358,8 +2388,7 @@ interface=vmbr1
 listen-address=${MGMT_PM}
 bind-interfaces
 no-dhcp-interface=vmbr1
-no-resolv
-server=${PM_DNS}
+${DNS_UPSTREAM}
 # The guest is IPv4-only with no IPv6 route of any kind.  On a NAT64 site the
 # upstream is a DNS64 and will synthesise AAAA for every name; handing those to
 # the guest buys only a happy-eyeballs stall before it falls back to A.
@@ -2367,7 +2396,7 @@ filter-AAAA
 DNSEOF
     systemctl enable dnsmasq >/dev/null 2>&1
     if systemctl restart dnsmasq >/dev/null 2>&1; then
-        say "VM resolver: dnsmasq on ${MGMT_PM} -> ${PM_DNS} (the VM asks its gateway, not the site)"
+        say "VM resolver: dnsmasq on ${MGMT_PM} -> ${DNS_SAY} (the VM asks its gateway, not the site)"
     else
         say "⚠ dnsmasq would not start — the decoder VM will have NO name resolution"
         journalctl -u dnsmasq -n 5 --no-pager >>"$LOG" 2>&1
