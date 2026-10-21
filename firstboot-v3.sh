@@ -417,10 +417,35 @@ fi
 #
 # Written as an `if`, not a second `case "$IP" in`, because the branch tests
 # isolate that arm by regex and a second one would capture them (10-21).
+#
+# ⛔ AND IT MUST NOT FIRE UNTIL THE v6 CONFIG IS PERSISTENT.  This guard was
+# added above the branch that MAKES an IPv6-only site survive a reboot, and
+# on a FIRST boot it would have run instead of it.  The sequence:
+#   - IPv6 forwarding is turned on only by the post-up inside the
+#     `iface vmbr0 inet6 auto` stanza, which does not exist yet on a fresh
+#     install, so forwarding is at the Debian default of 0;
+#   - with forwarding 0 the default accept_ra=1 IS honoured, so vmbr0 picks
+#     up a SLAAC address and a default route on its own;
+#   - so v6_uplink_on() is already true the first time netfix runs, and an
+#     unconditional exit here skips removing the fossil 192.168.100.2,
+#     skips stripping the dead static stanza, and never writes the inet6
+#     stanza at all.
+# The fossil is the expensive part: "leaving an unroutable IPv4 on the bridge
+# makes every later do-we-have-IPv4 test lie, and sigmond-v6-gateway keys off
+# exactly that question."  rob, 2026-10-21, on a wired IPv6-only Bud Pro box.
+#
+# So require the persistent stanza AND the absence of the fossil.  First boot
+# then falls through to the branch that establishes both; every later boot
+# takes the quiet path, which is the whole point of the row-3 fix.
 _v4_unusable=no
 [ -z "$IP" ] && _v4_unusable=yes
 case "$IP" in 192.168.100.*) _v4_unusable=yes ;; esac
-if [ "$_v4_unusable" = yes ] && v6_uplink_on vmbr0; then
+_v6_persistent=no
+grep -q "^iface vmbr0 inet6" "$IFACES" 2>/dev/null && _v6_persistent=yes
+_fossil_gone=yes
+ip -4 -o addr show vmbr0 2>/dev/null | grep -q "192\.168\.100\." && _fossil_gone=no
+if [ "$_v4_unusable" = yes ] && [ "$_v6_persistent" = yes ] && [ "$_fossil_gone" = yes ] \
+   && v6_uplink_on vmbr0; then
     _v6me=$(ip -6 -o addr show vmbr0 scope global 2>/dev/null \
         | grep -v -e tentative -e deprecated | awk '{print $4}' \
         | cut -d/ -f1 | head -1)

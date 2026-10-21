@@ -48,7 +48,12 @@ args="$*"
 case "$args" in
   *"addr show"*)
       dev=""; for w in $args; do [ "$prev" = show ] && dev="$w"; prev="$w"; done
-      grep -E "^[0-9]+: $dev " "$STUB_ADDR" 2>/dev/null ;;
+      out=$(grep -E "^[0-9]+: $dev " "$STUB_ADDR" 2>/dev/null)
+      case "$args" in
+        *"-4"*) printf '%s\n' "$out" | grep "inet " ;;
+        *"-6"*) printf '%s\n' "$out" | grep "inet6" ;;
+        *)      printf '%s\n' "$out" ;;
+      esac ;;
   *"route show default"*)
       cat "$STUB_ROUTE" 2>/dev/null ;;
 esac
@@ -136,6 +141,77 @@ if [ -n "$blk" ]; then
         || bad "the guard does not exit" "the destructive hunt still runs"
 else
     bad "could not find the IPv6-site guard in netfix" "row 3 is not implemented"
+fi
+
+# ── the guard must not fire before the v6 config is PERSISTENT ─────────────
+# rob, 2026-10-21, a wired IPv6-only Bud Pro box.  On a FIRST boot vmbr0
+# already has a SLAAC address and a default route -- IPv6 forwarding is still
+# 0, because only the inet6 stanza's post-up turns it on, so accept_ra=1 is
+# honoured.  An unconditional guard therefore ran INSTEAD of the branch that
+# removes the fossil 192.168.100.2, strips the dead static stanza and writes
+# the stanza that makes the site survive a reboot.
+echo "── first boot must fall through; later boots may short-circuit ───"
+python3 - "$TMP/netfix.sh" "$TMP/cond.sh" <<'PYX'
+import re, sys, pathlib
+s = pathlib.Path(sys.argv[1]).read_text()
+m = re.search(r'(_v4_unusable=no\n.*?v6_uplink_on vmbr0; then)', s, re.S)
+if not m: raise SystemExit("could not isolate the guard condition")
+cond = m.group(1)
+cond = cond[:-len("; then")] + "; then echo FIRE; else echo SKIP; fi\n"
+pathlib.Path(sys.argv[2]).write_text(cond)
+PYX
+if [ -s "$TMP/cond.sh" ]; then
+  decide(){ # decide <name> <expect FIRE|SKIP> <IP> <ifaces> <addr> <route>
+      printf '%s\n' "$4" > "$TMP/ifaces"
+      printf '%s\n' "$5" > "$STUB_ADDR"
+      printf '%s\n' "$6" > "$STUB_ROUTE"
+      got=$(IP="$3" IFACES="$TMP/ifaces" bash -c ". '$TMP/net.sh' 2>/dev/null; . '$TMP/cond.sh'" 2>/dev/null | tail -1)
+      if [ "$got" = "$2" ]; then ok "$1"
+      else bad "$1" "guard said $got, expected $2"; fi
+  }
+  V6ADDR="1: vmbr0    inet6 fd4f:a955:ac3d:1:8647:9ff:fe1b:29ee/64 scope global"
+  FOSSIL="1: vmbr0    inet 192.168.100.2/24 scope global"
+  RT="default via fe80::4a6d:6065 dev vmbr0 proto ra metric 1024 pref medium"
+  RADIO="default via fe80::dea6:32ff dev wlp3s0 proto ra metric 1024 pref medium"
+
+  decide "FIRST BOOT (no inet6 stanza, fossil present) falls through" SKIP \
+      "192.168.100.2" "iface vmbr0 inet static
+	address 192.168.100.2/24" "$V6ADDR
+$FOSSIL" "$RT"
+
+  decide "a later boot (stanza written, fossil gone) short-circuits" FIRE \
+      "" "iface vmbr0 inet6 auto" "$V6ADDR" "$RT"
+
+  decide "stanza written but the fossil is STILL on vmbr0 falls through" SKIP \
+      "192.168.100.2" "iface vmbr0 inet6 auto" "$V6ADDR
+$FOSSIL" "$RT"
+
+  decide "stanza written, fossil gone, but the route is via the RADIO" SKIP \
+      "" "iface vmbr0 inet6 auto" "$V6ADDR" "$RADIO"
+
+  # ⛔ Isolates the PERSISTENCE requirement from the fossil requirement.
+  # Without this case every first-boot scenario also carries the fossil, so
+  # the fossil check alone would satisfy the suite and dropping the stanza
+  # check would go unnoticed.  vmbr0 can hold a SLAAC address with no fossil
+  # (the installer found a v4 lease once, or someone cleared it by hand); the
+  # stanza still has to be written or the next boot has no config at all.
+  decide "no stanza and no fossil either still falls through" SKIP \
+      "" "iface vmbr0 inet static" "$V6ADDR" "$RT"
+
+  # ⛔ Another interface's inet6 stanza is NOT vmbr0's.  firstboot writes
+  # `iface <wifi> inet6 auto` for a bridged radio (the _wl_bridged branch), so
+  # a dual-homed host really does carry one while vmbr0 has none.  A
+  # persistence test that greps for "inet6" anywhere in the file would read
+  # the radio's stanza as vmbr0's and short-circuit a first boot.
+  decide "another interface's inet6 stanza does not count as vmbr0's" SKIP \
+      "" "iface vmbr0 inet static
+iface wlp3s0 inet6 auto" "$V6ADDR" "$RT"
+
+  decide "a real IPv4 address never takes the IPv6 path" SKIP \
+      "192.168.1.50" "iface vmbr0 inet6 auto" "$V6ADDR
+1: vmbr0    inet 192.168.1.50/24 scope global" "$RT"
+else
+  bad "could not isolate the guard condition" "the guard was restructured"
 fi
 
 echo
