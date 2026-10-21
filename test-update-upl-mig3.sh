@@ -11,6 +11,9 @@ set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"
 SRC="${1:-$HERE/test-update-v3.sh}"
 eval "$(sed -n '/^# >>> mig3_facts/,/^# <<< mig3_facts/p' "$SRC")"
+eval "$(sed -n '/^# >>> mig3_verdict/,/^# <<< mig3_verdict/p' "$SRC")"
+gx_tok(){ sed -n "s/^$2:\([0-9][0-9]*\)\$/\1/p" "$1" | head -1; }
+type mig3_verdict >/dev/null 2>&1 || { echo "FAIL: mig3_verdict not found between its markers in $SRC"; exit 1; }
 type mig3_facts >/dev/null 2>&1 || { echo "FAIL: mig3_facts not found between its markers in $SRC"; exit 1; }
 T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
 fail=0
@@ -62,6 +65,21 @@ printf 'uploader: watermarks.db: version 2\nuploader:   applied 2: something old
 mig3_facts "$T/lk.txt" > "$T/l.facts"
 check "applied 2 and 30 are not 3" 0 "$(tok "$T/l.facts" APPLIED3)"
 check "a bare 'features:' is not the line" 0 "$(tok "$T/l.facts" F_LINE)"
+
+# The table already present: a new-code process opened the version-2 store
+# before migrate ran, so migrate prints only the two column lines.
+cat > "$T/pre.txt" <<'X'
+uploader: watermarks.db: version 2
+uploader:   applied 3: name the pipeline and client in the send log; add last_send
+uploader:   added column attempts.pipeline (TEXT NOT NULL DEFAULT '')
+uploader:   added column attempts.client (TEXT NOT NULL DEFAULT '')
+X
+mig3_facts "$T/pre.txt" > "$T/pre.facts"
+check "no table line reads 0"        0 "$(tok "$T/pre.facts" TABLE)"
+check "table already there: no verdict" "" "$(mig3_verdict "$T/pre.facts" 2 1)"
+check "table missing afterwards fails"  1 "$(mig3_verdict "$T/pre.facts" 2 0 | grep -c 'no last_send table')"
+check "a missing column line fails"     1 "$(mig3_verdict "$T/m.facts" 2 1 | grep -c 'applied 3')"
+check "a v3 store is not evaluated"     "" "$(mig3_verdict "$T/m.facts" 3 0)"
 
 : > "$T/empty.txt"
 mig3_facts "$T/empty.txt" > "$T/e.facts"

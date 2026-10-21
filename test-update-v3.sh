@@ -1130,6 +1130,29 @@ mig3_facts(){ # <file>
 }
 # <<< mig3_facts
 
+# The verdict on migration 3's report, from the facts, the version read before
+# the step, and whether last_send exists after it (sqlite_master, 0 or 1).
+# The report may carry no "created table last_send" line: any new-code process
+# that opens a version-2 store creates the table through its schema script
+# before migrate runs.  The table's presence afterwards is the fact to
+# require.  Prints the failure text, or nothing.
+# >>> mig3_verdict
+mig3_verdict(){ # <facts-file> <pre-version> <last_send-exists-after>
+    local f="$1" pre="$2" ls="$3"
+    case "$pre" in
+        [0-2])
+            [ "$(gx_tok "$f" APPLIED3)" = 1 ] \
+                || { echo "the store stood at version $pre before the manifest step, and migrate printed no 'applied 3' line: migration 3 did not run"; return; }
+            [ "$(gx_tok "$f" COLPIPE)" = 1 ] \
+                || { echo "migrate applied 3 but printed no 'added column attempts.pipeline' line"; return; }
+            [ "$(gx_tok "$f" COLCLIENT)" = 1 ] \
+                || { echo "migrate applied 3 but printed no 'added column attempts.client' line"; return; }
+            [ "$ls" = 1 ] \
+                || echo "migrate applied 3 but the store has no last_send table afterwards" ;;
+    esac
+}
+# <<< mig3_verdict
+
 # The send-record store.  migrate --check runs as hsupload, the store's
 # owner and the daemon's user, from the unit's working directory, so no
 # root-owned file can appear beside the store.  PRAGMA user_version then
@@ -1150,10 +1173,14 @@ if [ -e "$W" ]; then
 import pathlib, sqlite3, sys
 p = pathlib.Path(sys.argv[1]).resolve()
 c = sqlite3.connect(p.as_uri() + "?mode=ro", uri=True, timeout=30)
-print(c.execute("PRAGMA user_version").fetchone()[0])' "$W" 2>&1)
+print(c.execute("PRAGMA user_version").fetchone()[0])
+print(c.execute("SELECT count(*) FROM sqlite_master WHERE type = \"table\" AND name = \"last_send\"").fetchone()[0])' "$W" 2>&1)
+    ls=$(printf '%s\n' "$uv" | sed -n 2p)
+    uv=$(printf '%s\n' "$uv" | sed -n 1p)
     case "$uv" in
         ''|*[!0-9]*) printf '%s\n' "$uv" | tail -3 | sed 's/^/  user_version read | /' ;;
-        *) echo "USERVER:$uv" ;;
+        *) echo "USERVER:$uv"
+           case "$ls" in [0-9]) echo "LASTSEND:$ls" ;; esac ;;
     esac
 fi
 exit 0
@@ -1296,17 +1323,10 @@ for EB_W in PIPELINESD:pipelines.d SENDLOGV3:send-log-v3 SWITCHFILES:switch-file
         || fatal "$WORK/eb1-manifest.out" "the features line lacks '${EB_W#*:}'"
 done
 say "the step printed the features line: pipelines.d send-log-v3 switch-files ✓"
+EB_CHECK3=0
 case "${EB_PRE_VER:-}" in
     [0-2])
-        [ "$(gx_tok "$WORK/eb1-mig3.facts" APPLIED3)" = 1 ] \
-            || fatal "$WORK/eb1-manifest.out" "the store stood at version $EB_PRE_VER before the manifest step, and migrate printed no 'applied 3' line: migration 3 did not run"
-        [ "$(gx_tok "$WORK/eb1-mig3.facts" COLPIPE)" = 1 ] \
-            || fatal "$WORK/eb1-manifest.out" "migrate applied 3 but printed no 'added column attempts.pipeline' line"
-        [ "$(gx_tok "$WORK/eb1-mig3.facts" TABLE)" = 1 ] \
-            || fatal "$WORK/eb1-manifest.out" "migrate applied 3 but printed no 'created table last_send' line"
-        [ "$(gx_tok "$WORK/eb1-mig3.facts" COLCLIENT)" = 1 ] \
-            || fatal "$WORK/eb1-manifest.out" "migrate applied 3 but printed no 'added column attempts.client' line"
-        say "migrate applied 3, added attempts.pipeline and attempts.client, created last_send ✓" ;;
+        EB_CHECK3=1 ;;
     *)
         say "⚠ MIGRATION 3 REPORT NOT EVALUATED — the store stood at version ${EB_PRE_VER:-unknown} before the manifest step, so migrate had no migration 3 to report"
         KS_UNCHECKED="${KS_UNCHECKED:+$KS_UNCHECKED; }migrate's migration 3 report (the store was already at version ${EB_PRE_VER:-unknown})" ;;
@@ -1323,6 +1343,7 @@ EB_VER="$(gx_tok "$GX_OUT" MIGVER)"
 EB_PEND="$(gx_tok "$GX_OUT" MIGPEND)"
 EB_NEW="$(gx_tok "$GX_OUT" MIGNEWER)"
 EB_UV="$(gx_tok "$GX_OUT" USERVER)"
+EB_LASTSEND="$(gx_tok "$GX_OUT" LASTSEND)"
 [ -n "$EB_FILE" ] && [ -n "$EB_MRC" ] && [ -n "$EB_PEND" ] && [ -n "$EB_NEW" ] \
     || fatal "$GX_OUT" "E-bis: the store probe returned no answer (not a verdict)"
 [ "$EB_FILE" = 1 ] || fatal "$GX_OUT" "watermarks.db disappeared during the manifest step"
@@ -1339,6 +1360,11 @@ fi
 [ -n "$EB_UV" ] || fatal "$GX_OUT" "E-bis: PRAGMA user_version could not be read (no answer; not a verdict)"
 [ "$EB_UV" = "$EB_VER" ] || fatal "$GX_OUT" "migrate --check reports version $EB_VER, but the file's PRAGMA user_version reads $EB_UV"
 [ "$EB_UV" = 3 ] || fatal "$GX_OUT" "PRAGMA user_version reads $EB_UV after the manifest step, want 3: migration 3 did not run before the daemon started (step 2b part 1)"
+if [ "$EB_CHECK3" = 1 ]; then
+    EB_MSG="$(mig3_verdict "$WORK/eb1-mig3.facts" "$EB_PRE_VER" "$EB_LASTSEND")"
+    [ -z "$EB_MSG" ] || fatal "$WORK/eb1-manifest.out" "$EB_MSG"
+    say "migrate applied 3, added attempts.pipeline and attempts.client; last_send is present ✓"
+fi
 if [ "${EB_PRE_VER:-}" = "$EB_VER" ]; then
     say "watermarks.db at version $EB_VER, nothing pending; it stood there before the manifest step ✓"
 else
