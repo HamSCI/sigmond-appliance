@@ -27,7 +27,9 @@
 #             pipelines.toml holds psk-recorder-pskreporter and
 #             meteor-scatter-pskreporter (whichever client is installed) and no
 #             psk-pskreporter; `hs-uploader status` marks sqlite:psk.spots
-#             superseded.
+#             superseded.  From v3.77 it also reads migration 3 off the step's
+#             lines (applied 3, attempts.pipeline, last_send, the features
+#             line) and PRAGMA user_version 3 before the daemon starts.
 #   PHASE E-ter — remote access on a station already in the field: the
 #             updated guest's `smd remote` names the one host command while
 #             unpaired; the new wizard, placed on the old host as pm-align
@@ -44,7 +46,7 @@
 #             to date, and the restored daemon starts on the store E-bis
 #             migrated, which keeps its version.
 #   PHASE G-ter — a second update: both split pipelines and both send
-#             records stand, and migrate --check has nothing to write.
+#             records stand, and migrate --check has nothing to write (version 3 stands, no migration re-runs).
 #
 # Log conventions match the sibling: append-only, one line per step, phases
 # announced with ════ banners and closed with a PASS line, so bless-release
@@ -1092,6 +1094,39 @@ say "════ PHASE E-bis: migrate the send-record store, then restart hs-up
 # answer.  The rig says so, and never reads the gap as 0.
 gx_tok(){ sed -n "s/^$2:\([0-9][0-9]*\)\$/\1/p" "$1" | head -1; }
 
+# Migration 3's facts, read from the manifest step's printed lines.  migrate
+# prints "  applied 3: <name>" and the "  added column attempts.pipeline ..." and
+# "  created table last_send ..." lines indented; sigmond prints
+# "uploader: hs-uploader features: <words>" or "... features: none".  The
+# features line may sit behind a warning sign that the channel double-encodes,
+# so it matches anywhere on the line.  One KEY:N line each, 0 when absent, so
+# gx_tok reads them (test-update-upl-mig3.sh feeds this lines in the real format).
+# >>> mig3_facts
+mig3_facts(){ # <file>
+    awk '
+    /^[ \t]*applied 3([: ]|$)/ && !a { a = 1; ln = NR }
+    /^[ \t]*added column attempts\.pipeline( |$)/ { cp = 1 }
+    /^[ \t]*added column attempts\.client( |$)/ { cc = 1 }
+    /^[ \t]*created table last_send( |$)/ { t = 1 }
+    /uploader: hs-uploader features: / && !f {
+        f = 1; s = $0; sub(/^.*uploader: hs-uploader features: /, "", s)
+        n = split(s, w, /[ \t]+/)
+        for (i = 1; i <= n; i++) {
+            if (w[i] == "none") fn = 1
+            else if (w[i] == "pipelines.d") fp = 1
+            else if (w[i] == "send-log-v3") fs = 1
+            else if (w[i] == "switch-files") fw = 1
+        }
+    }
+    END {
+        print "APPLIED3:" a + 0; print "APPLIED3_LN:" ln + 0
+        print "COLPIPE:" cp + 0; print "COLCLIENT:" cc + 0; print "TABLE:" t + 0
+        print "F_LINE:" f + 0; print "F_PIPELINESD:" fp + 0
+        print "F_SENDLOGV3:" fs + 0; print "F_SWITCHFILES:" fw + 0; print "F_NONE:" fn + 0
+    }' "$1"
+}
+# <<< mig3_facts
+
 # The send-record store.  migrate --check runs as hsupload, the store's
 # owner and the daemon's user, from the unit's working directory, so no
 # root-owned file can appear beside the store.  PRAGMA user_version then
@@ -1238,6 +1273,36 @@ EB_T1="$(gx_tok "$WORK/eb1-manifest.out" T1)"
     || fatal "$WORK/eb1-manifest.out" "E-bis: no guest clock reading around the manifest step (python3 failed in the guest; not a verdict)"
 say "manifest step exit 0; its migrate report: $(grep -m1 'watermarks\.db: ' "$WORK/eb1-manifest.out" || echo 'none printed')"
 
+# Migration 3 (sink control step 2b part 1), from the step's own lines: the
+# features line says the updated hs-uploader carries all three features, and
+# migrate's report says it applied migration 3, added attempts.pipeline and
+# created last_send.  A store already at version 3 before the step (a resumed
+# run) prints none of the migrate lines, and the rig says so.
+mig3_facts "$WORK/eb1-manifest.out" > "$WORK/eb1-mig3.facts"
+EB_F_LINE="$(gx_tok "$WORK/eb1-mig3.facts" F_LINE)"
+[ "$EB_F_LINE" = 1 ] \
+    || fatal "$WORK/eb1-manifest.out" "the manifest step printed no 'uploader: hs-uploader features:' line: $TARGET's sigmond does not probe the features (step 2b part 1)"
+[ "$(gx_tok "$WORK/eb1-mig3.facts" F_NONE)" = 0 ] \
+    || fatal "$WORK/eb1-manifest.out" "the manifest step printed 'hs-uploader features: none': the updated hs-uploader answers no features probe, so the update never reached it"
+for EB_W in PIPELINESD:pipelines.d SENDLOGV3:send-log-v3 SWITCHFILES:switch-files; do
+    [ "$(gx_tok "$WORK/eb1-mig3.facts" "F_${EB_W%%:*}")" = 1 ] \
+        || fatal "$WORK/eb1-manifest.out" "the features line lacks '${EB_W#*:}'"
+done
+say "the step printed the features line: pipelines.d send-log-v3 switch-files ✓"
+case "${EB_PRE_VER:-}" in
+    [0-2])
+        [ "$(gx_tok "$WORK/eb1-mig3.facts" APPLIED3)" = 1 ] \
+            || fatal "$WORK/eb1-manifest.out" "the store stood at version $EB_PRE_VER before the manifest step, and migrate printed no 'applied 3' line: migration 3 did not run"
+        [ "$(gx_tok "$WORK/eb1-mig3.facts" COLPIPE)" = 1 ] \
+            || fatal "$WORK/eb1-manifest.out" "migrate applied 3 but printed no 'added column attempts.pipeline' line"
+        [ "$(gx_tok "$WORK/eb1-mig3.facts" TABLE)" = 1 ] \
+            || fatal "$WORK/eb1-manifest.out" "migrate applied 3 but printed no 'created table last_send' line"
+        say "migrate applied 3, added attempts.pipeline and created last_send ✓" ;;
+    *)
+        say "⚠ MIGRATION 3 REPORT NOT EVALUATED — the store stood at version ${EB_PRE_VER:-unknown} before the manifest step, so migrate had no migration 3 to report"
+        KS_UNCHECKED="${KS_UNCHECKED:+$KS_UNCHECKED; }migrate's migration 3 report (the store was already at version ${EB_PRE_VER:-unknown})" ;;
+esac
+
 # ── the store after the manifest step, before anything restarts ────────
 # Read here, ahead of any restart by this rig, a migrated store shows that
 # the manifest step migrated it, not a daemon at its start (D10).
@@ -1264,6 +1329,7 @@ fi
 [ "$EB_VER" -ge 1 ] || fatal "$GX_OUT" "watermarks.db reads version $EB_VER with nothing pending: the updated hs-uploader knows no migration at all"
 [ -n "$EB_UV" ] || fatal "$GX_OUT" "E-bis: PRAGMA user_version could not be read (no answer; not a verdict)"
 [ "$EB_UV" = "$EB_VER" ] || fatal "$GX_OUT" "migrate --check reports version $EB_VER, but the file's PRAGMA user_version reads $EB_UV"
+[ "$EB_UV" = 3 ] || fatal "$GX_OUT" "PRAGMA user_version reads $EB_UV after the manifest step, want 3: migration 3 did not run before the daemon started (step 2b part 1)"
 if [ "${EB_PRE_VER:-}" = "$EB_VER" ]; then
     say "watermarks.db at version $EB_VER, nothing pending; it stood there before the manifest step ✓"
 else
@@ -1291,6 +1357,12 @@ if [ "$EB_START" -gt "$EB_T0" ]; then
         [ -n "$EB_LN_MIG" ] && [ "$EB_LN_MIG" -lt "$EB_LN_RST" ] \
             || fatal "$WORK/eb1-manifest.out" "the manifest step restarted hs-uploader before migrate reported (migrate's 'watermarks.db:' line at ${EB_LN_MIG:-none}, the restart line at $EB_LN_RST): the restarted daemon met a store not yet migrated (D10)"
         say "the manifest step restarted hs-uploader itself, after migrate's report ✓"
+        EB_LN_A3="$(gx_tok "$WORK/eb1-mig3.facts" APPLIED3_LN)"
+        if [ "${EB_LN_A3:-0}" -gt 0 ]; then
+            [ "$EB_LN_A3" -lt "$EB_LN_RST" ] \
+                || fatal "$WORK/eb1-manifest.out" "the step printed 'applied 3' at line $EB_LN_A3, after its restart line at $EB_LN_RST: the daemon restarted before migration 3 ran"
+            say "migration 3 applied (line $EB_LN_A3) before the restart (line $EB_LN_RST) ✓"
+        fi
     fi
 else
     # The manifest did not change, so --enable left the running daemon alone.
@@ -1849,6 +1921,20 @@ GB_RR="$(grep -m1 -o 'pipelines\.toml re-rendered by the restored sigmond.*' "$W
     || fatal "$WORK/g3-restore-apply.out" "restore --apply moved $MOVED component(s) but printed no re-render line: it left pipelines.toml as the newer sigmond rendered it (D11)"
 say "restore: $GB_RR ✓"
 
+# The restored sigmond predates the features probe, so its re-render prints no
+# features line: the manifest matches the restored release, not the newer one.
+# A restore that moved nothing leaves the updated sigmond in place, and its
+# step prints the line, so only a restore that moved a checkout can tell.
+mig3_facts "$WORK/g3-restore-apply.out" > "$WORK/gb0-mig3.facts"
+case "$MOVED" in
+    ''|*[!0-9]*|0) say "⚠ RESTORED RE-RENDER NOT TIED TO THE RESTORED RELEASE — the restore moved $MOVED component(s), so the sigmond that re-rendered may still be the updated one"
+        KS_UNCHECKED="${KS_UNCHECKED:+$KS_UNCHECKED; }the rollback's re-render matching the restored release (restore moved $MOVED component(s))" ;;
+    *)
+        [ "$(gx_tok "$WORK/gb0-mig3.facts" F_LINE)" = 0 ] \
+            || fatal "$WORK/g3-restore-apply.out" "the rollback's re-render printed a 'hs-uploader features:' line: the sigmond that re-rendered is not the restored release's (D11)"
+        say "the re-render printed no features line, as the restored release's sigmond ✓" ;;
+esac
+
 # ── the restored smd reads the manifest as its own ─────────────────────
 gx_ok 300 gb1-manifest-check 'smd admin uploader manifest' "G-bis: smd admin uploader manifest (check)"
 sed 's/^/      /' "$GX_OUT"
@@ -1908,7 +1994,21 @@ GB_UV="$(gx_tok "$GX_OUT" USERVER)"
 [ -n "$GB_UV" ] || fatal "$GX_OUT" "G-bis: PRAGMA user_version could not be read (no answer; not a verdict)"
 [ "$GB_UV" = "$EB_VER" ] \
     || fatal "$GX_OUT" "watermarks.db reads version $GB_UV under the restored daemon, but E-bis left it at $EB_VER: the rollback changed the store's version"
+[ "$GB_UV" = 3 ] \
+    || fatal "$GX_OUT" "watermarks.db reads version $GB_UV under the restored daemon, want 3: the rollback must leave the version-3 store as it stands (spec 10)"
 say "watermarks.db still at version $GB_UV under the restored daemon ✓"
+# The restored hs-uploader's migrate meets a newer store and leaves it: no
+# pending migration, so nothing would bounce the daemon.  A restored release
+# with no migrate verb at all prints "invalid choice", and the version above
+# already carries the proof.
+GB_MRC="$(gx_tok "$GX_OUT" MIGRC)"; GB_PEND="$(gx_tok "$GX_OUT" MIGPEND)"
+if grep -q "invalid choice: 'migrate'" "$GX_OUT"; then
+    say "the restored hs-uploader has no migrate verb; the version read above stands as the proof"
+else
+    { [ "$GB_MRC" = 0 ] && [ "$GB_PEND" = 0 ]; } \
+        || fatal "$GX_OUT" "the restored hs-uploader's migrate --check exits ${GB_MRC:-?} with ${GB_PEND:-?} pending on the version-3 store: it should leave a newer store as it stands"
+    say "the restored hs-uploader's migrate --check finds nothing to write on the version-3 store ✓"
+fi
 
 say "PHASE G-bis PASS — the restored release re-rendered its manifest, and its daemon runs on the version-$GB_UV store"
 
@@ -1946,6 +2046,16 @@ gx_ok 120 gt4-store "$UPL_STORE" "G-ter: the send-record store after the second 
 GT_MRC="$(gx_tok "$GX_OUT" MIGRC)"; GT_PEND="$(gx_tok "$GX_OUT" MIGPEND)"
 [ "$GT_MRC" = 0 ] && [ "$GT_PEND" = 0 ] || fatal "$GX_OUT" "migrate --check exits ${GT_MRC:-?} with ${GT_PEND:-?} pending after the second update: the store should need nothing"
 say "migrate --check: nothing to write after the second update ✓"
+GT_UV="$(gx_tok "$GX_OUT" USERVER)"
+[ "$GT_UV" = 3 ] || fatal "$GX_OUT" "PRAGMA user_version reads ${GT_UV:-?} after the second update, want 3"
+# The second manifest step found a version-3 store: migrate printed no
+# migration, and the features line is back, since the sigmond is the new one.
+mig3_facts "$WORK/gt2-manifest.out" > "$WORK/gt2-mig3.facts"
+[ "$(gx_tok "$WORK/gt2-mig3.facts" APPLIED3)" = 0 ] \
+    || fatal "$WORK/gt2-manifest.out" "the second manifest step applied migration 3 again: the rollback lowered the store's version, or the step re-ran a finished migration"
+[ "$(gx_tok "$WORK/gt2-mig3.facts" F_LINE)" = 1 ] && [ "$(gx_tok "$WORK/gt2-mig3.facts" F_NONE)" = 0 ] \
+    || fatal "$WORK/gt2-manifest.out" "the second manifest step printed no features line naming the updated hs-uploader's features"
+say "the second update found the store at version $GT_UV with nothing to migrate, and the features line is back ✓"
 gx_ok 60 gt5-unit "$UPL_UNIT" "G-ter: hs-uploader after the second update"
 [ "$(gx_tok "$GX_OUT" ACTIVE1)" = 1 ] || fatal "$GX_OUT" "hs-uploader is not active after the second update"
 say "PHASE G-ter PASS — pipelines and send records of both producers stand after the second update"
