@@ -381,6 +381,15 @@ case "$IP" in
     "")          say "vmbr0 has no IPv4 — looking for a NIC that does" ;;
     192.168.100.*) say "vmbr0 is on the PVE installer fallback $IP — that address is not routable here" ;;
     *)
+        # ⛔ A REAL ADDRESS ENDS ANY "NO NETWORK" VERDICT.  Every exit below
+        # leaves the host on this address, so whatever wrote
+        # .network-unreachable is no longer true.  Clearing it only in the
+        # repair branches meant a host that recovered by itself -- cable back
+        # in, a reboot, a new lease -- showed "!! THIS HOST HAS NO WORKING
+        # NETWORK ADDRESS — NO NETWORK CABLE DETECTED" on a healthy LAN for
+        # good.  AC1SN, 2026-10-17..20: marker written during a 19:20 UTC
+        # cable pull, still on the panel three days later.
+        rm -f /etc/sigmond-appliance/.network-unreachable 2>/dev/null
         # A REAL address, so the NIC hunt below is not needed.  But PVE writes
         # a STATIC stanza even when its own DHCP succeeded, which fossilizes
         # whatever it got: the station keeps that address after the lease
