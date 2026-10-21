@@ -1096,18 +1096,19 @@ gx_tok(){ sed -n "s/^$2:\([0-9][0-9]*\)\$/\1/p" "$1" | head -1; }
 
 # Migration 3's facts, read from the manifest step's printed lines.  migrate
 # prints "  applied 3: <name>" and the "  added column attempts.pipeline ..." and
-# "  created table last_send ..." lines indented; sigmond prints
-# "uploader: hs-uploader features: <words>" or "... features: none".  The
-# features line may sit behind a warning sign that the channel double-encodes,
-# so it matches anywhere on the line.  One KEY:N line each, 0 when absent, so
+# "  created table last_send ..." lines indented, and smd prefixes each with
+# "uploader: " (commands/uploader.py); sigmond prints
+# "uploader: hs-uploader features: <words>" or "... features: none".  Every
+# pattern matches anywhere on the line, so the prefix and a warning sign that
+# the channel double-encodes both pass.  One KEY:N line each, 0 when absent, so
 # gx_tok reads them (test-update-upl-mig3.sh feeds this lines in the real format).
 # >>> mig3_facts
 mig3_facts(){ # <file>
     awk '
-    /^[ \t]*applied 3([: ]|$)/ && !a { a = 1; ln = NR }
-    /^[ \t]*added column attempts\.pipeline( |$)/ { cp = 1 }
-    /^[ \t]*added column attempts\.client( |$)/ { cc = 1 }
-    /^[ \t]*created table last_send( |$)/ { t = 1 }
+    /(^|[^0-9A-Za-z])applied 3([: ]|$)/ && !a { a = 1; ln = NR }
+    /added column attempts\.pipeline( |$)/ { cp = 1 }
+    /added column attempts\.client( |$)/ { cc = 1 }
+    /created table last_send( |$)/ { t = 1 }
     /uploader: hs-uploader features: / && !f {
         f = 1; s = $0; sub(/^.*uploader: hs-uploader features: /, "", s)
         n = split(s, w, /[ \t]+/)
@@ -1280,8 +1281,12 @@ say "manifest step exit 0; its migrate report: $(grep -m1 'watermarks\.db: ' "$W
 # run) prints none of the migrate lines, and the rig says so.
 mig3_facts "$WORK/eb1-manifest.out" > "$WORK/eb1-mig3.facts"
 EB_F_LINE="$(gx_tok "$WORK/eb1-mig3.facts" F_LINE)"
-[ "$EB_F_LINE" = 1 ] \
-    || fatal "$WORK/eb1-manifest.out" "the manifest step printed no 'uploader: hs-uploader features:' line: $TARGET's sigmond does not probe the features (step 2b part 1)"
+if [ "$EB_F_LINE" != 1 ]; then
+    if grep -q 'cannot ask hs-uploader for `capabilities --features`' "$WORK/eb1-manifest.out"; then
+        fatal "$WORK/eb1-manifest.out" "sigmond warned 'cannot ask hs-uploader for capabilities --features': the probe failed or timed out, so it printed no features line"
+    fi
+    fatal "$WORK/eb1-manifest.out" "the manifest step printed no 'uploader: hs-uploader features:' line and no probe warning: $TARGET's sigmond does not probe the features (step 2b part 1)"
+fi
 [ "$(gx_tok "$WORK/eb1-mig3.facts" F_NONE)" = 0 ] \
     || fatal "$WORK/eb1-manifest.out" "the manifest step printed 'hs-uploader features: none': the updated hs-uploader answers no features probe, so the update never reached it"
 for EB_W in PIPELINESD:pipelines.d SENDLOGV3:send-log-v3 SWITCHFILES:switch-files; do
@@ -1297,7 +1302,9 @@ case "${EB_PRE_VER:-}" in
             || fatal "$WORK/eb1-manifest.out" "migrate applied 3 but printed no 'added column attempts.pipeline' line"
         [ "$(gx_tok "$WORK/eb1-mig3.facts" TABLE)" = 1 ] \
             || fatal "$WORK/eb1-manifest.out" "migrate applied 3 but printed no 'created table last_send' line"
-        say "migrate applied 3, added attempts.pipeline and created last_send ✓" ;;
+        [ "$(gx_tok "$WORK/eb1-mig3.facts" COLCLIENT)" = 1 ] \
+            || fatal "$WORK/eb1-manifest.out" "migrate applied 3 but printed no 'added column attempts.client' line"
+        say "migrate applied 3, added attempts.pipeline and attempts.client, created last_send ✓" ;;
     *)
         say "⚠ MIGRATION 3 REPORT NOT EVALUATED — the store stood at version ${EB_PRE_VER:-unknown} before the manifest step, so migrate had no migration 3 to report"
         KS_UNCHECKED="${KS_UNCHECKED:+$KS_UNCHECKED; }migrate's migration 3 report (the store was already at version ${EB_PRE_VER:-unknown})" ;;
@@ -1926,14 +1933,14 @@ say "restore: $GB_RR ✓"
 # A restore that moved nothing leaves the updated sigmond in place, and its
 # step prints the line, so only a restore that moved a checkout can tell.
 mig3_facts "$WORK/g3-restore-apply.out" > "$WORK/gb0-mig3.facts"
-case "$MOVED" in
-    ''|*[!0-9]*|0) say "⚠ RESTORED RE-RENDER NOT TIED TO THE RESTORED RELEASE — the restore moved $MOVED component(s), so the sigmond that re-rendered may still be the updated one"
-        KS_UNCHECKED="${KS_UNCHECKED:+$KS_UNCHECKED; }the rollback's re-render matching the restored release (restore moved $MOVED component(s))" ;;
-    *)
-        [ "$(gx_tok "$WORK/gb0-mig3.facts" F_LINE)" = 0 ] \
-            || fatal "$WORK/g3-restore-apply.out" "the rollback's re-render printed a 'hs-uploader features:' line: the sigmond that re-rendered is not the restored release's (D11)"
-        say "the re-render printed no features line, as the restored release's sigmond ✓" ;;
-esac
+if grep -q 'sigmond: checked out' "$WORK/g3-restore-apply.out"; then
+    [ "$(gx_tok "$WORK/gb0-mig3.facts" F_LINE)" = 0 ] \
+        || fatal "$WORK/g3-restore-apply.out" "the rollback's re-render printed a 'hs-uploader features:' line: the sigmond that re-rendered is not the restored release's (D11)"
+    say "the re-render printed no features line, as the restored release's sigmond ✓"
+else
+    say "⚠ RESTORED RE-RENDER NOT TIED TO THE RESTORED RELEASE — the restore did not move sigmond, so the sigmond that re-rendered may still be the updated one"
+    KS_UNCHECKED="${KS_UNCHECKED:+$KS_UNCHECKED; }the rollback's re-render matching the restored release (restore did not move sigmond)"
+fi
 
 # ── the restored smd reads the manifest as its own ─────────────────────
 gx_ok 300 gb1-manifest-check 'smd admin uploader manifest' "G-bis: smd admin uploader manifest (check)"
@@ -2055,6 +2062,10 @@ mig3_facts "$WORK/gt2-manifest.out" > "$WORK/gt2-mig3.facts"
     || fatal "$WORK/gt2-manifest.out" "the second manifest step applied migration 3 again: the rollback lowered the store's version, or the step re-ran a finished migration"
 [ "$(gx_tok "$WORK/gt2-mig3.facts" F_LINE)" = 1 ] && [ "$(gx_tok "$WORK/gt2-mig3.facts" F_NONE)" = 0 ] \
     || fatal "$WORK/gt2-manifest.out" "the second manifest step printed no features line naming the updated hs-uploader's features"
+# Not asserted: no "copied send record" or "kept " line in this output.  The
+# restored daemon wrote the old shared key again, so the second step's fill
+# legitimately reports "kept ..." for each producer key that already stands
+# (and "copied" for one that does not).  Those lines would fail a correct run.
 say "the second update found the store at version $GT_UV with nothing to migrate, and the features line is back ✓"
 gx_ok 60 gt5-unit "$UPL_UNIT" "G-ter: hs-uploader after the second update"
 [ "$(gx_tok "$GX_OUT" ACTIVE1)" = 1 ] || fatal "$GX_OUT" "hs-uploader is not active after the second update"

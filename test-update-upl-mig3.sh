@@ -19,15 +19,17 @@ check(){ # <name> <want> <got>
 }
 tok(){ sed -n "s/^$2:\([0-9][0-9]*\)\$/\1/p" "$1" | head -1; }
 
-# A version-2 store moving to 3, then a v3.77 sigmond's features line.
+# A version-2 store moving to 3, as smd prints it: every migrate line behind
+# "uploader: " (commands/uploader.py; tests/test_uploader_cmd_policy.py:341-342
+# shows "uploader:   applied 1: ..."), then the features line.
 cat > "$T/up.txt" <<'X'
-watermarks.db: version 2
-  applied 3: name the pipeline and client in the send log; add last_send
-  added column attempts.pipeline (TEXT NOT NULL DEFAULT '')
-  added column attempts.client (TEXT NOT NULL DEFAULT '')
-  created table last_send (client, pipeline, outcome, ts, records)
+uploader: watermarks.db: version 2
+uploader:   applied 3: name the pipeline and client in the send log; add last_send
+uploader:   added column attempts.pipeline (TEXT NOT NULL DEFAULT '')
+uploader:   added column attempts.client (TEXT NOT NULL DEFAULT '')
+uploader:   created table last_send (client, pipeline, outcome, ts, records)
 uploader: hs-uploader features: pipelines.d send-log-v3 switch-files
-  stopping hs-uploader.service
+uploader: stopping hs-uploader.service
 X
 mig3_facts "$T/up.txt" > "$T/up.facts"
 check "applied 3 found"        1 "$(tok "$T/up.facts" APPLIED3)"
@@ -42,7 +44,7 @@ check "features not none"      0 "$(tok "$T/up.facts" F_NONE)"
 check "features line seen"     1 "$(tok "$T/up.facts" F_LINE)"
 
 # Through the channel: warning-sign bytes ahead of the features line.
-printf 'watermarks.db: version 3\n  nothing to do\n  \303\242\302\232\302\240 uploader: hs-uploader features: pipelines.d send-log-v3\n' > "$T/mangled.txt"
+printf 'uploader: watermarks.db: version 3\nuploader:   nothing to do\n  \303\242\302\232\302\240 uploader: hs-uploader features: pipelines.d send-log-v3\n' > "$T/mangled.txt"
 mig3_facts "$T/mangled.txt" > "$T/m.facts"
 check "no applied 3 on a v3 store" 0 "$(tok "$T/m.facts" APPLIED3)"
 check "features line behind a prefix" 1 "$(tok "$T/m.facts" F_LINE)"
@@ -56,7 +58,7 @@ check "none reads F_NONE"      1 "$(tok "$T/n.facts" F_NONE)"
 check "none sets no word"      0 "$(tok "$T/n.facts" F_PIPELINESD)"
 
 # Look-alikes that must not count: applied 2, a feature word in prose.
-printf 'watermarks.db: version 2\n  applied 2: something older\n  applied 30: not three\nfeatures: pipelines.d\n' > "$T/lk.txt"
+printf 'uploader: watermarks.db: version 2\nuploader:   applied 2: something older\nuploader:   applied 30: not three\nuploader:   applied 13: not three\nfeatures: pipelines.d\n' > "$T/lk.txt"
 mig3_facts "$T/lk.txt" > "$T/l.facts"
 check "applied 2 and 30 are not 3" 0 "$(tok "$T/l.facts" APPLIED3)"
 check "a bare 'features:' is not the line" 0 "$(tok "$T/l.facts" F_LINE)"
