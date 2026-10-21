@@ -44,9 +44,11 @@
 #   PHASE G-bis — the rollback's own re-render (D11), then the restored
 #             release's daemon: the restored smd reads pipelines.toml as up
 #             to date, and the restored daemon starts on the store E-bis
-#             migrated, which keeps its version.
+#             migrated, which keeps its version.  That store stands at version 3,
+#             and the restored release's migrate --check leaves it as it stands.
 #   PHASE G-ter — a second update: both split pipelines and both send
-#             records stand, and migrate --check has nothing to write (version 3 stands, no migration re-runs).
+#             records stand, version 3 stands, no migration re-runs, and
+#             migrate --check has nothing to write.
 #
 # Log conventions match the sibling: append-only, one line per step, phases
 # announced with ════ banners and closed with a PASS line, so bless-release
