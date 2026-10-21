@@ -2065,7 +2065,7 @@ done
 [ -z "$MEDIA" ] && { say "import: no Sigmond USB present"; exit 0; }
 say "─────────────────────────────────────────────────────────"
 say " Sigmond USB detected ($MEDIA)."
-say " Importing the decoder VM (~3 min). LEAVE THE STICK IN."
+say " Installing the decoder virtual machine (~3 min). LEAVE THE STICK IN."
 say "─────────────────────────────────────────────────────────"
 VB=$(od -An -tu4 -j $((16*2048+80)) -N4 "$MEDIA" 2>/dev/null | tr -d ' ')
 OFF=$(( VB*2048 )); OFF=$(( (OFF+1048575)/1048576*1048576 ))
@@ -3780,22 +3780,24 @@ fi
 # longer ... they only occupy about half of the monitor."
 PANEL=$(cat <<PEOF
 ════ Sigmond appliance $VERSION ${CONF:+— station ${CONF%% *}} ════
- The station is the DECODER VM below — this screen is its hypervisor.
+ The station is the DECODER VIRTUAL MACHINE below — this screen is the
+ computer that hosts it.
  Press Enter here for a hypervisor login; typing does not echo, which is normal.
 ${NETWARN}${BRINGUP}${RXWARN}
  Proxmox host   ssh root@${HOSTIP:-<no-ip-yet>}   ·   web UI  https://$(ipurl "${HOSTIP:-<no-ip-yet>}"):8006
 
- Decoder VM   ${VMIP:-<starting — this panel refreshes every 5 min>}${VMNOTE}${VMBEHIND}
+ Decoder virtual machine   ${VMIP:-<starting — this panel refreshes every 5 min>}${VMNOTE}${VMBEHIND}
    from here      ssh sigmond@${VMIP:-<starting>}   (or: sigmond-vm;  also hamsci@)
    via this host  ssh -p 2222 sigmond@${HOSTIP:-<no-ip-yet>}
    via this host  http://$(ipurl "${HOSTIP:-<no-ip-yet>}"):PORT  where PORT =
                   ka9q-web 8081 · station-web 8000 · magnetometer 8082 · mag feed ws 8765
 
  Passwords   for the logins above and the Proxmox web UI
-             host  root / $PWLINE
-             VM    sigmond / same password
+             host             root / $PWLINE
+             virtual machine  sigmond / same password
 ${RACBLOCK}
- From the host:  sigmond-check (is it working?) · sigmond-vm (VM shell) · qm terminal $VMID · sigmond-setup --reconfigure
+ From the host:  sigmond-check (is it working?) · sigmond-vm (a shell in
+                 the virtual machine) · qm terminal $VMID · sigmond-setup --reconfigure
 ════ end Sigmond panel ════  $VERSION ${CONF:+· station ${CONF%% *} }════
 PEOF
 )
@@ -3944,8 +3946,11 @@ say "─────────────────────────
 say " Sigmond appliance $VERSION: Proxmox is installed and running."
 say "   console/SSH login: root / hamsci-sigmond  (CHANGE IT: 'passwd')"
 say "   ssh root@${HOSTIP:-<host-ip>}    web GUI: https://$(ipurl "${HOSTIP:-<host-ip>}"):8006"
-say " NEXT STEP: plug in the Sigmond install USB stick."
-say " The decoder VM then installs itself automatically."
+say " NEXT STEP: PLUG THE SIGMOND INSTALL USB STICK BACK IN."
+say "   (the same stick you installed from and then removed)"
+say " The decoder virtual machine -- the part that does the radio work --"
+say " then installs itself automatically. Leave the stick in until it says"
+say " it is finished."
 say "─────────────────────────────────────────────────────────"
 /usr/local/sbin/sigmond-import.sh
 say "first-boot v3 complete"
