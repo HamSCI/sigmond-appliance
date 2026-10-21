@@ -2084,12 +2084,21 @@ say "migrate --check: nothing to write after the second update ✓"
 GT_UV="$(gx_tok "$GX_OUT" USERVER)"
 [ "$GT_UV" = 3 ] || fatal "$GX_OUT" "PRAGMA user_version reads ${GT_UV:-?} after the second update, want 3"
 # The second manifest step found a version-3 store: migrate printed no
-# migration, and the features line is back, since the sigmond is the new one.
+# migration.  The features line comes back only when the second update moved
+# sigmond forward.  After `smd admin manifest restore` the checkouts sit
+# detached at the blessed SHAs, and `smd update` then reports "cannot compare
+# against upstream" and moves nothing (v3.78 rig, 2026-10-21), so the step
+# that follows is the restored release's own, which has no features probe.
 mig3_facts "$WORK/gt2-manifest.out" > "$WORK/gt2-mig3.facts"
 [ "$(gx_tok "$WORK/gt2-mig3.facts" APPLIED3)" = 0 ] \
     || fatal "$WORK/gt2-manifest.out" "the second manifest step applied migration 3 again: the rollback lowered the store's version, or the step re-ran a finished migration"
-[ "$(gx_tok "$WORK/gt2-mig3.facts" F_LINE)" = 1 ] && [ "$(gx_tok "$WORK/gt2-mig3.facts" F_NONE)" = 0 ] \
-    || fatal "$WORK/gt2-manifest.out" "the second manifest step printed no features line naming the updated hs-uploader's features"
+if grep -q '\[pull\] sigmond$' "$WORK/gt1-update-apply.out"; then
+    [ "$(gx_tok "$WORK/gt2-mig3.facts" F_LINE)" = 1 ] && [ "$(gx_tok "$WORK/gt2-mig3.facts" F_NONE)" = 0 ] \
+        || fatal "$WORK/gt2-manifest.out" "the second update moved sigmond, but its manifest step printed no features line naming the updated hs-uploader's features"
+    say "the second update moved sigmond, and its manifest step names the features ✓"
+else
+    say "WARNING: the second update did not move sigmond (detached at the restored SHA), so the features line is NOT EVALUATED here"
+fi
 # Not asserted: no "copied send record" or "kept " line in this output.  The
 # restored daemon wrote the old shared key again, so the second step's fill
 # legitimately reports "kept ..." for each producer key that already stands
