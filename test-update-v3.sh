@@ -2103,7 +2103,7 @@ fi
 # restored daemon wrote the old shared key again, so the second step's fill
 # legitimately reports "kept ..." for each producer key that already stands
 # (and "copied" for one that does not).  Those lines would fail a correct run.
-say "the second update found the store at version $GT_UV with nothing to migrate, and the features line is back ✓"
+say "the second update found the store at version $GT_UV with nothing to migrate ✓"
 gx_ok 60 gt5-unit "$UPL_UNIT" "G-ter: hs-uploader after the second update"
 [ "$(gx_tok "$GX_OUT" ACTIVE1)" = 1 ] || fatal "$GX_OUT" "hs-uploader is not active after the second update"
 say "PHASE G-ter PASS — pipelines and send records of both producers stand after the second update"
