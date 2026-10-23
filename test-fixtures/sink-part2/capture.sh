@@ -25,6 +25,8 @@
 #                                the mag fallback, as `smd sink fill` prints
 #                                them (sink_levers *Result.lines() through
 #                                commands/config.py _say_lines)
+#   smd_err_line.txt             one manifest-step error line, as
+#                                commands/uploader.py _err prints it
 #   SOURCE                       the commit and the files' origin
 # The three copied files carry their own capture scripts in sigmond
 # (tests/fixtures/capture_*.py, tests/fixtures/sink_status/capture.sh); this
@@ -113,6 +115,15 @@ with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
     cfg._say_lines(lv.lines())
     cfg._say_lines(st.lines())
 (out / "lever_lines_more.txt").write_text(buf.getvalue())
+
+# One error line as the manifest step prints it to stderr (_err: every such
+# line reads "smd: uploader: "), here the failed features probe's.
+from sigmond.commands import uploader as up_cmd
+buf = io.StringIO()
+with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
+    up_cmd._err("cannot ask hs-uploader for `capabilities --features` "
+                "(failed or timed out); rendering without it")
+(out / "smd_err_line.txt").write_text(buf.getvalue())
 PY
 )
 
@@ -121,6 +132,6 @@ sigmond $commit
 manifest_step_part2.txt  <- tests/fixtures/manifest_step_part2.txt
 sink_fill_part2.txt      <- tests/fixtures/sink_fill_part2.txt
 sink_status_<case>.json  <- tests/fixtures/sink_status/<case>.json
-pipelines_*.toml, sigmond_gate.toml, switch_view_*.txt, lever_lines_more.txt <- printed by capture.sh from lib/ at that commit
+pipelines_*.toml, sigmond_gate.toml, switch_view_*.txt, lever_lines_more.txt, smd_err_line.txt <- printed by capture.sh from lib/ at that commit
 SRC
 echo "capture: wrote $here from sigmond $commit"

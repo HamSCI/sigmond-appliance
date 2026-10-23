@@ -1,0 +1,17 @@
+Started hunt-c-probe.service - [systemd-run] /bin/bash -lc "exit 0".
+hunt-c-probe.service: Deactivated successfully.
+Started hunt-c-probe.service - [systemd-run] /bin/bash -lc "exit 3".
+hunt-c-probe.service: Main process exited, code=exited, status=3/NOTIMPLEMENTED
+hunt-c-probe.service: Failed with result 'exit-code'.
+Started hunt-c-probe.service - [systemd-run] /bin/bash -lc "echo out; echo err >&2; exit 7".
+hunt-c-probe.service: Main process exited, code=exited, status=7/NOTRUNNING
+hunt-c-probe.service: Failed with result 'exit-code'.
+Started hunt-c-probe.service - [systemd-run] /bin/bash -lc "kill -9 \$\$".
+hunt-c-probe.service: Main process exited, code=exited, status=1/FAILURE
+hunt-c-probe.service: Failed with result 'exit-code'.
+Started hunt-c-probe.service - [systemd-run] /bin/bash -lc "echo HOME=\${HOME-unset} USER=\${USER-unset} PATH=\$PATH; pwd".
+hunt-c-probe.service: Invalid environment variable name evaluates to an empty string: HOME-unset, USER-unset
+hunt-c-probe.service: Deactivated successfully.
+Started hunt-c-probe.service - [systemd-run] /bin/bash -c "kill -9 \$BASHPID".
+hunt-c-probe.service: Main process exited, code=killed, status=9/KILL
+hunt-c-probe.service: Failed with result 'signal'.

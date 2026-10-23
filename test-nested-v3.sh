@@ -453,11 +453,20 @@ print('\n'.join(out))
 PY
 }
 
-# sp2_verdict <facts-file>: the fresh station after bring-up (§13.1).
+# sp2_verdict <facts-file>: the fresh station after bring-up (§13.1).  It
+# ends with VERDICT:done, which sp2_report requires.
 sp2_verdict() {
+    _sp2_verdict_body "$1"
+    echo "VERDICT:done"
+}
+_sp2_verdict_body() {
     local f="$1" v
     _sp2t(){ sp2_tok "$f" "$1"; }
     [ "$(_sp2t END)" = 1 ] || { echo "FAIL: the switch probe gave no answer (guest exec failed; not a verdict)"; return; }
+    [ "$(_sp2t STEPRC)" = 0 ] \
+        || echo "FAIL: smd admin uploader manifest exited $(_sp2t STEPRC)"
+    v="$(_sp2t SMDERR)"
+    [ "$v" = 0 ] || echo "FAIL: smd admin uploader manifest printed ${v:-?} 'smd: uploader:' error line(s)"
     [ "$(_sp2t F_LINE)" = 1 ] \
         || echo "FAIL: smd admin uploader manifest printed no 'uploader: hs-uploader features:' line"
     [ "$(_sp2t F_LINE)" = 1 ] && [ "$(_sp2t F_GATE)" != 1 ] \
@@ -493,14 +502,50 @@ sp2_verdict() {
     fi
 }
 
+# sp2_report <verdict> <context>: a verdict without its VERDICT:done line
+# crashed or was cut short, and is FATAL as no verdict.  Otherwise each
+# UNCHECKED line is said and kept for the closing line (sink_unchecked), and
+# any FAIL line is FATAL, showing the probe's last lines.  `say` and
+# `sink_unchecked` are the rig's.
+sp2_report(){
+    local l n=0
+    if ! grep -qx 'VERDICT:done' "$1" 2>/dev/null; then
+        say "FATAL: the verdict did not finish (it crashed or was cut short; not a verdict)"
+        sed 's/^/      /' "$1" 2>/dev/null | tail -10
+        exit 1
+    fi
+    while IFS= read -r l; do
+        case "$l" in
+            UNCHECKED:*) say "⚠ NOT EVALUATED: ${l#UNCHECKED: }"; sink_unchecked "${l#UNCHECKED: }" ;;
+            FAIL:*)      say "FATAL: ${l#FAIL: }"; n=$((n + 1)) ;;
+        esac
+    done < "$1"
+    [ "$n" = 0 ] || { sed 's/^/      /' "$2" | tail -20; exit 1; }
+}
+
 # sp2_plant_script: the guest script that plants what `smd sink fill` must
 # lower (§13.1): a psk-recorder instance sending direct, a meteor-scatter
 # instance with no delivery mode and a callsign and grid, wspr-uploader
-# enabled, and mag-recorder's fallback uploader enabled.  It gives each
-# client a switch file at upload when it has none, through hs-uploader's own
-# `sink set`, so the lever step names it.  A client this image did not
-# install is reported, not planted.  Edits keep each file's owner and mode.
-# It records each planted instance in /run/sp2-rig/planted.
+# enabled, and mag-recorder's fallback uploader enabled.
+#
+# First, before it changes anything, it records for each of the four clients
+# whether its switch file exists and whether topology enables it
+# (PRE|<client>|<file 0/1>|<enabled 0/1>): the carry-over must have written a
+# file for every enabled client, and the plant must never hide one it did
+# not write.  The plant writes a switch file (at upload, through hs-uploader's
+# own `sink set`) only for a client that topology leaves disabled, and says
+# so (NOTE|...).  A client this image does not install, or that topology
+# disables, gets no instance: the lever step cannot reach it.
+#
+# Each planted instance runs a stand-in process: a runtime drop-in under
+# /run/systemd/system/<unit>.d/ makes it `sleep infinity`, so it holds still
+# without a radio and its restart can be counted.  Its environment files stay
+# the unit's own, which is all the lever step reads.
+#
+# Every file it edits is backed up first, every file it creates is noted, and
+# each drop-in is recorded, in /run/sp2-rig/undo (sp2_unplant_script).
+# Edits keep each file's owner and mode.  Planted instances go to
+# /run/sp2-rig/planted.
 sp2_plant_script() {
     cat <<'SP2EOF'
 set -u
@@ -508,9 +553,7 @@ export PYTHONDONTWRITEBYTECODE=1
 HSU=/opt/hs-uploader/venv/bin/hs-uploader
 SINKS=/etc/hs-uploader/sinks
 D=/run/sp2-rig
-mkdir -p "$D"; : > "$D/planted"
-inst_for(){ local f; f=$(ls -1 "/etc/$1/env/"*.env 2>/dev/null | head -1)
-    if [ -n "$f" ]; then basename "$f" .env; else echo 'N0CALL=T1'; fi; }
+rm -rf "$D"; mkdir -p "$D/backup"; : > "$D/planted"; : > "$D/undo"
 topo_on(){ python3 -B - "$1" <<'PY'
 import sys, tomllib
 try:
@@ -520,6 +563,39 @@ try:
 except Exception:
     print(0)
 PY
+}
+for c in psk-recorder meteor-scatter wspr-recorder mag-recorder; do
+    if [ -e "$SINKS/$c.toml" ]; then e=1; else e=0; fi
+    printf 'PRE|%s|%s|%s\n' "$c" "$e" "$(topo_on "$c")"
+done
+# keep FILE: back FILE up once before its first edit, or note it as new.
+keep(){
+    local f="$1" b
+    grep -qF "|$f|" "$D/undo" && return 0
+    if [ -e "$f" ]; then
+        b="$D/backup/$(printf '%s' "$f" | md5sum | cut -c1-16)"
+        cp -p "$f" "$b" && printf 'RESTORE|%s|%s|\n' "$f" "$b" >> "$D/undo"
+    else
+        printf 'REMOVE|%s|\n' "$f" >> "$D/undo"
+    fi
+}
+# inst_for CLIENT: the instance to plant, in storage form (AC0G=B4).  An env
+# file named the way systemd escapes it (AC0G\x3dB4.env) is unescaped, never
+# escaped twice.  With none, the rig invents N0CALL=T1.  SP2_ROOT exists for
+# the hermetic test of this function alone.
+inst_for(){
+    local f s
+    for f in "${SP2_ROOT:-}/etc/$1/env/"*.env; do
+        [ -e "$f" ] || continue
+        s=$(basename "$f" .env)
+        case "$s" in *'\x'*) continue ;; esac
+        echo "$s"; return
+    done
+    for f in "${SP2_ROOT:-}/etc/$1/env/"*.env; do
+        [ -e "$f" ] || continue
+        systemd-escape --unescape -- "$(basename "$f" .env)"; return
+    done
+    echo 'N0CALL=T1'
 }
 # set_env FILE KEY VALUE: drop every KEY= line, then append KEY=VALUE unless
 # VALUE is empty.  Rewrites in place, so owner and mode stay.
@@ -560,44 +636,66 @@ with open(path, 'r+') as fh:
     fh.seek(0); fh.truncate(); fh.write('\n'.join(lines) + '\n')
 PY
 }
-ensure_switch(){ # CLIENT TAG
-    if [ -e "$SINKS/$1.toml" ]; then echo "$2_SWITCH:1"; return; fi
-    if (cd / && "$HSU" sink set "$1" upload --reason 'rig: plant' --by 'test-nested-v3') >/dev/null 2>&1
-    then echo "$2_SWITCH:1"; else echo "$2_SWITCH:0"; fi
+# switch_for CLIENT TAG ENABLED: pre (the carry-over wrote it), missing (an
+# enabled client without one: the verdict fails it), made (a disabled
+# client, written here), or failed.
+switch_for(){
+    if [ -e "$SINKS/$1.toml" ]; then echo "$2_SWITCH:pre"; return; fi
+    if [ "$3" = 1 ]; then echo "$2_SWITCH:missing"; return; fi
+    if (cd / && "$HSU" sink set "$1" upload --reason 'rig: plant (client disabled in topology)' --by 'test-nested-v3') >/dev/null 2>&1; then
+        echo "$2_SWITCH:made"
+        echo "NOTE|$1 is disabled in topology: the rig wrote its switch file at upload so that smd sink fill names it; the file stays"
+    else
+        echo "$2_SWITCH:failed"
+    fi
 }
 plant_instance(){ # CLIENT TAG KEY VALUE
-    local c="$1" tag="$2" i u f
+    local c="$1" tag="$2" i u f dd inv wa topo cfg
     if ! systemctl cat "$c@.service" >/dev/null 2>&1; then echo "$tag:0"; return; fi
     echo "$tag:1"
-    echo "${tag}_TOPO:$(topo_on "$c")"
-    i=$(inst_for "$c"); u="$c@$(systemd-escape "$i").service"; f="/etc/$c/env/$i.env"
+    topo=$(topo_on "$c"); echo "${tag}_TOPO:$topo"
+    [ "$topo" = 1 ] || return 0
+    switch_for "$c" "$tag" "$topo"
+    i=$(inst_for "$c"); u="$c@$(systemd-escape -- "$i").service"; f="/etc/$c/env/$i.env"
+    if [ -e "$f" ]; then inv=0; else inv=1; fi
+    if [ "$(systemctl is-active "$u" 2>/dev/null)" = active ]; then wa=1; else wa=0; fi
+    keep "$f"
     set_env "$f" "$3" "$4"
     echo "${tag}_ENVSET:$?"
     if [ "$c" = meteor-scatter ]; then
         cfg=/etc/meteor-scatter/meteor-scatter-config.toml
         [ -e "/etc/meteor-scatter/$i.toml" ] && cfg="/etc/meteor-scatter/$i.toml"
+        keep "$cfg"
         [ -e "$cfg" ] || { mkdir -p /etc/meteor-scatter; : > "$cfg"; }
         set_toml "$cfg" station callsign '"N0CALL"' && set_toml "$cfg" station grid_square '"EM00aa"'
         echo "${tag}_CFGSET:$?"
     fi
-    ensure_switch "$c" "$tag"
+    dd="/run/systemd/system/$u.d"
+    mkdir -p "$dd"
+    printf '[Service]\nType=simple\nExecStartPre=\nExecStart=\nExecStart=/bin/sleep infinity\nExecStartPost=\nExecStop=\nExecReload=\nWatchdogSec=0\n' > "$dd/sp2-standin.conf"
+    printf 'DROPIN|%s|%s|%s|%s|\n' "$u" "$dd" "$wa" "$inv" >> "$D/undo"
+    systemctl daemon-reload >/dev/null 2>&1
     systemctl restart "$u" >/dev/null 2>&1; echo "${tag}_START:$?"
+    echo "${tag}_INVENTED:$inv"
     printf 'PLANTED|%s|%s|%s\n' "$c" "$u" "$f" | tee -a "$D/planted"
 }
 plant_instance psk-recorder PSK PSK_DELIVERY_PIPELINES direct
 plant_instance meteor-scatter MS METEOR_SCATTER_DELIVERY_MODE ''
 if systemctl cat wspr-uploader.service >/dev/null 2>&1; then
     echo "WU:1"
+    prev=$(systemctl show -p UnitFileState --value wspr-uploader.service 2>/dev/null)
+    printf 'UNITFILE|wspr-uploader.service|%s|\n' "$prev" >> "$D/undo"
     systemctl enable wspr-uploader.service >/dev/null 2>&1; echo "WU_ENABLE:$?"
-    ensure_switch wspr-recorder WU
+    switch_for wspr-recorder WU "$(topo_on wspr-recorder)"
 else
     echo "WU:0"
 fi
 MAGC=/etc/mag-recorder/mag-recorder-config.toml
 if [ -f "$MAGC" ]; then
     echo "MAG:1"
+    keep "$MAGC"
     set_toml "$MAGC" uploader enabled true; echo "MAG_SET:$?"
-    ensure_switch mag-recorder MAG
+    switch_for mag-recorder MAG "$(topo_on mag-recorder)"
 else
     echo "MAG:0"
 fi
@@ -605,31 +703,88 @@ echo "END:1"
 SP2EOF
 }
 
-# sp2_state_script <before|after>: the planted units' and hs-uploader's start
-# times (ActiveEnterTimestampMonotonic), every radiod unit's, and what each
-# lever file says.  "before" reads the units twice, 10 s apart, and stamps
-# the moment the fill may begin (T0, wall and monotonic); "after" counts each
-# unit's "Started" journal lines since T0.
+# sp2_unplant_script: undo the plant from /run/sp2-rig/undo, after the
+# verdict's reads.  Edited files come back from their backups and created
+# ones go; each drop-in goes, then an invented instance stops, and an
+# instance that ran before the plant restarts on its own process (one that
+# did not run stops).  wspr-uploader is enabled again only if it stood
+# enabled before.  The lever values the fill wrote go with the restored
+# files.  Switch files the plant made stay (removing one would read off).
+# SP2_RUN and SP2_SYSTEMCTL exist for the hermetic test alone.
+sp2_unplant_script() {
+    cat <<'SP2EOF'
+set -u
+D="${SP2_RUN:-/run/sp2-rig}"
+SC="${SP2_SYSTEMCTL:-systemctl}"
+[ -r "$D/undo" ] || { echo "UNDO:0"; echo "END:1"; exit 0; }
+echo "UNDO:1"
+reload=0
+while IFS='|' read -r kind a b c d _; do
+    case "$kind" in
+        RESTORE) if cp -p -- "$b" "$a"; then echo "RESTORED|$a"; else echo "UNDOFAIL|$a"; fi ;;
+        REMOVE)  if rm -f -- "$a"; then echo "REMOVED|$a"; else echo "UNDOFAIL|$a"; fi ;;
+        DROPIN)  rm -rf -- "$b"; reload=1; echo "DROPIN-REMOVED|$a" ;;
+    esac
+done < "$D/undo"
+[ "$reload" = 1 ] && "$SC" daemon-reload >/dev/null 2>&1
+while IFS='|' read -r kind a b c d _; do
+    case "$kind" in
+        DROPIN)
+            if [ "$d" = 1 ] || [ "$c" != 1 ]; then
+                "$SC" stop "$a" >/dev/null 2>&1; "$SC" reset-failed "$a" >/dev/null 2>&1
+                echo "STOPPED|$a"
+            else
+                "$SC" restart "$a" >/dev/null 2>&1; echo "RESTARTED|$a|$?"
+            fi ;;
+        UNITFILE)
+            if [ "$b" = enabled ]; then "$SC" enable "$a" >/dev/null 2>&1; echo "REENABLED|$a|$?"; fi ;;
+    esac
+done < "$D/undo"
+echo "END:1"
+SP2EOF
+}
+
+# sp2_state_script <before|after>: start times (ActiveEnterTimestampMonotonic)
+# of every recorder instance systemd knows, every planted one, and
+# hs-uploader; every radiod unit's, with an independent count of the radiod
+# units running (RADIODN); and what each lever file says.  "before" reads the
+# units twice, SP2_SLEEP (10) s apart, keeps the unit list for "after", and
+# stamps the moment the fill may begin (T0, wall and monotonic); "after"
+# counts each unit's "Started" journal lines since T0.  SP2_RUN, SP2_ROOT,
+# SP2_SYSTEMCTL, SP2_JOURNALCTL and SP2_SLEEP exist for the hermetic test.
 sp2_state_script() {
     printf 'PHASE=%s\n' "$1"
     cat <<'SP2EOF'
 set -u
-D=/run/sp2-rig
-units(){ cut -d'|' -f3 "$D/planted" 2>/dev/null; echo hs-uploader.service; }
+D="${SP2_RUN:-/run/sp2-rig}"
+R="${SP2_ROOT:-}"
+SC="${SP2_SYSTEMCTL:-systemctl}"
+JC="${SP2_JOURNALCTL:-journalctl}"
+mkdir -p "$D"
+listunits(){
+    {
+        cut -d'|' -f3 "$D/planted" 2>/dev/null
+        "$SC" list-units --type=service --all --plain --no-legend \
+            'psk-recorder@*' 'wspr-recorder@*' 'meteor-scatter@*' 'mag-recorder*' 2>/dev/null | awk '{ print $1 }'
+        echo hs-uploader.service
+    } | awk 'NF && !seen[$0]++'
+}
 rec(){ # TAG
     local u
-    units | while IFS= read -r u; do
+    while IFS= read -r u; do
         [ -n "$u" ] || continue
-        printf 'UNIT|%s|%s|%s|%s\n' "$1" "$u" \
-            "$(systemctl show -p ActiveState --value "$u" 2>/dev/null)" \
-            "$(systemctl show -p ActiveEnterTimestampMonotonic --value "$u" 2>/dev/null)"
-    done
-    systemctl show -p Id -p ActiveState -p ActiveEnterTimestampMonotonic 'radiod@*' radiod.service 2>/dev/null \
+        "$SC" show -p ActiveState -p ActiveEnterTimestampMonotonic "$u" 2>/dev/null \
+            | awk -F= -v t="$1" -v u="$u" '
+                $1 == "ActiveState" { st = $2 } $1 == "ActiveEnterTimestampMonotonic" { mo = $2 }
+                END { printf "UNIT|%s|%s|%s|%s\n", t, u, st, mo }'
+    done < "$D/units"
+    "$SC" show -p Id -p ActiveState -p ActiveEnterTimestampMonotonic 'radiod@*' radiod.service 2>/dev/null \
         | awk -F= -v t="$1" '
             $1 == "Id" { id = $2 } $1 == "ActiveState" { st = $2 }
             $1 == "ActiveEnterTimestampMonotonic" { mo = $2 }
             /^$/ { if (id != "") printf "RADIOD|%s|%s|%s|%s\n", t, id, st, mo; id = st = mo = "" }
             END { if (id != "") printf "RADIOD|%s|%s|%s|%s\n", t, id, st, mo }'
+    printf 'RADIODN|%s|%s\n' "$1" "$("$SC" list-units --type=service --state=active --plain --no-legend 'radiod@*' radiod.service 2>/dev/null | grep -c .)"
 }
 envval(){ # FILE KEY
     [ -r "$1" ] || { echo NOFILE; return; }
@@ -643,11 +798,13 @@ facts(){
             meteor-scatter) echo "LEVER|meteor-scatter|$(envval "$f" METEOR_SCATTER_DELIVERY_MODE)" ;;
         esac
     done < "$D/planted"
-    echo "WUSTATE|$(systemctl show -p UnitFileState --value wspr-uploader.service 2>/dev/null)|$(systemctl show -p ActiveState --value wspr-uploader.service 2>/dev/null)"
-    python3 -B - <<'PY'
-import tomllib
+    "$SC" show -p UnitFileState -p ActiveState wspr-uploader.service 2>/dev/null \
+        | awk -F= '$1 == "UnitFileState" { f = $2 } $1 == "ActiveState" { a = $2 }
+                   END { printf "WUSTATE|%s|%s\n", f, a }'
+    python3 -B - "$R/etc/mag-recorder/mag-recorder-config.toml" <<'PY'
+import sys, tomllib
 try:
-    with open('/etc/mag-recorder/mag-recorder-config.toml', 'rb') as fh:
+    with open(sys.argv[1], 'rb') as fh:
         up = tomllib.load(fh).get('uploader', {})
     v = up.get('enabled', 'absent') if isinstance(up, dict) else 'absent'
     print('MAGEN|' + ('bool:' + str(v).lower() if isinstance(v, bool) else repr(v)))
@@ -658,23 +815,26 @@ except Exception as exc:
 PY
 }
 mono(){ python3 -c 'import time; print(time.monotonic_ns() // 1000)'; }
+touch "$D/planted"
 if [ "$PHASE" = before ]; then
+    listunits > "$D/units"
     rec 1
-    sleep 10
+    sleep "${SP2_SLEEP:-10}"
     rec 2
     facts
     t0=$(date +%s); m0=$(mono)
     printf '%s %s\n' "$t0" "$m0" > "$D/t0"
     echo "T0:$t0"; echo "T0MONO:$m0"
 else
+    [ -s "$D/units" ] || listunits > "$D/units"
     rec A
     facts
-    read -r t0 m0 < "$D/t0" 2>/dev/null || t0=""
+    t0=""; read -r t0 m0 < "$D/t0" 2>/dev/null
     if [ -n "$t0" ]; then
-        units | while IFS= read -r u; do
-            n=$(journalctl -u "$u" --since "@$t0" -o cat --no-pager 2>/dev/null | grep -c '^Started ')
+        while IFS= read -r u; do
+            n=$("$JC" -u "$u" --since "@$t0" -o cat --no-pager 2>/dev/null | grep -c '^Started ')
             printf 'STARTS|%s|%s\n' "$u" "$n"
-        done
+        done < "$D/units"
         echo "T0:$t0"
     fi
 fi
@@ -683,14 +843,15 @@ SP2EOF
 }
 
 # sp2_fill_facts <file>: `smd sink fill`'s output -> KEY:value, plus one
-# RESTART|<unit>|<times> line per unit the step says it restarted (the lever
-# step's and the stale-writer step's lines together).
+# CHANGED|<path> line per lever file it wrote and one RESTART|<unit>|<times>
+# line per unit it says it restarted (the lever step's and the stale-writer
+# step's lines together).
 sp2_fill_facts() {
     python3 - "$1" <<'PY'
 import re, sys
 lines = open(sys.argv[1], encoding='utf-8', errors='replace').read().splitlines()
 chg = {'psk-recorder': 0, 'meteor-scatter': 0, 'wspr-recorder': 0, 'mag': 0}
-restarts, toks = {}, []
+restarts, toks, changed = {}, [], []
 n = dict(wu=0, failed=0, armed=0, site=0, hsu=0)
 for ln in lines:
     s = ln.strip()
@@ -699,6 +860,7 @@ for ln in lines:
     m = re.search(r'lever: changed (\S+)', ln)
     if m:
         p = m.group(1)
+        changed.append(p)
         if p.endswith('/mag-recorder/mag-recorder-config.toml'):
             chg['mag'] += 1
         for c in ('psk-recorder', 'meteor-scatter', 'wspr-recorder'):
@@ -720,16 +882,20 @@ out = toks + ['CHG_PSK:%d' % chg['psk-recorder'], 'CHG_MS:%d' % chg['meteor-scat
               'LV_ARMED:%d' % n['armed'],
               'SITE_FILL:%d' % n['site'], 'HSU_RESTART:%d' % n['hsu'],
               'RESTARTED:%d' % len(restarts)]
+out += ['CHANGED|%s' % p for p in changed]
 out += ['RESTART|%s|%d' % (u, k) for u, k in sorted(restarts.items())]
 print('\n'.join(out))
 PY
 }
 
-# sp2_lever_verdict <plant> <before> <fill-facts> <after>: each lever
-# written, each touched unit restarted once, nothing else restarted, radiod's
-# start time unchanged.  <plant>, <before> and <after> are sp2_unwrap's
-# output of the three guest scripts.
+# sp2_lever_verdict <plant> <before> <fill-facts> <after>: the carry-over
+# wrote a switch file for every enabled client; each lever written; each
+# unit smd names restarted once and every other one unmoved; radiod's start
+# time unchanged.  <plant>, <before> and <after> are sp2_unwrap's output of
+# the three guest scripts.  It ends with VERDICT:done; a crash leaves the
+# line out, and the exit code, read into a variable, says so too.
 sp2_lever_verdict() {
+    local rc
     python3 - "$@" <<'PY'
 import sys
 def read(p):
@@ -742,10 +908,22 @@ def tok(lines, k):
     return None
 def recs(lines, kind):
     return [l.split('|')[1:] for l in lines if l.startswith(kind + '|')]
+def num(s):
+    try:
+        return int(s)
+    except (TypeError, ValueError):
+        return None
+def done():
+    print('VERDICT:done')
+    sys.exit(0)
 for name, lines in (('plant', plant), ('before', before), ('smd sink fill', fill), ('after', after)):
     if tok(lines, 'END') != '1':
         print('FAIL: the %s probe gave no answer (guest exec failed; not a verdict)' % name)
-        sys.exit(0)
+        done()
+# The carry-over, read before the plant touched anything.
+for c, exists, enabled in recs(plant, 'PRE'):
+    if enabled == '1' and exists != '1':
+        print('FAIL: the carry-over wrote no switch file for an enabled client: %s' % c)
 if tok(fill, 'FILLRC') != '0':
     print('FAIL: smd sink fill --reason rig exited %s' % tok(fill, 'FILLRC'))
 if tok(fill, 'SITE_FILL') != '1':
@@ -758,61 +936,71 @@ restarted = {u: int(k) for u, k in recs(fill, 'RESTART')}
 for u, k in sorted(restarted.items()):
     if k != 1:
         print('FAIL: smd sink fill says it restarted %s %d times; each touched unit restarts once' % (u, k))
+changed = {r[0] for r in recs(fill, 'CHANGED')}
 b1 = {r[1]: (r[2], r[3]) for r in recs(before, 'UNIT') if r[0] == '1'}
 b2 = {r[1]: (r[2], r[3]) for r in recs(before, 'UNIT') if r[0] == '2'}
 a = {r[1]: (r[2], r[3]) for r in recs(after, 'UNIT') if r[0] == 'A'}
 starts = {r[0]: r[1] for r in recs(after, 'STARTS')}
-t0 = tok(before, 'T0MONO')
-def num(s):
-    try:
-        return int(s)
-    except (TypeError, ValueError):
-        return None
-# Each planted instance: its lever written, its unit restarted once.
+t0 = num(tok(before, 'T0MONO'))
+if t0 is None:
+    print('FAIL: the before probe stamped no T0 (not a verdict)')
+    done()
+# Each planted instance: its lever written; smd names its restart once.
 lev_after = {r[0]: r[1] for r in recs(after, 'LEVER')}
 want = {'psk-recorder': ('PSK', 'CHG_PSK', 'server-raw'),
         'meteor-scatter': ('MS', 'CHG_MS', 'off')}
-planted = {r[0]: r[1] for r in recs(plant, 'PLANTED')}
+planted = {r[0]: (r[1], r[2]) for r in recs(plant, 'PLANTED')}
+def switch_ok(tag, c):
+    s = tok(plant, tag + '_SWITCH')
+    if s == 'failed':
+        print('FAIL: the rig could not write a switch file for %s (not a verdict on smd)' % c)
+    return s in ('pre', 'made')
 for c, (tag, chg, val) in want.items():
     if tok(plant, tag) != '1':
         print('UNCHECKED: the %s lever (this image installs no %s@.service)' % (c, c))
         continue
+    if tok(plant, tag + '_TOPO') != '1':
+        print('UNCHECKED: the %s lever (topology leaves %s disabled, so the lever step cannot reach it)' % (c, c))
+        continue
+    if not switch_ok(tag, c):
+        continue
     if c not in planted or tok(plant, tag + '_ENVSET') != '0':
         print('FAIL: the rig could not plant a %s instance (not a verdict on smd)' % c)
         continue
-    if tok(plant, tag + '_TOPO') != '1' or tok(plant, tag + '_SWITCH') != '1':
-        print('UNCHECKED: the %s lever (%s is not enabled in topology, or has no switch file, so smd sink fill does not reach it)' % (c, c))
-        continue
-    u = planted[c]
-    if tok(fill, chg) != '1':
-        print('FAIL: smd sink fill did not write the %s lever (lever: changed lines: %s)' % (c, tok(fill, chg)))
+    u, f = planted[c]
+    if (num(tok(fill, chg)) or 0) < 1 or f not in changed:
+        print('FAIL: smd sink fill did not write the %s lever at %s' % (c, f))
     if lev_after.get(c) != val:
         print('FAIL: %s\'s env file reads %r after the fill; the lever is %s' % (c, lev_after.get(c), val))
     if restarted.get(u) != 1:
         print('FAIL: smd sink fill did not say it restarted %s once' % u)
-    one, two = b1.get(u), b2.get(u)
-    if not one or one != two or one[0] != 'active':
-        print('UNCHECKED: the restart count of %s (it did not run steadily before the fill: %s, then %s)' % (u, one, two))
-        continue
+# Every unit watched: restarted once when smd names it (hs-uploader too when
+# the step says it restarted the daemon), otherwise not at all.
+hsu_named = tok(fill, 'HSU_RESTART') not in (None, '0')
+for u, st in sorted(b2.items()):
+    named = u in restarted or (u == 'hs-uploader.service' and hsu_named)
     aa = a.get(u)
-    if not aa or aa[0] != 'active' or num(aa[1]) is None or num(t0) is None or num(aa[1]) <= num(t0):
+    if not named:
+        if aa != st:
+            print('FAIL: %s moved during the fill (%s -> %s), and smd sink fill names no restart of it' % (u, st, aa))
+        continue
+    one = b1.get(u)
+    if not one or one != st or one[0] != 'active':
+        print('UNCHECKED: the restart count of %s (it did not run steadily before the fill: %s, then %s)' % (u, one, st))
+        continue
+    if not aa or aa[0] != 'active' or num(aa[1]) is None or num(aa[1]) <= t0:
         print('FAIL: %s did not start again after the fill began (after: %s; fill began at %s us)' % (u, aa, t0))
     elif starts.get(u) != '1':
         print('FAIL: %s started %s times since the fill began; it must restart once' % (u, starts.get(u)))
-# Units the fill did not name stay as they were (hs-uploader too, unless the
-# step says it restarted it).
-for u, st in sorted(b2.items()):
-    if u in restarted or (u == 'hs-uploader.service' and tok(fill, 'HSU_RESTART') != '0'):
-        continue
-    if a.get(u) != st:
-        print('FAIL: %s moved during the fill (%s -> %s), and smd sink fill names no restart of it' % (u, st, a.get(u)))
+for u in sorted(set(restarted) - set(b2)):
+    print('UNCHECKED: the restart of %s (smd names it; the rig did not watch it)' % u)
 # wspr-uploader: stopped and disabled.
 wu = recs(after, 'WUSTATE')
 if tok(plant, 'WU') != '1':
     print('UNCHECKED: the wspr-uploader lever (this image installs no wspr-uploader.service)')
-elif tok(plant, 'WU_ENABLE') != '0' or tok(plant, 'WU_SWITCH') != '1':
-    print('FAIL: the rig could not enable wspr-uploader or name wspr-recorder (not a verdict on smd)')
-else:
+elif tok(plant, 'WU_ENABLE') != '0':
+    print('FAIL: the rig could not enable wspr-uploader (not a verdict on smd)')
+elif switch_ok('WU', 'wspr-recorder'):
     if tok(fill, 'WU_DISABLED') != '1':
         print('FAIL: smd sink fill did not stop and disable wspr-uploader.service')
     if not wu or wu[0][0] != 'disabled' or wu[0][1] not in ('inactive', 'failed'):
@@ -821,40 +1009,40 @@ else:
 mag = recs(after, 'MAGEN')
 if tok(plant, 'MAG') != '1':
     print('UNCHECKED: the mag-recorder lever (this image writes no mag-recorder-config.toml)')
-elif tok(plant, 'MAG_SET') != '0' or tok(plant, 'MAG_SWITCH') != '1':
-    print('FAIL: the rig could not arm the mag fallback or name mag-recorder (not a verdict on smd)')
-else:
+elif tok(plant, 'MAG_SET') != '0':
+    print('FAIL: the rig could not arm the mag fallback (not a verdict on smd)')
+elif switch_ok('MAG', 'mag-recorder'):
     if tok(fill, 'CHG_MAG') != '1':
         print('FAIL: smd sink fill did not write the mag-recorder lever')
     if not mag or mag[0][0] != 'bool:false':
         print('FAIL: mag-recorder\'s [uploader] enabled reads %s after the fill, not the boolean false' % (mag[0][0] if mag else 'nothing'))
-# radiod: never restarted.
+# radiod: never restarted.  RADIODN counts the running radiod units apart
+# from the RADIOD records, so a reader that loses them fails, never passes.
 rb = {r[1]: (r[2], r[3]) for r in recs(before, 'RADIOD') if r[0] == '2'}
 ra = {r[1]: (r[2], r[3]) for r in recs(after, 'RADIOD') if r[0] == 'A'}
+nb = {r[0]: num(r[1]) for r in recs(before, 'RADIODN')}.get('2')
+na = {r[0]: num(r[1]) for r in recs(after, 'RADIODN')}.get('A')
 moved = sorted(u for u in set(rb) | set(ra) if rb.get(u) != ra.get(u))
 for u in moved:
     print('FAIL: radiod moved during the fill: %s %s -> %s' % (u, rb.get(u), ra.get(u)))
-if not moved and not any(st == 'active' for st, _ in rb.values()):
+runs_b = sum(st == 'active' for st, _ in rb.values())
+runs_a = sum(st == 'active' for st, _ in ra.values())
+if nb is None or na is None:
+    print('FAIL: the probes did not count the running radiod units (not a verdict)')
+elif runs_b != nb or runs_a != na:
+    print('FAIL: %d/%d radiod unit(s) run (before/after), but the start times of %d/%d were read' % (nb, na, runs_b, runs_a))
+elif not moved and nb == 0 and na == 0:
     print("UNCHECKED: radiod's start time across the fill (no radiod unit runs in this nest)")
+done()
 PY
+    rc=$?
+    [ "$rc" = 0 ] || echo "FAIL: the lever verdict exited $rc (not a verdict)"
 }
 # <<< sink_part2
 # sp2_gx <timeout> <script> <raw>: run a guest script through qm guest exec,
 # base64-encoded so the request holds only ASCII; qm's reply lands in <raw>.
 sp2_gx(){
     $SSHN "qm guest exec $VMID --timeout $1 -- bash -lc \"echo $(printf '%s\n' "$2" | base64 -w0) | base64 -d > /tmp/sig-sp2.sh; bash /tmp/sig-sp2.sh\"" > "$3" 2>&1
-}
-# sp2_report <verdict> <context>: each UNCHECKED line said and kept for the
-# closing line; any FAIL line is FATAL, and shows the probe's last lines.
-sp2_report(){
-    local l n=0
-    while IFS= read -r l; do
-        case "$l" in
-            UNCHECKED:*) say "⚠ NOT EVALUATED: ${l#UNCHECKED: }"; sink_unchecked "${l#UNCHECKED: }" ;;
-            FAIL:*)      say "FATAL: ${l#FAIL: }"; n=$((n + 1)) ;;
-        esac
-    done < "$1"
-    [ "$n" = 0 ] || { sed 's/^/      /' "$2" | tail -20; exit 1; }
 }
 
 KEY="$HOME/appliance/build/applkey"
@@ -1868,8 +2056,21 @@ else
             sp2_unwrap "$SP2D/after.raw" "$SP2D/after.txt" \
                 || { say "FATAL: the start-time probe after the fill returned no answer (guest exec failed, not a verdict)"; head -6 "$SP2D/after.raw"; exit 1; }
             sp2_lever_verdict "$SP2D/plant.txt" "$SP2D/before.txt" "$SP2D/fill.facts" "$SP2D/after.txt" > "$SP2D/lever.verdict"
+            # Undo the plant before judging, so a FATAL leaves no residue
+            # either.  What cannot be undone is said before later phases run.
+            sp2_gx 300 "$(sp2_unplant_script)" "$SP2D/unplant.raw"
+            if sp2_unwrap "$SP2D/unplant.raw" "$SP2D/unplant.txt" && [ "$(sp2_tok "$SP2D/unplant.txt" END)" = 1 ]; then
+                sed 's/^/      unplant| /' "$SP2D/unplant.txt" | tail -24
+                say "the plant undone: edited files restored, invented instances stopped and removed, stand-in drop-ins gone;"
+                say "  switch files the plant made for disabled clients stay, at upload"
+                grep -q '^UNDOFAIL|' "$SP2D/unplant.txt" \
+                    && say "⚠ PLANT RESIDUE: some files could not be restored (UNDOFAIL lines above); later phases see them"
+            else
+                say "⚠ PLANT RESIDUE: the undo probe returned no answer; the planted instances, stand-in drop-ins"
+                say "  and edited env/config files (lever values in place) remain for the phases below"
+            fi
             sp2_report "$SP2D/lever.verdict" "$SP2D/after.txt"
-            say "smd sink fill: each lever it could reach written, each touched unit restarted once, nothing else moved ✓"
+            say "smd sink fill: the carry-over wrote every enabled client's switch file; each lever it could reach written, each unit it named restarted once, nothing else moved ✓"
         fi
     fi
     MET=$($SSHN "qm guest exec $VMID --timeout 60 -- bash -lc '
