@@ -275,6 +275,7 @@ PRE|wspr-recorder|${WSPRPRE:-1}|1|1
 ROWS|wspr-recorder|0
 PRE|mag-recorder|${MAGPRE:-1}|1|${MAGGOV:-1}
 ROWS|mag-recorder|0
+PREDONE:1
 PSK:1
 PSK_TOPO:1
 PSK_SWITCH:${PSKSW:-pre}
@@ -632,16 +633,36 @@ PY
 SP2_ROOT="$PR" bash <(sp2_pre_script) > "$T/pre.out" 2>&1
 check "enabled, governed at /opt/git/sigmond, no file" 1 "$(grep -cx 'PRE|psk-recorder|0|1|1' "$T/pre.out")"
 check "enabled, deploy.toml declares no pipeline"        1 "$(grep -cx 'PRE|wspr-recorder|1|1|0' "$T/pre.out")"
-check "governed through topology's client_dir"           1 "$(grep -cx 'PRE|mag-recorder|0|1|1' "$T/pre.out")"
+check "topology's client_dir ignored, as sigmond does"   1 "$(grep -cx 'PRE|mag-recorder|0|1|nofixed' "$T/pre.out")"
+check "the probe finished"                               1 "$(grep -cx 'PREDONE:1' "$T/pre.out")"
 check "disabled, not installed"                          1 "$(grep -cx 'PRE|meteor-scatter|0|0|nofixed' "$T/pre.out")"
 check "its sink.db rows counted"                         1 "$(grep -cx 'ROWS|meteor-scatter|2' "$T/pre.out")"
-rm "$PR/srv/clients/mag-recorder/deploy.toml"
+mkdir -p "$PR/opt/git/sigmond/mag-recorder"; cp "$PR/srv/clients/mag-recorder/deploy.toml" "$PR/opt/git/sigmond/mag-recorder/"
 SP2_ROOT="$PR" bash <(sp2_pre_script) > "$T/pre2.out" 2>&1
-check "no deploy.toml at a fixed path: nofixed"          1 "$(grep -cx 'PRE|mag-recorder|0|1|nofixed' "$T/pre2.out")"
+check "the same deploy.toml at /opt/git/sigmond: governed" 1 "$(grep -cx 'PRE|mag-recorder|0|1|1' "$T/pre2.out")"
 { cat "$T/pre.out"; grep -v '^PRE|\|^ROWS|' "$T/p.txt"; } > "$T/ppre.txt"
 lv prechain "$T/ppre.txt" "$T/b.txt" "$T/fill.facts" "$T/a.txt"
 has "the chain fails psk-recorder"          "$T/prechain.lv" "FAIL: the carry-over wrote no switch file for an enabled client: psk-recorder"
-has "and mag-recorder"                      "$T/prechain.lv" "FAIL: the carry-over wrote no switch file for an enabled client: mag-recorder"
+has "mag-recorder, not at a fixed path, said" "$T/prechain.lv" "UNCHECKED: whether the carry-over owed mag-recorder a switch file (enabled, but no deploy.toml at a fixed path)"
+# M-A: a pre probe that crashed, or printed only part, is no verdict.
+printf 'Traceback (most recent call last):\n  File "<stdin>", line 3\nNameError: boom\n' > "$T/precrash.out"
+{ cat "$T/precrash.out"; grep -v '^PRE|\|^ROWS|\|^PREDONE' "$T/p.txt"; } > "$T/pcrash.txt"
+lv precrash "$T/pcrash.txt" "$T/b.txt" "$T/fill.facts" "$T/a.txt"
+has "a crashed pre probe fails" "$T/precrash.lv" "FAIL: the pre probe gave no answer (not a verdict)"
+check "and says nothing else" 1 "$(findings "$T/precrash.lv")"
+check "but finishes" 1 "$(done_ "$T/precrash.lv")"
+grep -v '^PRE|mag-recorder' "$T/p.txt" > "$T/ppart.txt"
+lv prepart "$T/ppart.txt" "$T/b.txt" "$T/fill.facts" "$T/a.txt"
+has "a pre probe missing a client fails" "$T/prepart.lv" "FAIL: the pre probe gave no answer (not a verdict)"
+grep -v '^PREDONE' "$T/p.txt" > "$T/pnodone.txt"
+lv prenodone "$T/pnodone.txt" "$T/b.txt" "$T/fill.facts" "$T/a.txt"
+has "a pre probe without PREDONE fails" "$T/prenodone.lv" "FAIL: the pre probe gave no answer (not a verdict)"
+# The real script crashing: python3 shadowed by one that dies.
+mkdir -p "$T/deadpy"; printf '#!/bin/sh\nexit 1\n' > "$T/deadpy/python3"; chmod +x "$T/deadpy/python3"
+PATH="$T/deadpy:$PATH" SP2_ROOT="$PR" bash <(sp2_pre_script) > "$T/predead.out" 2>&1
+{ cat "$T/predead.out"; grep -v '^PRE|\|^ROWS|\|^PREDONE' "$T/p.txt"; } > "$T/pdead.txt"
+lv predead "$T/pdead.txt" "$T/b.txt" "$T/fill.facts" "$T/a.txt"
+has "the pre script dying fails" "$T/predead.lv" "FAIL: the pre probe gave no answer (not a verdict)"
 hasnt "never wspr-recorder (no pipelines)"  "$T/prechain.lv" "client: wspr-recorder"
 has "meteor-scatter's rows said"            "$T/prechain.lv" "UNCHECKED: whether the carry-over owed meteor-scatter a switch file (disabled, but 2 sink.db row(s)"
 

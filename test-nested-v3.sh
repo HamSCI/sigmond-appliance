@@ -527,8 +527,9 @@ sp2_report(){
 # (sigmond sink_carryover._read_station), read here in the guest, never by
 # calling sigmond: an enabled client whose deploy.toml, at a fixed path,
 # declares at least one [[hs_uploader.pipeline]].  The fixed paths are
-# _deploy_fixed's: topology.toml's [sigmond] client_dir, then
-# /opt/git/sigmond, each /<client>/deploy.toml.  One line per client:
+# _deploy_fixed's as sigmond runs it: /opt/git/sigmond/<client>/deploy.toml
+# (load_topology never reads [sigmond] client_dir from topology.toml, so the
+# key is ignored here too).  One line per client, then PREDONE:1:
 #   PRE|<client>|<switch file 0/1>|<enabled 0/1>|<governed 1/0/nofixed>
 #   ROWS|<client>|<sink.db rows stored under its producer name>
 # "nofixed": no deploy.toml at a fixed path (the carry-over may still find
@@ -550,7 +551,9 @@ def load(path):
 topo = load(R + '/etc/sigmond/topology.toml') or {}
 comp = topo.get('component') if isinstance(topo.get('component'), dict) else {}
 sig = topo.get('sigmond') if isinstance(topo.get('sigmond'), dict) else {}
-bases = [b for b in (sig.get('client_dir'), '/opt/git/sigmond') if isinstance(b, str) and b]
+# sigmond's load_topology never reads [sigmond] client_dir from the file,
+# so the carry-over's fixed path is /opt/git/sigmond alone.
+bases = ['/opt/git/sigmond']
 rows = {}
 db = R + '/var/lib/sigmond/sink.db'
 if os.path.lexists(db):
@@ -579,6 +582,7 @@ for c in ('psk-recorder', 'meteor-scatter', 'wspr-recorder', 'mag-recorder'):
             break
     print('PRE|%s|%d|%d|%s' % (c, f, e, g))
     print('ROWS|%s|%d' % (c, rows.get(c, 0)))
+print('PREDONE:1')
 PY
 SP2EOF
 }
@@ -997,6 +1001,13 @@ for name, lines in (('plant', plant), ('before', before), ('smd sink fill', fill
         done()
 # The carry-over, read before the plant touched anything, by its own rule:
 # an enabled client whose deploy.toml at a fixed path declares pipelines.
+# A pre probe that printed nothing, or not every client, is no verdict.
+PRE_CLIENTS = ('psk-recorder', 'meteor-scatter', 'wspr-recorder', 'mag-recorder')
+if (tok(plant, 'PREDONE') != '1'
+        or any(c not in {r[0] for r in recs(plant, 'PRE') if len(r) >= 4} for c in PRE_CLIENTS)
+        or any(c not in {r[0] for r in recs(plant, 'ROWS')} for c in PRE_CLIENTS)):
+    print('FAIL: the pre probe gave no answer (not a verdict)')
+    done()
 rows = {r[0]: num(r[1]) for r in recs(plant, 'ROWS')}
 for c, exists, enabled, governed in (r[:4] for r in recs(plant, 'PRE')):
     if exists == '1':
