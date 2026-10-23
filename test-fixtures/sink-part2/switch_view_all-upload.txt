@@ -1,0 +1,5 @@
+  [32m✓[0m  site sink: upload (store and send); set 2026-10-01T00:00:00Z by carry-over — fixture
+     mag-recorder: its file reads upload; effective upload
+     psk-recorder: its file reads upload; effective upload
+     wspr-recorder: its file reads upload; effective upload
+     refused switch files: none

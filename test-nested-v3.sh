@@ -291,6 +291,572 @@ QGAEOF
 # of the probe that the verdict rests on.
 qga_fatal(){ say "FATAL: $1"; [ -n "${2:-}" ] && printf '%s\n' "$2" | sed 's/^/      /' | tail -14; exit 1; }
 # <<< qga_rig
+
+# >>> sink_part2 (test-nested-sink-part2.sh loads exactly this block)
+# The sink switches, step 2b part 2 (sigmond tasks/spec-sink-2b-part2.md
+# §13.1).  With an hs-uploader that offers `gate`, the manifest step carries
+# [uploads] over into the switch files under /etc/hs-uploader/sinks/, writes
+# the carry-over marker, renders the manifest without `discard` or a banner,
+# and moves the heartbeat into pipelines.d/sigmond.toml.  `smd sink fill`
+# then lowers every in-process sender (the levers) and restarts each touched
+# unit alone, once, never radiod.
+#
+# The guest scripts below print KEY:value lines and sections between
+# "==SP2 <NAME>==" and "==SP2 END==", and end with END:1.  They hold only
+# ASCII, and travel base64-encoded (sp2_gx).  The readers run on this host:
+# sp2_unwrap turns qm's JSON reply into the command's own lines, and the
+# *_facts functions reduce those to KEY:value lines.  Each verdict prints
+# one "FAIL: <why>" or "UNCHECKED: <what>" line per finding, and nothing
+# when all holds.  A reply with no END:1 is no verdict at all.
+
+# The phrases the rig reads from `smd sink status`.  Part 2's switch view
+# keeps part 1's words whole (sigmond Task 21, fix round 1).
+SP2_UPLOAD_PHRASE='site sink: upload (store and send)'
+SP2_OFF_PHRASE='site sink: off'
+
+# The fill, as the rig runs it in the guest.  The exit code comes from a
+# variable, never through a pipe.  SP2_SMD exists for the hermetic test.
+SP2_FILL='o=$(cd / && "${SP2_SMD:-smd}" sink fill --reason rig 2>&1); rc=$?
+printf "%s\n" "$o"
+echo "FILLRC:$rc"
+echo "END:1"'
+
+# sp2_unwrap <raw> <out>: qm guest exec's JSON reply -> out-data plus
+# err-data, as the guest printed them.  Returns 1 when the reply holds no
+# JSON object (the channel failed).  Text the channel double-encoded stays
+# double-encoded; every pattern below is ASCII.
+sp2_unwrap() {
+    python3 - "$1" "$2" <<'PY'
+import json, sys
+raw = open(sys.argv[1], 'rb').read().decode('utf-8', 'replace')
+d = None
+for cand in (raw, raw[raw.find('{'):raw.rfind('}') + 1]):
+    if not cand:
+        continue
+    try:
+        d = json.loads(cand)
+        break
+    except ValueError:
+        continue
+if not isinstance(d, dict) or not ('out-data' in d or 'exitcode' in d):
+    sys.exit(1)
+with open(sys.argv[2], 'w', encoding='utf-8') as fh:
+    fh.write((d.get('out-data') or '') + (d.get('err-data') or ''))
+PY
+}
+
+# sp2_tok <file> <KEY>: the value of the first KEY:value line, or nothing.
+sp2_tok() {
+    LC_ALL=C awk -v k="$2" 'index($0, k ":") == 1 { print substr($0, length(k) + 2); exit }' "$1" 2>/dev/null
+}
+
+# sp2_probe_script: the guest script for the fresh station's facts.
+# SP2_ROOT, SP2_SMD and SP2_HSU exist for the hermetic test alone.
+sp2_probe_script() {
+    cat <<'SP2EOF'
+set -u
+export PYTHONDONTWRITEBYTECODE=1
+R="${SP2_ROOT:-}"
+SMD="${SP2_SMD:-smd}"
+HSU="${SP2_HSU:-/opt/hs-uploader/venv/bin/hs-uploader}"
+M="$R/etc/hs-uploader/pipelines.toml"
+PD="$R/etc/hs-uploader/pipelines.d"
+S="$PD/sigmond.toml"
+K="$R/var/lib/hs-uploader/carry-over-v1.done"
+if [ -e "$K" ]; then echo "MARKER:1"; else echo "MARKER:0"; fi
+if [ -r "$M" ]; then
+    echo "MANIFEST:1"
+    echo "BANNER:$(grep -c 'SITE SINK OFF' "$M")"
+    echo "HBLEG:$(grep -cE '^name = "heartbeat"$' "$M")"
+    echo "DISC:$(cat "$M" "$PD"/*.toml 2>/dev/null | grep -cE '^[[:space:]]*discard[[:space:]]*=')"
+else
+    echo "MANIFEST:0"
+fi
+if [ -r "$S" ]; then
+    echo "SIGTOML:1"
+    echo "HBSIG:$(grep -cE '^name = "heartbeat"$' "$S")"
+    echo "UNGOVERNED:$(grep -cE '^governed = false$' "$S")"
+else
+    echo "SIGTOML:0"
+fi
+echo "==SP2 MANIFEST-STEP=="
+o=$(cd / && "$SMD" admin uploader manifest 2>&1); rc=$?
+printf '%s\n' "$o"
+echo "==SP2 END=="
+echo "STEPRC:$rc"
+echo "==SP2 STATUS-JSON=="
+o=$(cd / && "$HSU" sink status --json 2>/dev/null); rc=$?
+printf '%s\n' "$o"
+echo "==SP2 END=="
+echo "STATUSRC:$rc"
+echo "END:1"
+SP2EOF
+}
+
+# sp2_facts <file>: the probe's lines (sp2_unwrap's output) -> KEY:value.
+# The features line is the one smd prints, "uploader: hs-uploader features:
+# <words>", found anywhere on its line (a warning sign the channel
+# double-encodes may stand ahead of it); a line without the "uploader: "
+# prefix is not it.  The status JSON gives the site's state, whether
+# hs-uploader enforces the switches, and each client's own file.
+sp2_facts() {
+    python3 - "$1" <<'PY'
+import json, re, sys
+FEATURES = 'uploader: hs-uploader features: '
+lines = open(sys.argv[1], encoding='utf-8', errors='replace').read().splitlines()
+sect, body, toks = None, {}, []
+for ln in lines:
+    s = ln.strip()
+    if s.startswith('==SP2 ') and s.endswith('=='):
+        name = s[6:-2]
+        sect = None if name == 'END' else name
+        if sect:
+            body[sect] = []
+        continue
+    if sect:
+        body[sect].append(ln)
+    elif re.fullmatch(r'[A-Z][A-Z0-9_]*:-?[0-9]+', s):
+        toks.append(s)
+out = list(toks)
+step = body.get('MANIFEST-STEP', [])
+words = None
+for ln in step:
+    i = ln.find(FEATURES)
+    if i >= 0:
+        words = ln[i + len(FEATURES):].split()
+        break
+out.append('F_LINE:%d' % (words is not None))
+words = words or []
+out.append('F_WORDS:%s' % (','.join(words) or '-'))
+out.append('F_GATE:%d' % ('gate' in words))
+out.append('F_NONE:%d' % ('none' in words))
+out.append('SMDERR:%d' % sum('smd: uploader: ' in ln for ln in step))
+text = '\n'.join(body.get('STATUS-JSON', []))
+try:
+    d = json.loads(text)
+    if not isinstance(d, dict):
+        raise ValueError('not an object')
+    clients = [c for c in d.get('clients') or [] if isinstance(c, dict)]
+    notup = sorted(str(c.get('client')) for c in clients
+                   if c.get('file_state') != 'upload')
+    out += ['ST_JSON:1',
+            'ST_SCHEMA:%s' % d.get('schema'),
+            'ST_ENFORCED:%d' % (d.get('enforced') is True),
+            'ST_SITE:%s' % ((d.get('site') or {}).get('state') or '-'),
+            'ST_NCLIENTS:%d' % len(clients),
+            'ST_NOTUPLOAD:%s' % (','.join(notup) or '-'),
+            'ST_ERRORS:%d' % len(d.get('errors') or []),
+            'ST_REFUSED:%d' % len(d.get('refused_files') or [])]
+except ValueError:
+    out.append('ST_JSON:0')
+print('\n'.join(out))
+PY
+}
+
+# sp2_verdict <facts-file>: the fresh station after bring-up (§13.1).
+sp2_verdict() {
+    local f="$1" v
+    _sp2t(){ sp2_tok "$f" "$1"; }
+    [ "$(_sp2t END)" = 1 ] || { echo "FAIL: the switch probe gave no answer (guest exec failed; not a verdict)"; return; }
+    [ "$(_sp2t F_LINE)" = 1 ] \
+        || echo "FAIL: smd admin uploader manifest printed no 'uploader: hs-uploader features:' line"
+    [ "$(_sp2t F_LINE)" = 1 ] && [ "$(_sp2t F_GATE)" != 1 ] \
+        && echo "FAIL: hs-uploader offers no gate (features: $(_sp2t F_WORDS)); the switch files govern nothing"
+    [ "$(_sp2t MARKER)" = 1 ] \
+        || echo "FAIL: no carry-over marker at /var/lib/hs-uploader/carry-over-v1.done after bring-up"
+    if [ "$(_sp2t ST_JSON)" != 1 ]; then
+        echo "FAIL: hs-uploader sink status --json gave no JSON (exit $(_sp2t STATUSRC))"
+    else
+        [ "$(_sp2t ST_ENFORCED)" = 1 ] \
+            || echo "FAIL: hs-uploader sink status says it enforces nothing (it finds no marker)"
+        v="$(_sp2t ST_SITE)"
+        [ "$v" = off ] || echo "FAIL: the site switch reads '$v' on a fresh install, not off"
+        if [ "$(_sp2t ST_NCLIENTS)" = 0 ]; then
+            echo "UNCHECKED: every client at upload (hs-uploader names no client in this nest)"
+        else
+            v="$(_sp2t ST_NOTUPLOAD)"
+            [ "$v" = - ] || echo "FAIL: client switch file(s) not at upload on a fresh install: $v"
+        fi
+    fi
+    [ "$(_sp2t MANIFEST)" = 1 ] || { echo "FAIL: no /etc/hs-uploader/pipelines.toml after bring-up"; return; }
+    v="$(_sp2t DISC)"
+    [ "$v" = 0 ] || echo "FAIL: ${v:-?} discard line(s) in the manifest; the gate form renders none"
+    v="$(_sp2t BANNER)"
+    [ "$v" = 0 ] || echo "FAIL: pipelines.toml still carries the SITE SINK OFF banner (part 1's form)"
+    v="$(_sp2t HBLEG)"
+    [ "$v" = 0 ] || echo "FAIL: the heartbeat still sits in the legacy manifest"
+    if [ "$(_sp2t SIGTOML)" != 1 ]; then
+        echo "FAIL: no pipelines.d/sigmond.toml; the heartbeat has no home"
+    else
+        [ "$(_sp2t HBSIG)" = 1 ] || echo "FAIL: pipelines.d/sigmond.toml carries no heartbeat pipeline"
+        [ "$(_sp2t UNGOVERNED)" = 1 ] || echo "FAIL: the heartbeat in sigmond.toml is not governed = false"
+    fi
+}
+
+# sp2_plant_script: the guest script that plants what `smd sink fill` must
+# lower (§13.1): a psk-recorder instance sending direct, a meteor-scatter
+# instance with no delivery mode and a callsign and grid, wspr-uploader
+# enabled, and mag-recorder's fallback uploader enabled.  It gives each
+# client a switch file at upload when it has none, through hs-uploader's own
+# `sink set`, so the lever step names it.  A client this image did not
+# install is reported, not planted.  Edits keep each file's owner and mode.
+# It records each planted instance in /run/sp2-rig/planted.
+sp2_plant_script() {
+    cat <<'SP2EOF'
+set -u
+export PYTHONDONTWRITEBYTECODE=1
+HSU=/opt/hs-uploader/venv/bin/hs-uploader
+SINKS=/etc/hs-uploader/sinks
+D=/run/sp2-rig
+mkdir -p "$D"; : > "$D/planted"
+inst_for(){ local f; f=$(ls -1 "/etc/$1/env/"*.env 2>/dev/null | head -1)
+    if [ -n "$f" ]; then basename "$f" .env; else echo 'N0CALL=T1'; fi; }
+topo_on(){ python3 -B - "$1" <<'PY'
+import sys, tomllib
+try:
+    with open('/etc/sigmond/topology.toml', 'rb') as fh:
+        c = tomllib.load(fh).get('component', {}).get(sys.argv[1], {})
+    print(1 if c.get('enabled') is True else 0)
+except Exception:
+    print(0)
+PY
+}
+# set_env FILE KEY VALUE: drop every KEY= line, then append KEY=VALUE unless
+# VALUE is empty.  Rewrites in place, so owner and mode stay.
+set_env(){ python3 -B - "$1" "$2" "$3" <<'PY'
+import os, re, sys
+path, key, value = sys.argv[1:4]
+os.makedirs(os.path.dirname(path), exist_ok=True)
+with open(path, 'a+') as fh:
+    fh.seek(0)
+    keep = [l for l in fh.read().splitlines()
+            if not re.match(r'\s*(export\s+)?' + re.escape(key) + r'=', l)]
+    if value:
+        keep.append(key + '=' + value)
+    fh.seek(0); fh.truncate(); fh.write('\n'.join(keep) + '\n')
+PY
+}
+# set_toml FILE TABLE KEY VALUE: KEY = VALUE (TOML text) inside [TABLE],
+# replacing the key's line or adding it under the header, or the table.
+set_toml(){ python3 -B - "$@" <<'PY'
+import re, sys
+path, table, key, value = sys.argv[1:5]
+with open(path, 'r+') as fh:
+    lines = fh.read().splitlines()
+    head = [i for i, l in enumerate(lines) if l.strip() == '[' + table + ']']
+    if not head:
+        lines += ['', '[' + table + ']', key + ' = ' + value]
+    else:
+        i, end = head[0], len(lines)
+        for j in range(i + 1, len(lines)):
+            if lines[j].lstrip().startswith('['):
+                end = j; break
+        hit = [j for j in range(i + 1, end)
+               if re.match(r'\s*' + re.escape(key) + r'\s*=', lines[j])]
+        if hit:
+            lines[hit[0]] = key + ' = ' + value
+        else:
+            lines.insert(i + 1, key + ' = ' + value)
+    fh.seek(0); fh.truncate(); fh.write('\n'.join(lines) + '\n')
+PY
+}
+ensure_switch(){ # CLIENT TAG
+    if [ -e "$SINKS/$1.toml" ]; then echo "$2_SWITCH:1"; return; fi
+    if (cd / && "$HSU" sink set "$1" upload --reason 'rig: plant' --by 'test-nested-v3') >/dev/null 2>&1
+    then echo "$2_SWITCH:1"; else echo "$2_SWITCH:0"; fi
+}
+plant_instance(){ # CLIENT TAG KEY VALUE
+    local c="$1" tag="$2" i u f
+    if ! systemctl cat "$c@.service" >/dev/null 2>&1; then echo "$tag:0"; return; fi
+    echo "$tag:1"
+    echo "${tag}_TOPO:$(topo_on "$c")"
+    i=$(inst_for "$c"); u="$c@$(systemd-escape "$i").service"; f="/etc/$c/env/$i.env"
+    set_env "$f" "$3" "$4"
+    echo "${tag}_ENVSET:$?"
+    if [ "$c" = meteor-scatter ]; then
+        cfg=/etc/meteor-scatter/meteor-scatter-config.toml
+        [ -e "/etc/meteor-scatter/$i.toml" ] && cfg="/etc/meteor-scatter/$i.toml"
+        [ -e "$cfg" ] || { mkdir -p /etc/meteor-scatter; : > "$cfg"; }
+        set_toml "$cfg" station callsign '"N0CALL"' && set_toml "$cfg" station grid_square '"EM00aa"'
+        echo "${tag}_CFGSET:$?"
+    fi
+    ensure_switch "$c" "$tag"
+    systemctl restart "$u" >/dev/null 2>&1; echo "${tag}_START:$?"
+    printf 'PLANTED|%s|%s|%s\n' "$c" "$u" "$f" | tee -a "$D/planted"
+}
+plant_instance psk-recorder PSK PSK_DELIVERY_PIPELINES direct
+plant_instance meteor-scatter MS METEOR_SCATTER_DELIVERY_MODE ''
+if systemctl cat wspr-uploader.service >/dev/null 2>&1; then
+    echo "WU:1"
+    systemctl enable wspr-uploader.service >/dev/null 2>&1; echo "WU_ENABLE:$?"
+    ensure_switch wspr-recorder WU
+else
+    echo "WU:0"
+fi
+MAGC=/etc/mag-recorder/mag-recorder-config.toml
+if [ -f "$MAGC" ]; then
+    echo "MAG:1"
+    set_toml "$MAGC" uploader enabled true; echo "MAG_SET:$?"
+    ensure_switch mag-recorder MAG
+else
+    echo "MAG:0"
+fi
+echo "END:1"
+SP2EOF
+}
+
+# sp2_state_script <before|after>: the planted units' and hs-uploader's start
+# times (ActiveEnterTimestampMonotonic), every radiod unit's, and what each
+# lever file says.  "before" reads the units twice, 10 s apart, and stamps
+# the moment the fill may begin (T0, wall and monotonic); "after" counts each
+# unit's "Started" journal lines since T0.
+sp2_state_script() {
+    printf 'PHASE=%s\n' "$1"
+    cat <<'SP2EOF'
+set -u
+D=/run/sp2-rig
+units(){ cut -d'|' -f3 "$D/planted" 2>/dev/null; echo hs-uploader.service; }
+rec(){ # TAG
+    local u
+    units | while IFS= read -r u; do
+        [ -n "$u" ] || continue
+        printf 'UNIT|%s|%s|%s|%s\n' "$1" "$u" \
+            "$(systemctl show -p ActiveState --value "$u" 2>/dev/null)" \
+            "$(systemctl show -p ActiveEnterTimestampMonotonic --value "$u" 2>/dev/null)"
+    done
+    systemctl show -p Id -p ActiveState -p ActiveEnterTimestampMonotonic 'radiod@*' radiod.service 2>/dev/null \
+        | awk -F= -v t="$1" '
+            $1 == "Id" { id = $2 } $1 == "ActiveState" { st = $2 }
+            $1 == "ActiveEnterTimestampMonotonic" { mo = $2 }
+            /^$/ { if (id != "") printf "RADIOD|%s|%s|%s|%s\n", t, id, st, mo; id = st = mo = "" }
+            END { if (id != "") printf "RADIOD|%s|%s|%s|%s\n", t, id, st, mo }'
+}
+envval(){ # FILE KEY
+    [ -r "$1" ] || { echo NOFILE; return; }
+    v=$(grep -E "^[[:space:]]*(export[[:space:]]+)?$2=" "$1" | tail -1 | sed "s/^[^=]*=//; s/^[\"']//; s/[\"']\$//")
+    echo "${v:-UNSET}"
+}
+facts(){
+    while IFS='|' read -r _ c u f; do
+        case "$c" in
+            psk-recorder)   echo "LEVER|psk-recorder|$(envval "$f" PSK_DELIVERY_PIPELINES)" ;;
+            meteor-scatter) echo "LEVER|meteor-scatter|$(envval "$f" METEOR_SCATTER_DELIVERY_MODE)" ;;
+        esac
+    done < "$D/planted"
+    echo "WUSTATE|$(systemctl show -p UnitFileState --value wspr-uploader.service 2>/dev/null)|$(systemctl show -p ActiveState --value wspr-uploader.service 2>/dev/null)"
+    python3 -B - <<'PY'
+import tomllib
+try:
+    with open('/etc/mag-recorder/mag-recorder-config.toml', 'rb') as fh:
+        up = tomllib.load(fh).get('uploader', {})
+    v = up.get('enabled', 'absent') if isinstance(up, dict) else 'absent'
+    print('MAGEN|' + ('bool:' + str(v).lower() if isinstance(v, bool) else repr(v)))
+except FileNotFoundError:
+    print('MAGEN|nofile')
+except Exception as exc:
+    print('MAGEN|unreadable:' + type(exc).__name__)
+PY
+}
+mono(){ python3 -c 'import time; print(time.monotonic_ns() // 1000)'; }
+if [ "$PHASE" = before ]; then
+    rec 1
+    sleep 10
+    rec 2
+    facts
+    t0=$(date +%s); m0=$(mono)
+    printf '%s %s\n' "$t0" "$m0" > "$D/t0"
+    echo "T0:$t0"; echo "T0MONO:$m0"
+else
+    rec A
+    facts
+    read -r t0 m0 < "$D/t0" 2>/dev/null || t0=""
+    if [ -n "$t0" ]; then
+        units | while IFS= read -r u; do
+            n=$(journalctl -u "$u" --since "@$t0" -o cat --no-pager 2>/dev/null | grep -c '^Started ')
+            printf 'STARTS|%s|%s\n' "$u" "$n"
+        done
+        echo "T0:$t0"
+    fi
+fi
+echo "END:1"
+SP2EOF
+}
+
+# sp2_fill_facts <file>: `smd sink fill`'s output -> KEY:value, plus one
+# RESTART|<unit>|<times> line per unit the step says it restarted (the lever
+# step's and the stale-writer step's lines together).
+sp2_fill_facts() {
+    python3 - "$1" <<'PY'
+import re, sys
+lines = open(sys.argv[1], encoding='utf-8', errors='replace').read().splitlines()
+chg = {'psk-recorder': 0, 'meteor-scatter': 0, 'wspr-recorder': 0, 'mag': 0}
+restarts, toks = {}, []
+n = dict(wu=0, failed=0, armed=0, site=0, hsu=0)
+for ln in lines:
+    s = ln.strip()
+    if re.fullmatch(r'[A-Z][A-Z0-9_]*:-?[0-9]+', s):
+        toks.append(s)
+    m = re.search(r'lever: changed (\S+)', ln)
+    if m:
+        p = m.group(1)
+        if p.endswith('/mag-recorder/mag-recorder-config.toml'):
+            chg['mag'] += 1
+        for c in ('psk-recorder', 'meteor-scatter', 'wspr-recorder'):
+            if '/%s/env/' % c in p:
+                chg[c] += 1
+    m = re.search(r'(?:lever|stale writer): restarted (\S+)', ln)
+    if m:
+        restarts[m.group(1)] = restarts.get(m.group(1), 0) + 1
+    n['wu'] += 'lever: stopped and disabled wspr-uploader.service' in ln
+    n['failed'] += bool(re.search(r'lever( step)?: FAILED|stale-writer restarts: FAILED', ln))
+    n['armed'] += 'lever: still armed' in ln
+    n['site'] += 'site sink switch set to fill' in ln
+    # The daemon restarts when the step lands a changed manifest, or
+    # when it started before the manifest on disk (commands/uploader.py).
+    n['hsu'] += bool(re.search(r'restarting hs-uploader|uploader: wrote \S*pipelines', ln))
+out = toks + ['CHG_PSK:%d' % chg['psk-recorder'], 'CHG_MS:%d' % chg['meteor-scatter'],
+              'CHG_WSPR:%d' % chg['wspr-recorder'], 'CHG_MAG:%d' % chg['mag'],
+              'WU_DISABLED:%d' % n['wu'], 'LV_FAILED:%d' % n['failed'],
+              'LV_ARMED:%d' % n['armed'],
+              'SITE_FILL:%d' % n['site'], 'HSU_RESTART:%d' % n['hsu'],
+              'RESTARTED:%d' % len(restarts)]
+out += ['RESTART|%s|%d' % (u, k) for u, k in sorted(restarts.items())]
+print('\n'.join(out))
+PY
+}
+
+# sp2_lever_verdict <plant> <before> <fill-facts> <after>: each lever
+# written, each touched unit restarted once, nothing else restarted, radiod's
+# start time unchanged.  <plant>, <before> and <after> are sp2_unwrap's
+# output of the three guest scripts.
+sp2_lever_verdict() {
+    python3 - "$@" <<'PY'
+import sys
+def read(p):
+    return open(p, encoding='utf-8', errors='replace').read().splitlines()
+plant, before, fill, after = (read(p) for p in sys.argv[1:5])
+def tok(lines, k):
+    for l in lines:
+        if l.startswith(k + ':'):
+            return l[len(k) + 1:].strip()
+    return None
+def recs(lines, kind):
+    return [l.split('|')[1:] for l in lines if l.startswith(kind + '|')]
+for name, lines in (('plant', plant), ('before', before), ('smd sink fill', fill), ('after', after)):
+    if tok(lines, 'END') != '1':
+        print('FAIL: the %s probe gave no answer (guest exec failed; not a verdict)' % name)
+        sys.exit(0)
+if tok(fill, 'FILLRC') != '0':
+    print('FAIL: smd sink fill --reason rig exited %s' % tok(fill, 'FILLRC'))
+if tok(fill, 'SITE_FILL') != '1':
+    print('FAIL: smd sink fill did not say it set the site switch to fill')
+if tok(fill, 'LV_FAILED') != '0':
+    print('FAIL: the lever step reported %s FAILED line(s)' % tok(fill, 'LV_FAILED'))
+if tok(fill, 'LV_ARMED') != '0':
+    print('FAIL: the lever step reported %s sender(s) still armed' % tok(fill, 'LV_ARMED'))
+restarted = {u: int(k) for u, k in recs(fill, 'RESTART')}
+for u, k in sorted(restarted.items()):
+    if k != 1:
+        print('FAIL: smd sink fill says it restarted %s %d times; each touched unit restarts once' % (u, k))
+b1 = {r[1]: (r[2], r[3]) for r in recs(before, 'UNIT') if r[0] == '1'}
+b2 = {r[1]: (r[2], r[3]) for r in recs(before, 'UNIT') if r[0] == '2'}
+a = {r[1]: (r[2], r[3]) for r in recs(after, 'UNIT') if r[0] == 'A'}
+starts = {r[0]: r[1] for r in recs(after, 'STARTS')}
+t0 = tok(before, 'T0MONO')
+def num(s):
+    try:
+        return int(s)
+    except (TypeError, ValueError):
+        return None
+# Each planted instance: its lever written, its unit restarted once.
+lev_after = {r[0]: r[1] for r in recs(after, 'LEVER')}
+want = {'psk-recorder': ('PSK', 'CHG_PSK', 'server-raw'),
+        'meteor-scatter': ('MS', 'CHG_MS', 'off')}
+planted = {r[0]: r[1] for r in recs(plant, 'PLANTED')}
+for c, (tag, chg, val) in want.items():
+    if tok(plant, tag) != '1':
+        print('UNCHECKED: the %s lever (this image installs no %s@.service)' % (c, c))
+        continue
+    if c not in planted or tok(plant, tag + '_ENVSET') != '0':
+        print('FAIL: the rig could not plant a %s instance (not a verdict on smd)' % c)
+        continue
+    if tok(plant, tag + '_TOPO') != '1' or tok(plant, tag + '_SWITCH') != '1':
+        print('UNCHECKED: the %s lever (%s is not enabled in topology, or has no switch file, so smd sink fill does not reach it)' % (c, c))
+        continue
+    u = planted[c]
+    if tok(fill, chg) != '1':
+        print('FAIL: smd sink fill did not write the %s lever (lever: changed lines: %s)' % (c, tok(fill, chg)))
+    if lev_after.get(c) != val:
+        print('FAIL: %s\'s env file reads %r after the fill; the lever is %s' % (c, lev_after.get(c), val))
+    if restarted.get(u) != 1:
+        print('FAIL: smd sink fill did not say it restarted %s once' % u)
+    one, two = b1.get(u), b2.get(u)
+    if not one or one != two or one[0] != 'active':
+        print('UNCHECKED: the restart count of %s (it did not run steadily before the fill: %s, then %s)' % (u, one, two))
+        continue
+    aa = a.get(u)
+    if not aa or aa[0] != 'active' or num(aa[1]) is None or num(t0) is None or num(aa[1]) <= num(t0):
+        print('FAIL: %s did not start again after the fill began (after: %s; fill began at %s us)' % (u, aa, t0))
+    elif starts.get(u) != '1':
+        print('FAIL: %s started %s times since the fill began; it must restart once' % (u, starts.get(u)))
+# Units the fill did not name stay as they were (hs-uploader too, unless the
+# step says it restarted it).
+for u, st in sorted(b2.items()):
+    if u in restarted or (u == 'hs-uploader.service' and tok(fill, 'HSU_RESTART') != '0'):
+        continue
+    if a.get(u) != st:
+        print('FAIL: %s moved during the fill (%s -> %s), and smd sink fill names no restart of it' % (u, st, a.get(u)))
+# wspr-uploader: stopped and disabled.
+wu = recs(after, 'WUSTATE')
+if tok(plant, 'WU') != '1':
+    print('UNCHECKED: the wspr-uploader lever (this image installs no wspr-uploader.service)')
+elif tok(plant, 'WU_ENABLE') != '0' or tok(plant, 'WU_SWITCH') != '1':
+    print('FAIL: the rig could not enable wspr-uploader or name wspr-recorder (not a verdict on smd)')
+else:
+    if tok(fill, 'WU_DISABLED') != '1':
+        print('FAIL: smd sink fill did not stop and disable wspr-uploader.service')
+    if not wu or wu[0][0] != 'disabled' or wu[0][1] not in ('inactive', 'failed'):
+        print('FAIL: wspr-uploader.service reads %s after the fill; the lever is disable --now' % (wu[0] if wu else 'nothing'))
+# mag-recorder: [uploader] enabled = false, a boolean.
+mag = recs(after, 'MAGEN')
+if tok(plant, 'MAG') != '1':
+    print('UNCHECKED: the mag-recorder lever (this image writes no mag-recorder-config.toml)')
+elif tok(plant, 'MAG_SET') != '0' or tok(plant, 'MAG_SWITCH') != '1':
+    print('FAIL: the rig could not arm the mag fallback or name mag-recorder (not a verdict on smd)')
+else:
+    if tok(fill, 'CHG_MAG') != '1':
+        print('FAIL: smd sink fill did not write the mag-recorder lever')
+    if not mag or mag[0][0] != 'bool:false':
+        print('FAIL: mag-recorder\'s [uploader] enabled reads %s after the fill, not the boolean false' % (mag[0][0] if mag else 'nothing'))
+# radiod: never restarted.
+rb = {r[1]: (r[2], r[3]) for r in recs(before, 'RADIOD') if r[0] == '2'}
+ra = {r[1]: (r[2], r[3]) for r in recs(after, 'RADIOD') if r[0] == 'A'}
+moved = sorted(u for u in set(rb) | set(ra) if rb.get(u) != ra.get(u))
+for u in moved:
+    print('FAIL: radiod moved during the fill: %s %s -> %s' % (u, rb.get(u), ra.get(u)))
+if not moved and not any(st == 'active' for st, _ in rb.values()):
+    print("UNCHECKED: radiod's start time across the fill (no radiod unit runs in this nest)")
+PY
+}
+# <<< sink_part2
+# sp2_gx <timeout> <script> <raw>: run a guest script through qm guest exec,
+# base64-encoded so the request holds only ASCII; qm's reply lands in <raw>.
+sp2_gx(){
+    $SSHN "qm guest exec $VMID --timeout $1 -- bash -lc \"echo $(printf '%s\n' "$2" | base64 -w0) | base64 -d > /tmp/sig-sp2.sh; bash /tmp/sig-sp2.sh\"" > "$3" 2>&1
+}
+# sp2_report <verdict> <context>: each UNCHECKED line said and kept for the
+# closing line; any FAIL line is FATAL, and shows the probe's last lines.
+sp2_report(){
+    local l n=0
+    while IFS= read -r l; do
+        case "$l" in
+            UNCHECKED:*) say "⚠ NOT EVALUATED: ${l#UNCHECKED: }"; sink_unchecked "${l#UNCHECKED: }" ;;
+            FAIL:*)      say "FATAL: ${l#FAIL: }"; n=$((n + 1)) ;;
+        esac
+    done < "$1"
+    [ "$n" = 0 ] || { sed 's/^/      /' "$2" | tail -20; exit 1; }
+}
+
 KEY="$HOME/appliance/build/applkey"
 # --release builds strip root-ssh-keys from answer-v3.toml on purpose
 # (build-usb-v3.sh RELEASE branch) so the test key never lands on a
@@ -858,7 +1424,7 @@ if [ "$SINKWIZ" = 1 ]; then
         || { say "FATAL: the site sink probe returned no answer (guest exec failed, not a verdict)"; exit 1; }
     [ "$_sp" -ge 1 ] || { say "FATAL: site-profile.toml carries no [uploads] mode = \"discard\" after a fresh install"; exit 1; }
     [ "$_co" -ge 1 ] || { say "FATAL: coordination.toml carries no [uploads] mode = \"discard\"; smd config render did not copy it"; exit 1; }
-    echo "$SINK_OUT" | grep -q 'site sink: off' \
+    echo "$SINK_OUT" | grep -qF "$SP2_OFF_PHRASE" \
         || { say "FATAL: smd sink status does not report site sink: off"; exit 1; }
     say "site sink switch off in both files and in smd sink status ✓"
 fi
@@ -1189,45 +1755,71 @@ if [ "$_done" != 1 ]; then
     say "  ⚠ THE METROLOGY ASSERTION WAS NOT EVALUATED — this run does not"
     say "    show whether the station wires its timing chain."
     [ "${SINKWIZ:-0}" = 1 ] && say "  ⚠ THE SITE SINK MANIFEST AND smd sink upload CHECKS WERE NOT EVALUATED either."
-    [ "${SINKWIZ:-0}" = 1 ] && sink_unchecked "the manifest banner, per-pipeline discard, wspr-recorder's in-process sender and smd sink upload (bring-up did not finish)"
+    [ "${SINKWIZ:-0}" = 1 ] && sink_unchecked "the switch files, the carry-over marker, the gate render, the levers of smd sink fill (or, on the base image, the manifest banner and per-pipeline discard), wspr-recorder's in-process sender and smd sink upload (bring-up did not finish)"
     say "  ⚠ THE v3.70 SINK FOUNDATION CHECKS WERE NOT EVALUATED either."
     sink_unchecked "the v3.70 sink foundation: send-record version, psk-recorder's sink writer, sink.db columns (bring-up did not finish)"
 else
     say "bring-up completed (marker present)"
     if [ "${SINKWIZ:-0}" = 1 ]; then
-        # The manifest shows what hs-uploader will do.  Its banner names the mode
-        # it rendered: SITE SINK OFF, or the legacy hold that an hs-uploader too
-        # old to discard falls back to.  Every [[pipeline]] but the heartbeat
-        # must carry discard = true.
-        DISC=$($SSHN "qm guest exec $VMID --timeout 30 -- bash -lc '
-            M=/etc/hs-uploader/pipelines.toml
-            [ -r \$M ] || { echo NOMANIFEST; exit 0; }
-            echo BANNER:\$(grep -c \"SITE SINK OFF\" \$M)
-            echo PIPES:\$(grep -c \"^\\[\\[pipeline\\]\\]\" \$M)
-            echo HB:\$(grep -c \"^name = .heartbeat.\" \$M)
-            echo DISC:\$(grep -c \"^discard = true\" \$M)
-        '" 2>&1)
-        _b=$(echo "$DISC" | grep -oE 'BANNER:[0-9]+' | head -1 | cut -d: -f2)
-        _p=$(echo "$DISC" | grep -oE 'PIPES:[0-9]+'  | head -1 | cut -d: -f2)
-        _h=$(echo "$DISC" | grep -oE 'HB:[0-9]+'     | head -1 | cut -d: -f2)
-        _d=$(echo "$DISC" | grep -oE 'DISC:[0-9]+'   | head -1 | cut -d: -f2)
-        case "$DISC" in
-          *NOMANIFEST*) say "FATAL: no /etc/hs-uploader/pipelines.toml after a completed bring-up"; exit 1 ;;
-        esac
-        [ -n "$_b" ] && [ -n "$_p" ] && [ -n "$_h" ] && [ -n "$_d" ] \
-            || { say "FATAL: the manifest probe returned no answer (guest exec failed, not a verdict)"; echo "$DISC" | head -6; exit 1; }
-        [ "$_b" -ge 1 ] \
-            || { say "FATAL: pipelines.toml does not render SITE SINK OFF while the site sink switch reads off"
-                 say "  (an hs-uploader that cannot discard makes sigmond render the legacy hold)"; exit 1; }
-        _data=$(( _p - _h ))
-        if [ "$_data" -eq 0 ]; then
-            say "WARN: the manifest renders SITE SINK OFF but holds no data pipeline in this nest;"
-            say "  the per-pipeline discard = true was NOT evaluated"
-            sink_unchecked "per-pipeline discard = true and its release by smd sink upload (the nest's manifest holds only the heartbeat)"
-        elif [ "$_d" -eq "$_data" ]; then
-            say "all ${_data} data pipeline(s) render discard = true while the site sink switch reads off ✓"
+        # Step 2b part 2 (sigmond tasks/spec-sink-2b-part2.md §13.1).  An
+        # hs-uploader that offers `gate` reads the switch files under
+        # /etc/hs-uploader/sinks/, so the manifest step carries [uploads] over
+        # into them, writes the carry-over marker, renders no discard and no
+        # banner, and moves the heartbeat to pipelines.d/sigmond.toml.  The
+        # readers live in the sink_part2 block (test-nested-sink-part2.sh feeds
+        # them real output).  Only the update rig's base image, which predates
+        # part 2, may lack gate; it takes part 1's banner and discard checks.
+        say "verifying the switch files, the carry-over marker and the gate render"
+        SP2D=$(mktemp -d)
+        sp2_gx 180 "$(sp2_probe_script)" "$SP2D/probe.raw"
+        sp2_unwrap "$SP2D/probe.raw" "$SP2D/probe.txt" \
+            || { say "FATAL: the switch probe returned no answer (guest exec failed, not a verdict)"; head -6 "$SP2D/probe.raw"; exit 1; }
+        sp2_facts "$SP2D/probe.txt" > "$SP2D/probe.facts"
+        [ "$(sp2_tok "$SP2D/probe.facts" END)" = 1 ] \
+            || { say "FATAL: the switch probe returned no answer (guest exec failed, not a verdict)"; tail -6 "$SP2D/probe.txt"; exit 1; }
+        say "  hs-uploader features: $(sp2_tok "$SP2D/probe.facts" F_WORDS)"
+        if [ "$(sp2_tok "$SP2D/probe.facts" F_GATE)" = 1 ] || [ "${SINK_BASE_IMAGE:-0}" != 1 ]; then
+            SP2=1
+            sp2_verdict "$SP2D/probe.facts" > "$SP2D/probe.verdict"
+            sp2_report "$SP2D/probe.verdict" "$SP2D/probe.txt"
+            say "site switch off, the marker, gate, no discard, the heartbeat in sigmond.toml, each client's own file at upload (unless NOT EVALUATED above) ✓"
         else
-            say "FATAL: ${_d} of ${_data} data pipeline(s) carry discard = true"; exit 1
+            SP2=0
+            say "this base image's hs-uploader offers no gate: part 1's manifest checks follow"
+            # The manifest shows what hs-uploader will do.  Its banner names the mode
+            # it rendered: SITE SINK OFF, or the legacy hold that an hs-uploader too
+            # old to discard falls back to.  Every [[pipeline]] but the heartbeat
+            # must carry discard = true.
+            DISC=$($SSHN "qm guest exec $VMID --timeout 30 -- bash -lc '
+                M=/etc/hs-uploader/pipelines.toml
+                [ -r \$M ] || { echo NOMANIFEST; exit 0; }
+                echo BANNER:\$(grep -c \"SITE SINK OFF\" \$M)
+                echo PIPES:\$(grep -c \"^\\[\\[pipeline\\]\\]\" \$M)
+                echo HB:\$(grep -c \"^name = .heartbeat.\" \$M)
+                echo DISC:\$(grep -c \"^discard = true\" \$M)
+            '" 2>&1)
+            _b=$(echo "$DISC" | grep -oE 'BANNER:[0-9]+' | head -1 | cut -d: -f2)
+            _p=$(echo "$DISC" | grep -oE 'PIPES:[0-9]+'  | head -1 | cut -d: -f2)
+            _h=$(echo "$DISC" | grep -oE 'HB:[0-9]+'     | head -1 | cut -d: -f2)
+            _d=$(echo "$DISC" | grep -oE 'DISC:[0-9]+'   | head -1 | cut -d: -f2)
+            case "$DISC" in
+              *NOMANIFEST*) say "FATAL: no /etc/hs-uploader/pipelines.toml after a completed bring-up"; exit 1 ;;
+            esac
+            [ -n "$_b" ] && [ -n "$_p" ] && [ -n "$_h" ] && [ -n "$_d" ] \
+                || { say "FATAL: the manifest probe returned no answer (guest exec failed, not a verdict)"; echo "$DISC" | head -6; exit 1; }
+            [ "$_b" -ge 1 ] \
+                || { say "FATAL: pipelines.toml does not render SITE SINK OFF while the site sink switch reads off"
+                     say "  (an hs-uploader that cannot discard makes sigmond render the legacy hold)"; exit 1; }
+            _data=$(( _p - _h ))
+            if [ "$_data" -eq 0 ]; then
+                say "WARN: the manifest renders SITE SINK OFF but holds no data pipeline in this nest;"
+                say "  the per-pipeline discard = true was NOT evaluated"
+                sink_unchecked "per-pipeline discard = true and its release by smd sink upload (the nest's manifest holds only the heartbeat)"
+            elif [ "$_d" -eq "$_data" ]; then
+                say "all ${_data} data pipeline(s) render discard = true while the site sink switch reads off ✓"
+            else
+                say "FATAL: ${_d} of ${_data} data pipeline(s) carry discard = true"; exit 1
+            fi
         fi
         # wspr-recorder runs its own in-process sender when its environment
         # carries WD_RECEIVER_GRID (wspr_recorder/hs_uploader_shim.py from_env),
@@ -1251,6 +1843,33 @@ else
             sink_unchecked "wspr-recorder's in-process sender (this nest wrote no wspr-recorder instance env)"
         else
             say "no WD_RECEIVER_GRID in ${_we} wspr-recorder instance env(s) or coordination.env: its in-process sender stays off ✓"
+        fi
+        if [ "${SP2:-0}" = 1 ]; then
+            # The levers (§13.1): plant what `smd sink fill` must lower, then
+            # lower the site to fill.  Each lever must land, each touched unit
+            # restart once (ActiveEnterTimestampMonotonic, and its journal's
+            # "Started" lines since the fill began), every other unit and
+            # radiod keep their start time.  `smd sink upload` below raises
+            # the site again; raising restores no lever (spec §8.2).
+            say "── the levers: plant in-process senders, then smd sink fill --reason rig"
+            sp2_gx 300 "$(sp2_plant_script)" "$SP2D/plant.raw"
+            sp2_unwrap "$SP2D/plant.raw" "$SP2D/plant.txt" \
+                || { say "FATAL: the plant probe returned no answer (guest exec failed, not a verdict)"; head -6 "$SP2D/plant.raw"; exit 1; }
+            sed 's/^/      plant| /' "$SP2D/plant.txt" | tail -24
+            sp2_gx 120 "$(sp2_state_script before)" "$SP2D/before.raw"
+            sp2_unwrap "$SP2D/before.raw" "$SP2D/before.txt" \
+                || { say "FATAL: the start-time probe returned no answer (guest exec failed, not a verdict)"; head -6 "$SP2D/before.raw"; exit 1; }
+            sp2_gx 900 "$SP2_FILL" "$SP2D/fill.raw"
+            sp2_unwrap "$SP2D/fill.raw" "$SP2D/fill.txt" \
+                || { say "FATAL: smd sink fill returned no answer (guest exec failed, not a verdict)"; head -6 "$SP2D/fill.raw"; exit 1; }
+            sed 's/^/      fill| /' "$SP2D/fill.txt" | tail -30
+            sp2_fill_facts "$SP2D/fill.txt" > "$SP2D/fill.facts"
+            sp2_gx 120 "$(sp2_state_script after)" "$SP2D/after.raw"
+            sp2_unwrap "$SP2D/after.raw" "$SP2D/after.txt" \
+                || { say "FATAL: the start-time probe after the fill returned no answer (guest exec failed, not a verdict)"; head -6 "$SP2D/after.raw"; exit 1; }
+            sp2_lever_verdict "$SP2D/plant.txt" "$SP2D/before.txt" "$SP2D/fill.facts" "$SP2D/after.txt" > "$SP2D/lever.verdict"
+            sp2_report "$SP2D/lever.verdict" "$SP2D/after.txt"
+            say "smd sink fill: each lever it could reach written, each touched unit restarted once, nothing else moved ✓"
         fi
     fi
     MET=$($SSHN "qm guest exec $VMID --timeout 60 -- bash -lc '
@@ -1313,9 +1932,11 @@ else
                 || { say "FATAL: the smd sink upload probe returned no answer (guest exec failed, not a verdict)"; exit 1; }
             [ "$_dl" = 0 ] || { say "FATAL: ${_dl} pipeline(s) still carry discard = true after smd sink upload"; exit 1; }
             [ "$_bo" = 0 ] || { say "FATAL: pipelines.toml still renders SITE SINK OFF after smd sink upload; the manifest was not regenerated"; exit 1; }
-            echo "$UP" | grep -q 'site sink: upload (store and send)' \
+            echo "$UP" | grep -qF "$SP2_UPLOAD_PHRASE" \
                 || { say "FATAL: smd sink status does not report upload after smd sink upload"; exit 1; }
-            if [ "$_up" -eq "$_uh" ]; then
+            if [ "${SP2:-0}" = 1 ]; then
+                say "smd sink upload raised the site sink switch; the gate form renders no discard ✓"
+            elif [ "$_up" -eq "$_uh" ]; then
                 say "smd sink upload raised the site sink switch; no pipeline discards (the manifest holds only the heartbeat in this nest, so no data pipeline was released)"
                 sink_unchecked "per-pipeline discard = true and its release by smd sink upload (the nest's manifest holds only the heartbeat)"
             else

@@ -1,0 +1,5 @@
+     lever: changed /etc/meteor-scatter/env/N0CALL=T1.env
+     lever: changed /etc/mag-recorder/mag-recorder-config.toml
+     lever: stopped and disabled wspr-uploader.service
+     lever: restarted meteor-scatter@N0CALL\x3dT1.service
+     stale writer: restarted wspr-recorder@N0CALL\x3dT1.service

@@ -1,0 +1,50 @@
+{
+  "schema": 1,
+  "enforced": false,
+  "marker": "@TREE@/state/carry-over-v1.done",
+  "sinks_dir": "@TREE@/etc/sinks",
+  "site": {
+    "state": "off",
+    "error": "",
+    "set_at": "2026-10-01T00:00:00Z",
+    "set_by": "carry-over",
+    "reason": "fixture"
+  },
+  "clients": [
+    {
+      "client": "mag-recorder",
+      "file_state": "upload",
+      "effective": "off",
+      "held_by": "site",
+      "error": "",
+      "pipelines": [
+        "mag-recorder-psws"
+      ]
+    },
+    {
+      "client": "psk-recorder",
+      "file_state": "fill",
+      "effective": "off",
+      "held_by": "site",
+      "error": "",
+      "pipelines": [
+        "psk-recorder-pskreporter"
+      ]
+    },
+    {
+      "client": "wspr-recorder",
+      "file_state": "upload",
+      "effective": "off",
+      "held_by": "site",
+      "error": "",
+      "pipelines": [
+        "wspr-recorder-wsprnet"
+      ]
+    }
+  ],
+  "held_pipelines": [],
+  "refused_files": [],
+  "no_client_pipelines": [],
+  "builder_pipelines": [],
+  "errors": []
+}

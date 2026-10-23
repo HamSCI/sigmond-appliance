@@ -1,0 +1,6 @@
+  [33m⚠[0m  site sink: off (nothing ships and nothing new is stored for upload); set 2026-10-01T00:00:00Z by carry-over — fixture
+     mag-recorder: its file reads upload; effective off, set by the site switch
+     psk-recorder: its file reads upload; effective off, set by the site switch
+     wspr-recorder: its file reads upload; effective off, set by the site switch
+     pipelines held: mag-recorder-psws (site), psk-recorder-pskreporter (site), wspr-recorder-wsprnet (site)
+     refused switch files: none

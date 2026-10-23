@@ -1,0 +1,10 @@
+uploader: hs-uploader features: gate pipelines.d send-log-v3 switch-files
+uploader: carry-over: site missing -> upload (carried over from [uploads] mode = upload)
+uploader: carry-over: psk-recorder missing -> upload (carried over from [uploads] mode = upload)
+uploader: carry-over: wspr-recorder missing -> upload (carried over from [uploads] mode = upload)
+uploader: carry-over: wrote site
+uploader: carry-over: wrote psk-recorder
+uploader: carry-over: wrote wspr-recorder
+uploader: carry-over: marker written
+uploader: wrote @ROOT@/etc/hs-uploader/pipelines.d/sigmond.toml
+uploader: wrote @ROOT@/etc/hs-uploader/pipelines.toml (2 pipeline(s))

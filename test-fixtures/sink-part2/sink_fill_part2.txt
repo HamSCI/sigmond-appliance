@@ -1,0 +1,11 @@
+     lever: changed @ROOT@/etc/psk-recorder/env/W1AW.env
+     lever: changed @ROOT@/etc/wspr-recorder/env/W1AW.env
+     lever: restarted psk-recorder@W1AW.service
+     lever: restarted wspr-recorder@W1AW.service
+  [32m✓[0m  @ROOT@/etc/hs-uploader/sinks/site.toml: site sink switch set to fill
+  [32m✓[0m  @ROOT@/etc/sigmond/site-profile.toml: [uploads] now mirrors the site sink switch (fill)
+  [32m✓[0m  @ROOT@/etc/sigmond/coordination.toml: [uploads] now mirrors the site sink switch (fill)
+uploader: hs-uploader features: gate pipelines.d send-log-v3 switch-files
+uploader: @ROOT@/etc/hs-uploader/pipelines.toml already current (2 pipeline(s))
+  [32m✓[0m  site sink: fill — stores and sends no data; `smd sink upload` ships what it stored, oldest first (rig)
+     until hs-uploader cleans the sink itself, sigmond's trim keeps FT8 spots for one hour and WSPR spots for 24 hours, sent or not
