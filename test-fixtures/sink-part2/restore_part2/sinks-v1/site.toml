@@ -1,0 +1,11 @@
+state = "upload"
+reason = "carried over from [uploads] mode = upload"
+set_by = "carry-over"
+set_at = "2026-10-23T12:00:00Z"
+
+[[history]]
+at = "2026-10-23T12:00:00Z"
+from = "off"
+to = "upload"
+by = "carry-over"
+reason = "carried over from [uploads] mode = upload"

@@ -1,0 +1,19 @@
+  [32m✓[0m  filler-00: keep (ffff000)
+  [32m✓[0m  filler-01: keep (ffff001)
+  [32m✓[0m  filler-02: keep (ffff002)
+  [32m✓[0m  filler-03: keep (ffff003)
+  [32m✓[0m  filler-04: keep (ffff004)
+  [32m✓[0m  filler-05: keep (ffff005)
+  [32m✓[0m  filler-06: keep (ffff006)
+  [32m✓[0m  filler-07: keep (ffff007)
+  [32m✓[0m  filler-08: keep (ffff008)
+  → sigmond: checkout ccccccc -> aaaaaaa
+admin manifest restore: plan OK — 9 component(s) already match, 1 to checkout
+  [32m✓[0m  sigmond: checked out aaaaaaa (detached HEAD)
+  [32m✓[0m  sigmond: install.sh exit 0
+     restart not automated here — bounce radiod, wait for it to settle, then the recorders
+admin manifest restore: restored to manifest — 1 component(s) moved, re-plan verifies all-keep (0 stray component(s) untouched)
+  [32m✓[0m  the restored sigmond predates the sink switches: moved the carry-over marker aside to @ROOT@/state/carry-over-v1.done.rolled-back-20261023T120000Z; the carry-over runs again when sigmond returns to part 2
+  [32m✓[0m  removed @ROOT@/etc/hs-uploader/pipelines.d/sigmond.toml: the restored sigmond renders the legacy manifest alone
+     | uploader: /etc/hs-uploader/pipelines.toml already current (3 pipeline(s))
+  [32m✓[0m  pipelines.toml re-rendered by the restored sigmond (@ROOT@/opt-git-sigmond/sigmond/bin/smd)

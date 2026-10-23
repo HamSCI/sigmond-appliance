@@ -30,6 +30,9 @@
 #             superseded.  From v3.77 it also reads migration 3 off the step's
 #             lines (applied 3, attempts.pipeline, last_send, the features
 #             line) and PRAGMA user_version 3 before the daemon starts.
+#             From step 2b part 2: the carry-over runs before the render,
+#             the marker stands, site.toml matches [uploads], and the
+#             heartbeat lives in pipelines.d/sigmond.toml.
 #   PHASE E-ter — remote access on a station already in the field: the
 #             updated guest's `smd remote` names the one host command while
 #             unpaired; the new wizard, placed on the old host as pm-align
@@ -46,9 +49,15 @@
 #             to date, and the restored daemon starts on the store E-bis
 #             migrated, which keeps its version.  That store stands at version 3,
 #             and the restored release's migrate --check leaves it as it stands.
+#             From step 2b part 2: the restore moves the carry-over marker
+#             aside (carry-over-v1.done.rolled-back-<UTC>), removes
+#             pipelines.d/sigmond.toml and leaves the switch files; the
+#             legacy manifest carries the heartbeat; [uploads] still matches.
 #   PHASE G-ter — a second update: both split pipelines and both send
 #             records stand, version 3 stands, no migration re-runs, and
-#             migrate --check has nothing to write.
+#             migrate --check has nothing to write.  From step 2b part 2:
+#             the carry-over runs again and writes the marker, and every
+#             client switch file stands byte for byte as at G-bis.
 #
 # Log conventions match the sibling: append-only, one line per step, phases
 # announced with ════ banners and closed with a PASS line, so bless-release
@@ -125,6 +134,19 @@
 #                                       bin/smd _restore_rerender_uploader,
 #                                       after every verified restore
 #                                       --apply (v3.70, D11)
+#   "uploader: carry-over: ", "carry-over: marker written"
+#                                       lib/sigmond/commands/uploader.py _say,
+#                                       sink_carryover CarryPlan/CarryResult
+#                                       .lines() (step 2b part 2)
+#   "uploader: wrote <path>", "already current"
+#                                       commands/uploader.py _land_sigmond,
+#                                       _land_step, _stop_migrate_land_start
+#   "the restored sigmond predates the sink switches: moved the carry-over
+#    marker aside to <path>;", "removed <path>/pipelines.d/sigmond.toml:"
+#                                       bin/smd _restore_below_part2
+#   carry-over-v1.done(.rolled-back-<UTC>[.N])
+#                                       hs-uploader sinkswitch.MARKER_NAME,
+#                                       sigmond sink_state.move_marker_aside
 set -u
 
 # ── arguments ───────────────────────────────────────────────────────────
@@ -1265,6 +1287,416 @@ exit 0
 UPLEOF
 )
 
+# >>> sink2b_update (test-update-sink-part2.sh loads exactly this block)
+# The sink switches across the update, the rollback and the second update
+# (sigmond step 2b part 2: tasks/spec-sink-2b-part2.md §6, §6.7, §10 rows V1,
+# V5 and V8).
+#   E-bis: the updated manifest step carries [uploads] over into the switch
+#          files and writes the marker before it renders; the marker stands,
+#          site.toml says what [uploads] says, and the heartbeat lives in
+#          pipelines.d/sigmond.toml, not in the legacy manifest.
+#   G-bis: the restore to the base release (below part 2) moves the marker
+#          aside to carry-over-v1.done.rolled-back-<UTC> (".1", ".2" ... when
+#          that name is taken), removes pipelines.d/sigmond.toml, and leaves
+#          every switch file as it stood; the restored release renders the
+#          heartbeat in the legacy manifest, and [uploads] still matches.
+#   G-ter: the next manifest step runs the carry-over again and writes the
+#          marker, and every client switch file stands byte for byte as at
+#          G-bis: the full set, so a file that changed, disappeared or
+#          appeared fails.
+#
+# UPL_SINKS prints one KEY:value line per fact, a CLIENT|<file>|<sha256>
+# line per client switch file and an ASIDE|<name> line per rolled-back
+# marker, and SINKSDONE:1 last.  The verdicts read KEY:value with the nested
+# rig's sp2_tok (its sink_part2 block, loaded below).  Each verdict prints
+# one "FAIL: <why>" or "UNCHECKED: <what>" line per finding and ends with
+# VERDICT:done; sp2u_report refuses a verdict without that line.  Every
+# input carries its own sentinel, and a missing one is a FAIL that says
+# "not a verdict", never a pass.  The guest script holds only ASCII.
+
+# The switch files, the marker and the heartbeat's place, read in the guest
+# without sigmond's code.  [uploads] maps to the site state as the
+# carry-over maps it (sink_carryover.SITE_FROM_MODE, coordination.Uploads):
+# a mode outside upload/hold/discard derives from `enabled`; no file or no
+# [uploads] reads upload.  SP2U_ROOT exists for the hermetic test.
+UPL_SINKS=$(cat <<'SP2UEOF'
+python3 -I - "${SP2U_ROOT:-}" <<'PY'
+import hashlib, os, stat, sys, tomllib
+r = sys.argv[1]
+state_dir = r + '/var/lib/hs-uploader'
+marker = state_dir + '/carry-over-v1.done'
+etc = r + '/etc/hs-uploader'
+sinks = etc + '/sinks'
+def kind(p):
+    try:
+        return os.lstat(p).st_mode
+    except FileNotFoundError:
+        return None
+m = kind(marker)
+print('MARKER:%d' % (m is not None))
+print('MARKERREG:%d' % (m is not None and stat.S_ISREG(m)))
+try:
+    names = sorted(os.listdir(state_dir))
+except FileNotFoundError:
+    names = []
+aside = [n for n in names if n.startswith('carry-over-v1.done.rolled-back-')]
+for n in aside:
+    print('ASIDE|%s' % n)
+print('ASIDEN:%d' % len(aside))
+def heartbeats(p):
+    if kind(p) is None:
+        return None
+    try:
+        with open(p, 'rb') as fh:
+            d = tomllib.load(fh)
+    except (OSError, ValueError):
+        return -1
+    return sum(1 for x in d.get('pipeline') or []
+               if isinstance(x, dict) and x.get('name') == 'heartbeat')
+for key, p in (('LEG', etc + '/pipelines.toml'),
+               ('SIG', etc + '/pipelines.d/sigmond.toml')):
+    n = heartbeats(p)
+    print('%sFILE:%d' % (key, n is not None))
+    print('HB%s:%d' % (key, n or 0))
+def state_of(p):
+    if kind(p) is None:
+        return 'missing'
+    try:
+        with open(p, 'rb') as fh:
+            s = tomllib.load(fh).get('state')
+    except (OSError, ValueError):
+        return 'error'
+    return s if s in ('off', 'fill', 'upload') else 'error'
+print('SITE:%s' % state_of(sinks + '/site.toml'))
+try:
+    with open(r + '/etc/sigmond/coordination.toml', 'rb') as fh:
+        up = tomllib.load(fh).get('uploads') or {}
+    mode = str(up.get('mode', '') or '').strip().lower()
+    if mode not in ('upload', 'hold', 'discard'):
+        mode = 'upload' if bool(up.get('enabled', True)) else 'hold'
+except FileNotFoundError:
+    mode = 'upload'
+except (OSError, ValueError):
+    mode = 'error'
+print('UPMODE:%s' % mode)
+print('SITEWANT:%s' % {'discard': 'off', 'hold': 'fill', 'upload': 'upload'}.get(mode, '-'))
+def digest(p):
+    st = os.lstat(p)
+    if not stat.S_ISREG(st.st_mode):
+        return 'notregular'
+    with open(p, 'rb') as fh:
+        return hashlib.sha256(fh.read()).hexdigest()
+site = sinks + '/site.toml'
+if kind(site) is not None:
+    print('SITESUM|%s' % digest(site))
+try:
+    files = sorted(os.listdir(sinks))
+    print('SINKSDIR:1')
+except FileNotFoundError:
+    files = []
+    print('SINKSDIR:0')
+clients = [n for n in files
+           if n.endswith('.toml') and not n.startswith('.') and n != 'site.toml']
+for n in clients:
+    print('CLIENT|%s|%s' % (n, digest(sinks + '/' + n)))
+print('CLIENTN:%d' % len(clients))
+print('SINKSDONE:1')
+PY
+exit 0
+SP2UEOF
+)
+
+# sp2u_step_facts <step-output>: the manifest step's lines -> KEY:value.  The
+# carry-over prints on stdout as "uploader: carry-over: <...>" (Task 19's
+# capture); a failure goes to stderr behind "smd: uploader: ".  The render
+# prints "uploader: wrote|refreshed|removed <path>" for pipelines.toml or
+# pipelines.d/sigmond.toml, or "uploader: <path>/pipelines.toml already
+# current".  Line numbers order the two; both run on stdout, so the channel
+# keeps their order.  Patterns match anywhere on the line (a sign the channel
+# double-encodes may stand ahead) and hold only ASCII.
+sp2u_step_facts() {
+    python3 - "$1" <<'PY'
+import re, sys
+FEAT = 'uploader: hs-uploader features: '
+CO = 'uploader: carry-over: '
+RENDER = re.compile(r'(?<!smd: )uploader: (?:(?:wrote|refreshed|removed) \S*/pipelines(?:\.toml|\.d/sigmond\.toml)(?:\s|$)|\S*/pipelines\.toml already current )')
+try:
+    lines = open(sys.argv[1], encoding='utf-8', errors='replace').read().splitlines()
+except OSError:
+    sys.exit(0)
+words = None
+first = mark = render = n = failed = smderr = 0
+for i, ln in enumerate(lines, 1):
+    if words is None and FEAT in ln and 'smd: ' + FEAT not in ln:
+        words = ln[ln.index(FEAT) + len(FEAT):].split()
+    if 'smd: uploader: ' in ln:
+        smderr += 1
+    if 'carry-over: FAILED' in ln or 'carry-over: cannot read the station' in ln:
+        failed += 1
+    j = ln.find(CO)
+    if j >= 0 and not ln[:j].endswith('smd: '):
+        n += 1
+        first = first or i
+        if ln[j + len(CO):].strip() == 'marker written':
+            mark = mark or i
+    if not render and RENDER.search(ln):
+        render = i
+print('F_LINE:%d' % (words is not None))
+print('F_WORDS:%s' % (','.join(words or []) or '-'))
+print('F_GATE:%d' % ('gate' in (words or [])))
+print('CO_N:%d' % n)
+print('CO_FIRST:%d' % first)
+print('CO_MARKER:%d' % mark)
+print('CO_FAILED:%d' % failed)
+print('RENDER_FIRST:%d' % render)
+print('SMDERR:%d' % smderr)
+print('STEPFACTS:1')
+PY
+}
+
+# sp2u_restore_facts <restore-output>: what the restore says it did below
+# part 2 (bin/smd _restore_below_part2): the name it moved the marker to,
+# whether it removed sigmond.toml, and its failure lines.
+sp2u_restore_facts() {
+    python3 - "$1" <<'PY'
+import re, sys
+MOVED = re.compile(r'the restored sigmond predates the sink switches: moved the carry-over marker aside to (\S+);')
+try:
+    text = open(sys.argv[1], encoding='utf-8', errors='replace').read()
+except OSError:
+    sys.exit(0)
+m = MOVED.search(text)
+print('RS_ASIDE:%s' % (m.group(1).rsplit('/', 1)[-1] if m else '-'))
+print('RS_RMTOML:%d' % bool(re.search(r'removed \S*/pipelines\.d/sigmond\.toml: the restored sigmond renders the legacy manifest alone', text)))
+print('RS_MOVEFAIL:%d' % len(re.findall(r'carry-over marker \S+ could not be moved aside', text)))
+print('RS_RMFAIL:%d' % len(re.findall(r'pipelines\.d/sigmond\.toml could not be removed', text)))
+print('RESTFACTS:1')
+PY
+}
+
+# sp2u_num <value>: the value when it is a whole number, else nothing.
+sp2u_num() { case "$1" in ''|*[!0-9]*) ;; *) echo "$1" ;; esac; }
+
+# sp2u_sum_diff <before-state> <after-state> [CLIENT|SITESUM]: one line per
+# file whose checksum differs, over the union of both sets: "changed <f>",
+# "gone <f>" (stood before, not after) or "added <f>", then DIFFDONE:1.  A
+# reply without DIFFDONE:1 compared nothing.
+sp2u_sum_diff() {
+    LC_ALL=C awk -F'|' -v tag="${3:-CLIENT}" '
+        FNR == 1 { side++ }
+        $1 == tag && tag == "SITESUM" { k = "site.toml"; v = $2 }
+        $1 == tag && tag != "SITESUM" { k = $2; v = $3 }
+        $1 == tag { if (side == 1) a[k] = v; else b[k] = v; seen[k] = 1 }
+        END {
+            for (k in seen) {
+                if (!(k in b)) print "gone " k
+                else if (!(k in a)) print "added " k
+                else if (a[k] != b[k]) print "changed " k
+            }
+            print "DIFFDONE:1"
+        }' "$1" "$2"
+}
+
+# _sp2u_diff <before> <after> <tag>: the differences as one
+# comma-separated list on stdout; returns 1, printing nothing, when the
+# comparison did not finish.
+_sp2u_diff() {
+    local out
+    out="$(sp2u_sum_diff "$1" "$2" "$3")"
+    case "$out" in *DIFFDONE:1*) ;; *) return 1 ;; esac
+    printf '%s\n' "$out" | grep -vx 'DIFFDONE:1' | LC_ALL=C sort | tr '\n' ',' | sed 's/,$//'
+}
+
+# _sp2u_inputs <label> <file> <SENTINEL>...: a FAIL line for each input that
+# lacks its sentinel; returns 1 when any does.
+_sp2u_inputs() {
+    local bad=0 label f
+    while [ $# -ge 3 ]; do
+        label="$1"; f="$2"
+        [ "$(sp2_tok "$f" "$3")" = 1 ] || { echo "FAIL: $label gave no answer (not a verdict)"; bad=1; }
+        shift 3
+    done
+    return "$bad"
+}
+
+# _sp2u_carried <step-facts> <state> <which>: the carry-over ran before the
+# render and left the marker, site.toml as [uploads] says, the heartbeat in
+# sigmond.toml alone.
+_sp2u_carried() {
+    local s="$1" g="$2" w="$3" co mk rd v
+    v="$(sp2_tok "$s" CO_FAILED)"
+    [ "$v" = 0 ] || echo "FAIL: $w: the step printed ${v:-?} carry-over failure line(s)"
+    co="$(sp2u_num "$(sp2_tok "$s" CO_FIRST)")"
+    mk="$(sp2u_num "$(sp2_tok "$s" CO_MARKER)")"
+    rd="$(sp2u_num "$(sp2_tok "$s" RENDER_FIRST)")"
+    if [ "${co:-0}" = 0 ]; then
+        echo "FAIL: $w: the manifest step printed no 'uploader: carry-over:' line; the carry-over did not run"
+    elif [ "${mk:-0}" = 0 ]; then
+        echo "FAIL: $w: the carry-over printed no 'carry-over: marker written' line"
+    elif [ "${rd:-0}" = 0 ]; then
+        echo "FAIL: $w: the manifest step printed no render line (wrote, refreshed or already current)"
+    elif [ "$mk" -ge "$rd" ]; then
+        echo "FAIL: $w: the render (line $rd) came before the carry-over wrote its marker (line $mk)"
+    else
+        echo "OK: $w: the carry-over ran (lines $co-$mk) and wrote its marker before the render (line $rd)"
+    fi
+    _sp2u_placed "$g" "$w" 1
+}
+
+# _sp2u_placed <state> <which> <gate 1|0>: the marker, site.toml against
+# [uploads], and the heartbeat's file.
+_sp2u_placed() {
+    local g="$1" w="$2" gate="$3" v want
+    if [ "$gate" = 1 ]; then
+        [ "$(sp2_tok "$g" MARKER)" = 1 ] && [ "$(sp2_tok "$g" MARKERREG)" = 1 ] \
+            || echo "FAIL: $w: no carry-over marker (a regular file) at /var/lib/hs-uploader/carry-over-v1.done"
+        [ "$(sp2_tok "$g" SIGFILE)" = 1 ] && [ "$(sp2_tok "$g" HBSIG)" = 1 ] \
+            || echo "FAIL: $w: the heartbeat does not live in pipelines.d/sigmond.toml (file $(sp2_tok "$g" SIGFILE), heartbeat x$(sp2_tok "$g" HBSIG))"
+        v="$(sp2_tok "$g" HBLEG)"
+        [ "$v" = 0 ] || echo "FAIL: $w: the legacy manifest still carries the heartbeat (x${v:-?})"
+    else
+        [ "$(sp2_tok "$g" LEGFILE)" = 1 ] && [ "$(sp2_tok "$g" HBLEG)" = 1 ] \
+            || echo "FAIL: $w: the legacy manifest carries no heartbeat (file $(sp2_tok "$g" LEGFILE), heartbeat x$(sp2_tok "$g" HBLEG))"
+    fi
+    v="$(sp2_tok "$g" SITE)"; want="$(sp2_tok "$g" SITEWANT)"
+    case "$want" in
+        off|fill|upload)
+            [ "$v" = "$want" ] \
+                || echo "FAIL: $w: site.toml reads '${v:-?}', but [uploads] mode = $(sp2_tok "$g" UPMODE) gives '$want'" ;;
+        *)  echo "FAIL: $w: coordination.toml's [uploads] could not be read (mode '$(sp2_tok "$g" UPMODE)')" ;;
+    esac
+}
+
+# sp2u_ebis_verdict <state-before> <step-facts> <state-after>
+sp2u_ebis_verdict() {
+    _sp2u_ebis "$@"
+    echo "VERDICT:done"
+}
+_sp2u_ebis() {
+    local pre="$1" s="$2" g="$3" v
+    _sp2u_inputs "E-bis: the switch probe before the manifest step" "$pre" SINKSDONE \
+                 "E-bis: the manifest step's facts" "$s" STEPFACTS \
+                 "E-bis: the switch probe after the manifest step" "$g" SINKSDONE || return
+    v="$(sp2_tok "$s" SMDERR)"
+    [ "$v" = 0 ] || echo "FAIL: E-bis: the manifest step printed ${v:-?} 'smd: uploader:' error line(s)"
+    if [ "$(sp2_tok "$s" F_GATE)" != 1 ]; then
+        echo "FAIL: E-bis: the updated hs-uploader offers no gate (features: $(sp2_tok "$s" F_WORDS)), so no carry-over can run"
+        return
+    fi
+    if [ "$(sp2_tok "$pre" MARKER)" = 1 ]; then
+        echo "UNCHECKED: the carry-over's first run at E-bis (the marker stood before the manifest step: a resumed run)"
+        _sp2u_placed "$g" E-bis 1
+        return
+    fi
+    _sp2u_carried "$s" "$g" E-bis
+}
+
+# sp2u_gbis_verdict <state-at-E-bis> <restore-facts> <state-at-G-bis> <sigmond-moved 1|0>
+sp2u_gbis_verdict() {
+    _sp2u_gbis "$@"
+    echo "VERDICT:done"
+}
+_sp2u_gbis() {
+    local e="$1" r="$2" g="$3" moved="$4" v a d
+    _sp2u_inputs "G-bis: the switch probe after E-bis" "$e" SINKSDONE \
+                 "G-bis: the restore's facts" "$r" RESTFACTS \
+                 "G-bis: the switch probe after the restore" "$g" SINKSDONE || return
+    # Restore leaves every switch file as it stood (Task 22).
+    if ! d="$(_sp2u_diff "$e" "$g" CLIENT)" || ! v="$(_sp2u_diff "$e" "$g" SITESUM)"; then
+        echo "FAIL: G-bis: the switch-file comparison did not finish (not a verdict)"
+    elif [ -n "$d$v" ]; then
+        echo "FAIL: G-bis: the restore changed switch files: $d${d:+${v:+,}}$v"
+    else
+        echo "OK: G-bis: the restore left every switch file as it stood"
+    fi
+    if [ "$moved" != 1 ]; then
+        echo "UNCHECKED: the restore's marker move and sigmond.toml removal (restore did not move sigmond, so the restored release still carries part 2)"
+        return
+    fi
+    v="$(sp2_tok "$r" RS_MOVEFAIL)"; [ "$v" = 0 ] || echo "FAIL: G-bis: the restore could not move the marker aside (${v:-?} line(s))"
+    v="$(sp2_tok "$r" RS_RMFAIL)";   [ "$v" = 0 ] || echo "FAIL: G-bis: the restore could not remove pipelines.d/sigmond.toml (${v:-?} line(s))"
+    [ "$(sp2_tok "$g" MARKER)" = 0 ] \
+        || echo "FAIL: G-bis: the carry-over marker still stands after the restore to a release below part 2"
+    a="$(sp2_tok "$r" RS_ASIDE)"
+    case "$a" in
+        carry-over-v1.done.rolled-back-[0-9]*Z|carry-over-v1.done.rolled-back-[0-9]*Z.[0-9]*)
+            grep -qxF "ASIDE|$a" "$g" \
+                || echo "FAIL: G-bis: the restore says it moved the marker to $a, but no such file stands" ;;
+        *)  echo "FAIL: G-bis: the restore printed no 'moved the carry-over marker aside to' line" ;;
+    esac
+    v="$(sp2u_num "$(sp2_tok "$g" ASIDEN)")"; d="$(sp2u_num "$(sp2_tok "$e" ASIDEN)")"
+    [ -n "$v" ] && [ -n "$d" ] && [ "$v" -gt "$d" ] \
+        || echo "FAIL: G-bis: no new rolled-back marker (E-bis ${d:-?}, G-bis ${v:-?})"
+    [ "$(sp2_tok "$g" SIGFILE)" = 0 ] \
+        || echo "FAIL: G-bis: pipelines.d/sigmond.toml still stands after the restore"
+    if [ "$(sp2_tok "$e" SIGFILE)" = 1 ]; then
+        [ "$(sp2_tok "$r" RS_RMTOML)" = 1 ] \
+            || echo "FAIL: G-bis: the restore printed no 'removed .../pipelines.d/sigmond.toml' line"
+    fi
+    _sp2u_placed "$g" G-bis 0
+}
+
+# sp2u_gter_verdict <state-at-G-bis> <step-facts> <state-at-G-ter>
+sp2u_gter_verdict() {
+    _sp2u_gter "$@"
+    echo "VERDICT:done"
+}
+_sp2u_gter() {
+    local b="$1" s="$2" g="$3" v d
+    _sp2u_inputs "G-ter: the switch probe after the restore" "$b" SINKSDONE \
+                 "G-ter: the second manifest step's facts" "$s" STEPFACTS \
+                 "G-ter: the switch probe after the second update" "$g" SINKSDONE || return
+    v="$(sp2_tok "$s" SMDERR)"
+    [ "$v" = 0 ] || echo "FAIL: G-ter: the second manifest step printed ${v:-?} 'smd: uploader:' error line(s)"
+    # Every client file at G-bis or now, compared whole: [[history]] and all.
+    if [ "$(sp2_tok "$b" CLIENTN)" = 0 ] && [ "$(sp2_tok "$g" CLIENTN)" = 0 ]; then
+        echo "UNCHECKED: every client switch file kept across the second update (none stood at G-bis or after)"
+    else
+        if ! d="$(_sp2u_diff "$b" "$g" CLIENT)"; then
+            echo "FAIL: G-ter: the client switch-file comparison did not finish (not a verdict)"
+        elif [ -n "$d" ]; then
+            echo "FAIL: G-ter: client switch files changed across the second update: $d"
+        else
+            echo "OK: G-ter: all $(sp2_tok "$g" CLIENTN) client switch file(s) stand byte for byte as at G-bis"
+        fi
+    fi
+    if [ "$(sp2_tok "$s" F_GATE)" = 1 ]; then
+        _sp2u_carried "$s" "$g" G-ter
+    elif [ "$(sp2_tok "$s" F_LINE)" = 1 ]; then
+        echo "UNCHECKED: the carry-over's second run (the second update's hs-uploader offers no gate: $(sp2_tok "$s" F_WORDS))"
+    else
+        echo "UNCHECKED: the carry-over's second run (the second update left the restored release's sigmond in place, which has no carry-over)"
+    fi
+}
+
+# sp2u_report <verdict> <context-output> <phase>: a verdict without its
+# VERDICT:done line crashed or was cut short and is FATAL as no verdict.
+# Each OK line is said, each UNCHECKED line said and kept for the closing
+# line (SINK2_UNCHECKED), and any FAIL line is FATAL.
+sp2u_report() {
+    local l n=0
+    grep -qx 'VERDICT:done' "$1" 2>/dev/null \
+        || fatal "$1" "$3: the sink switch verdict did not finish (it crashed or was cut short; not a verdict)"
+    while IFS= read -r l; do
+        case "$l" in
+            OK:*)        say "${l#OK: } ✓" ;;
+            UNCHECKED:*) say "⚠ NOT EVALUATED: ${l#UNCHECKED: }"
+                         SINK2_UNCHECKED="${SINK2_UNCHECKED:+$SINK2_UNCHECKED; }${l#UNCHECKED: }" ;;
+            FAIL:*)      say "FATAL: ${l#FAIL: }"; n=$((n + 1)) ;;
+        esac
+    done < "$1"
+    [ "$n" = 0 ] || fatal "$2" "$3: $n sink switch finding(s) above"
+}
+# <<< sink2b_update
+
+# The readers above take KEY:value with the nested rig's sp2_tok, from its
+# sink_part2 block (test-nested-sink-part2.sh tests that block).  The block
+# defines only sp2_*/SP2_* names and runs nothing when loaded.
+eval "$(sed -n '/^# >>> sink_part2/,/^# <<< sink_part2/p' "$NESTED_TEST" 2>/dev/null)"
+type sp2_tok >/dev/null 2>&1 \
+    || fatal - "no sp2_tok in $NESTED_TEST's sink_part2 block: the sink switch checks of E-bis, G-bis and G-ter cannot read their facts"
+SINK2_UNCHECKED=""
+
 # ── the store before the manifest step ─────────────────────────────────
 gx_ok 120 eb0-store-pre "$UPL_STORE" "E-bis: the send-record store before the manifest step"
 sed 's/^/      /' "$GX_OUT"
@@ -1277,6 +1709,8 @@ gx_ok 120 eb0-split-pre "$UPL_SPLIT" "E-bis: the pskreporter send records before
 sed 's/^/      /' "$GX_OUT"
 EB_PRE_OLD="$(gx_tok "$GX_OUT" OLDKEY)"
 [ -n "$EB_PRE_OLD" ] || fatal "$GX_OUT" "E-bis: the send-record probe returned no answer (not a verdict)"
+gx_ok 120 eb0-sinks-pre "$UPL_SINKS" "E-bis: the switch files before the manifest step"
+sed 's/^/      /' "$GX_OUT"
 
 # ── bring-up's manifest step, as align runs it ─────────────────────────
 say "── smd admin uploader manifest --write --enable (from v3.70 it runs hs-uploader migrate before it touches the daemon)"
@@ -1331,6 +1765,16 @@ case "${EB_PRE_VER:-}" in
         say "⚠ MIGRATION 3 REPORT NOT EVALUATED — the store stood at version ${EB_PRE_VER:-unknown} before the manifest step, so migrate had no migration 3 to report"
         KS_UNCHECKED="${KS_UNCHECKED:+$KS_UNCHECKED; }migrate's migration 3 report (the store was already at version ${EB_PRE_VER:-unknown})" ;;
 esac
+
+# ── the carry-over, before the render (step 2b part 2, V1) ─────────────
+# The step's own lines order the carry-over against the render; the guest
+# then shows the marker, site.toml against [uploads], and the heartbeat in
+# pipelines.d/sigmond.toml alone.
+sp2u_step_facts "$WORK/eb1-manifest.out" > "$WORK/eb1-sink.facts"
+gx_ok 120 eb1-sinks "$UPL_SINKS" "E-bis: the switch files after the manifest step"
+sed 's/^/      /' "$GX_OUT"
+sp2u_ebis_verdict "$WORK/eb0-sinks-pre.out" "$WORK/eb1-sink.facts" "$WORK/eb1-sinks.out" > "$WORK/eb1-sink.verdict"
+sp2u_report "$WORK/eb1-sink.verdict" "$WORK/eb1-manifest.out" "E-bis"
 
 # ── the store after the manifest step, before anything restarts ────────
 # Read here, ahead of any restart by this rig, a migrated store shows that
@@ -1970,6 +2414,19 @@ else
     KS_UNCHECKED="${KS_UNCHECKED:+$KS_UNCHECKED; }the rollback's re-render matching the restored release (restore did not move sigmond)"
 fi
 
+# ── the switch files across the restore (step 2b part 2, V5) ───────────
+# A restore to a sigmond below part 2 moves the marker aside and removes
+# pipelines.d/sigmond.toml before the restored smd renders (bin/smd
+# _restore_below_part2), and leaves every switch file in place.  Compared
+# against the state E-bis left.
+GB_SIGMOVED=0
+grep -q 'sigmond: checked out' "$WORK/g3-restore-apply.out" && GB_SIGMOVED=1
+sp2u_restore_facts "$WORK/g3-restore-apply.out" > "$WORK/gb0-restore.facts"
+gx_ok 120 gb0-sinks "$UPL_SINKS" "G-bis: the switch files after the restore"
+sed 's/^/      /' "$GX_OUT"
+sp2u_gbis_verdict "$WORK/eb1-sinks.out" "$WORK/gb0-restore.facts" "$WORK/gb0-sinks.out" "$GB_SIGMOVED" > "$WORK/gb0-sink.verdict"
+sp2u_report "$WORK/gb0-sink.verdict" "$WORK/g3-restore-apply.out" "G-bis"
+
 # ── the restored smd reads the manifest as its own ─────────────────────
 gx_ok 300 gb1-manifest-check 'smd admin uploader manifest' "G-bis: smd admin uploader manifest (check)"
 sed 's/^/      /' "$GX_OUT"
@@ -2063,6 +2520,14 @@ esac
 gx_ok 900 gt2-manifest 'smd admin uploader manifest --write --enable' "G-ter: smd admin uploader manifest --write --enable"
 sed 's/^/      /' "$WORK/gt2-manifest.out"
 [ "$GX_RC" -eq 0 ] || fatal "$WORK/gt2-manifest.out" "the second manifest step exited $GX_RC"
+# The carry-over runs again (step 2b part 2, V8): the marker stood aside
+# since G-bis.  Every client switch file present at G-bis or now must stand
+# byte for byte as at G-bis, [[history]] and all.
+sp2u_step_facts "$WORK/gt2-manifest.out" > "$WORK/gt2-sink.facts"
+gx_ok 120 gt2-sinks "$UPL_SINKS" "G-ter: the switch files after the second update"
+sed 's/^/      /' "$GX_OUT"
+sp2u_gter_verdict "$WORK/gb0-sinks.out" "$WORK/gt2-sink.facts" "$WORK/gt2-sinks.out" > "$WORK/gt2-sink.verdict"
+sp2u_report "$WORK/gt2-sink.verdict" "$WORK/gt2-manifest.out" "G-ter"
 gx_ok 120 gt3-split "$UPL_SPLIT" "G-ter: the key split after the second update"
 sed 's/^/      /' "$GX_OUT"
 GT_P_OLD="$(gx_tok "$GX_OUT" PIPE_OLD)"; GT_P_PSK="$(gx_tok "$GX_OUT" PIPE_PSK)"; GT_P_MS="$(gx_tok "$GX_OUT" PIPE_MS)"
@@ -2114,6 +2579,9 @@ if [ -n "${ETER_UNCHECKED:-}" ]; then
 fi
 if [ -n "${KS_UNCHECKED:-}" ]; then
     say "⚠ KEY SPLIT NOT EVALUATED: $KS_UNCHECKED"
+fi
+if [ -n "${SINK2_UNCHECKED:-}" ]; then
+    say "⚠ SINK SWITCHES NOT EVALUATED: $SINK2_UNCHECKED"
 fi
 say "UPDATE RIG COMPLETE — $IMGBASE rolled forward to $TARGET_SHA and back, both directions verified"
 say "evidence: $WORK   log: $LOG"

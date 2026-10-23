@@ -1,5 +1,6 @@
-sigmond 31885c7e8013a4aaca154509b089a3aa16687ffd
+sigmond ad53b95cc51009fa059cb2336511340554c8ecb2
 manifest_step_part2.txt  <- tests/fixtures/manifest_step_part2.txt
 sink_fill_part2.txt      <- tests/fixtures/sink_fill_part2.txt
 sink_status_<case>.json  <- tests/fixtures/sink_status/<case>.json
+restore_part2/           <- tests/fixtures/restore_part2/ (capture_restore_part2.py)
 pipelines_*.toml, sigmond_gate.toml, switch_view_*.txt, lever_lines_more.txt, smd_err_line.txt <- printed by capture.sh from lib/ at that commit

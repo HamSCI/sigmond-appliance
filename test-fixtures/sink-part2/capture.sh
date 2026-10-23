@@ -27,8 +27,13 @@
 #                                commands/config.py _say_lines)
 #   smd_err_line.txt             one manifest-step error line, as
 #                                commands/uploader.py _err prints it
+#   restore_part2/               a restore to a sigmond below part 2 and the
+#                                manifest step after it (Task 22's restore,
+#                                Task 24's capture): restore.txt, rerun.txt,
+#                                the switch files after each step, the
+#                                markers and coordination.toml
 #   SOURCE                       the commit and the files' origin
-# The three copied files carry their own capture scripts in sigmond
+# The copied files carry their own capture scripts in sigmond
 # (tests/fixtures/capture_*.py, tests/fixtures/sink_status/capture.sh); this
 # script copies their committed output, so a re-run at the same commit leaves
 # `git diff` empty.  test-nested-sink-part2.sh wraps each the way
@@ -42,6 +47,7 @@ work="$(mktemp -d)"; trap 'rm -rf "$work"' EXIT
 
 git -C "$sig" archive "$commit" lib tests/fixtures/manifest_step_part2.txt \
     tests/fixtures/sink_fill_part2.txt tests/fixtures/sink_status \
+    tests/fixtures/restore_part2 \
     | tar -x -C "$work"
 f="$work/tests/fixtures"
 cp "$f/manifest_step_part2.txt" "$here/manifest_step_part2.txt"
@@ -49,6 +55,8 @@ cp "$f/sink_fill_part2.txt" "$here/sink_fill_part2.txt"
 for c in site-off all-upload marker-absent; do
     cp "$f/sink_status/$c.json" "$here/sink_status_$c.json"
 done
+rm -rf "$here/restore_part2"
+cp -R "$f/restore_part2" "$here/restore_part2"
 
 (cd / && "$py" -I -B - "$work/lib" "$here" <<'PY'
 import contextlib, io, logging, sys, tomllib
@@ -132,6 +140,7 @@ sigmond $commit
 manifest_step_part2.txt  <- tests/fixtures/manifest_step_part2.txt
 sink_fill_part2.txt      <- tests/fixtures/sink_fill_part2.txt
 sink_status_<case>.json  <- tests/fixtures/sink_status/<case>.json
+restore_part2/           <- tests/fixtures/restore_part2/ (capture_restore_part2.py)
 pipelines_*.toml, sigmond_gate.toml, switch_view_*.txt, lever_lines_more.txt, smd_err_line.txt <- printed by capture.sh from lib/ at that commit
 SRC
 echo "capture: wrote $here from sigmond $commit"

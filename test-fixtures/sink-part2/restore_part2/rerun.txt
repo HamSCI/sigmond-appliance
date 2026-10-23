@@ -1,0 +1,7 @@
+uploader: hs-uploader features: gate pipelines.d send-log-v3 switch-files
+uploader: carry-over: site upload, kept (matches [uploads] mode = upload)
+uploader: carry-over: psk-recorder upload, kept (its switch file stands; the carry-over appends nothing)
+uploader: carry-over: wspr-recorder upload, kept (its switch file stands; the carry-over appends nothing)
+uploader: carry-over: marker written
+uploader: wrote @ROOT@/etc/hs-uploader/pipelines.d/sigmond.toml
+uploader: @ROOT@/etc/hs-uploader/pipelines.toml already current (2 pipeline(s))

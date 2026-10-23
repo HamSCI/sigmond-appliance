@@ -1,0 +1,19 @@
+client = "wspr-recorder"
+state = "upload"
+reason = "carried over from [uploads] mode = upload"
+set_by = "carry-over"
+set_at = "2026-10-23T12:00:00Z"
+
+[[history]]
+at = "2026-10-23T12:00:00Z"
+from = "off"
+to = "upload"
+by = "carry-over"
+reason = "carried over from [uploads] mode = upload"
+
+[history.identity]
+
+[history.identity.W1AW]
+callsign = "W1AW"
+grid = "FN31"
+reporter_id = "W1AW"
