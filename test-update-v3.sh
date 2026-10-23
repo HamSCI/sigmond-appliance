@@ -56,6 +56,9 @@
 #   PHASE G-ter — a second update: both split pipelines and both send
 #             records stand, version 3 stands, no migration re-runs, and
 #             migrate --check has nothing to write.  From step 2b part 2:
+#             first a step that stands in for `smd align` re-attaches each
+#             checkout the restore detached to the branch E recorded, as
+#             its owner; the update must then pull sigmond and hs-uploader,
 #             the carry-over runs again and writes the marker, and every
 #             client switch file stands byte for byte as at G-bis.
 #
@@ -224,6 +227,16 @@ if [ -d "$WORK" ]; then
     mv -f "$WORK" "$WORK_PREV" || { say "FATAL: cannot rotate $WORK to $WORK_PREV"; exit 1; }
 fi
 mkdir -p "$WORK" || { say "FATAL: cannot create $WORK"; exit 1; }
+
+# The sink switch checks (E-bis, G-bis, G-ter) read KEY:value with the nested
+# rig's sp2_tok, from its sink_part2 block (test-nested-sink-part2.sh tests
+# that block).  The block defines only sp2_*/SP2_* names and runs nothing
+# when loaded.  Checked here, at startup, so a missing reader stops the run
+# before any phase rather than an hour in.
+eval "$(sed -n '/^# >>> sink_part2/,/^# <<< sink_part2/p' "$NESTED_TEST" 2>/dev/null)"
+type sp2_tok >/dev/null 2>&1 \
+    || { say "FATAL: no sp2_tok in $NESTED_TEST's sink_part2 block: the sink switch checks of E-bis, G-bis and G-ter cannot read their facts"; exit 1; }
+SINK2_UNCHECKED=""
 
 say "════════════════════════════════════════════════════════════════"
 say "test-update-v3.sh starting (rig=$RIG_DIR resume=$RESUME target=$TARGET)"
@@ -1096,6 +1109,16 @@ if grep -qi 'not enabled' "$WORK/e8-heartbeat.out"; then
 fi
 say "heartbeat still wired after the update: exit 0, no not-enabled ✓"
 
+# The branch each checkout sits on, for G-ter's re-attach (ruling C24-1):
+# a restore detaches every checkout it moves, and the second update can
+# only pull a checkout that sits on its branch.
+gx_ok 120 e9-branches "$UPL_BRANCHES" "the branch each checkout sits on"
+sed 's/^/      /' "$GX_OUT"
+[ "$(sp2_tok "$GX_OUT" BRANCHDONE)" = 1 ] \
+    || fatal "$GX_OUT" "the branch probe gave no answer (not a verdict): G-ter could not re-attach the restored checkouts"
+cp "$GX_OUT" "$WORK/branches-at-e.txt"
+say "recorded the branch of $(grep -c '^BRANCH|' "$WORK/branches-at-e.txt") checkout(s) for G-ter's re-attach"
+
 say "PHASE E PASS — rolled forward to $TARGET_SHA, idempotent, level, no new findings"
 
 # ════════════════════════════════════════════════════════════════════════
@@ -1382,6 +1405,8 @@ print('UPMODE:%s' % mode)
 print('SITEWANT:%s' % {'discard': 'off', 'hold': 'fill', 'upload': 'upload'}.get(mode, '-'))
 def digest(p):
     st = os.lstat(p)
+    if stat.S_ISLNK(st.st_mode):
+        return 'link:' + os.readlink(p).replace('|', '%7C')
     if not stat.S_ISREG(st.st_mode):
         return 'notregular'
     with open(p, 'rb') as fh:
@@ -1569,8 +1594,7 @@ _sp2u_placed() {
 
 # sp2u_ebis_verdict <state-before> <step-facts> <state-after>
 sp2u_ebis_verdict() {
-    _sp2u_ebis "$@"
-    echo "VERDICT:done"
+    _sp2u_finish _sp2u_ebis "$@"
 }
 _sp2u_ebis() {
     local pre="$1" s="$2" g="$3" v
@@ -1593,8 +1617,7 @@ _sp2u_ebis() {
 
 # sp2u_gbis_verdict <state-at-E-bis> <restore-facts> <state-at-G-bis> <sigmond-moved 1|0>
 sp2u_gbis_verdict() {
-    _sp2u_gbis "$@"
-    echo "VERDICT:done"
+    _sp2u_finish _sp2u_gbis "$@"
 }
 _sp2u_gbis() {
     local e="$1" r="$2" g="$3" moved="$4" v a d
@@ -1636,16 +1659,208 @@ _sp2u_gbis() {
     _sp2u_placed "$g" G-bis 0
 }
 
-# sp2u_gter_verdict <state-at-G-bis> <step-facts> <state-at-G-ter>
+# ── G-ter step 0: re-attach the restored checkouts (course B, ruling C24-1)
+# The restore pins every checkout it moves with `git checkout --detach`, and
+# `smd update` compares HEAD..@{u}, which a detached checkout lacks, so a
+# second update pulls nothing and the restored sigmond stays in place.  On a
+# station `smd align` puts it back on its branch.  The rig stands in for it:
+#   1. at E, UPL_BRANCHES records the branch each checkout sits on;
+#   2. sp2u_moved reads the restore's own "<name>: checked out <sha>
+#      (detached HEAD)" lines;
+#   3. sp2u_reattach_plan pairs each moved checkout with its recorded branch;
+#   4. sp2u_reattach_script runs, for each, `git checkout -B <branch> <sha>`
+#      as the checkout's owner through runuser, never as root.  -B puts the
+#      branch at the SHA the restore left, keeping the branch's upstream:
+#      a plain `git checkout <branch>` would jump to the branch tip that E
+#      pulled, the code would move with no update, and `[pull]` could never
+#      show.  So the station then sits on its branch at the blessed release,
+#      as align leaves it, and the next `smd update --apply` pulls forward.
+#   5. sp2u_reattach_verdict judges what came back.
+
+# One BRANCH|<name>|<branch or ->|<owner> line per checkout under
+# /opt/git/sigmond, read as the checkout's owner (git refuses a repository
+# another account owns), then BRANCHDONE:1.  SP2U_ROOT, SP2U_RUNUSER and
+# SP2U_STAT exist for the hermetic test.
+UPL_BRANCHES=$(cat <<'SP2UEOF'
+B="${SP2U_ROOT:-}/opt/git/sigmond"
+RU="${SP2U_RUNUSER:-runuser}"
+ST="${SP2U_STAT:-stat}"
+for d in "$B"/*/; do
+    d="${d%/}"
+    [ -d "$d/.git" ] || continue
+    n="${d##*/}"
+    o="$("$ST" -c %U "$d" 2>/dev/null)"
+    if [ -z "$o" ] || [ "$o" = root ]; then
+        b="$(git --no-optional-locks -C "$d" symbolic-ref -q --short HEAD 2>/dev/null)"
+    else
+        b="$("$RU" -u "$o" -- git --no-optional-locks -C "$d" symbolic-ref -q --short HEAD 2>/dev/null)"
+    fi
+    echo "BRANCH|$n|${b:--}|${o:-?}"
+done
+echo "BRANCHDONE:1"
+exit 0
+SP2UEOF
+)
+
+# sp2u_moved <restore-output>: MOVED|<name>|<sha> for each checkout the
+# restore moved, then MOVEDDONE:1.  The name is the whole name-shaped run of
+# bytes right before ": checked out", so "hs-sigmond" never reads as
+# "sigmond", and what the channel puts ahead of it does not matter.
+sp2u_moved() {
+    python3 - "$1" <<'PY'
+import re, sys
+LINE = re.compile(r'(?:^|[^A-Za-z0-9_.+-])([A-Za-z0-9_.+-]+): checked out ([0-9a-f]{4,40}) \(detached HEAD\)')
+try:
+    lines = open(sys.argv[1], encoding='utf-8', errors='replace').read().splitlines()
+except OSError:
+    sys.exit(0)
+for ln in lines:
+    m = LINE.search(ln)
+    if m:
+        print('MOVED|%s|%s' % m.groups())
+print('MOVEDDONE:1')
+PY
+}
+
+# sp2u_reattach_plan <moved-facts> <branches>: PLAN|<name>|<branch>|<sha>
+# for each moved checkout, a FAIL line for each that cannot be re-attached
+# (an UNCHECKED line for a pinned one other than sigmond and hs-uploader,
+# which sat detached at E already), then PLANDONE:1 (also after a FAIL, so the verdict tells "cannot" from "did
+# not answer").  Names, branches and SHAs are checked against the shapes
+# git allows here, since they go into a guest script.
+sp2u_reattach_plan() {
+    local m="$1" b="$2" tag n sha br
+    [ "$(sp2_tok "$m" MOVEDDONE)" = 1 ] || { echo "FAIL: G-ter re-attach: the restore's moved checkouts could not be read (not a verdict)"; echo "PLANDONE:1"; return; }
+    [ "$(sp2_tok "$b" BRANCHDONE)" = 1 ] || { echo "FAIL: G-ter re-attach: the branches recorded at E gave no answer (not a verdict)"; echo "PLANDONE:1"; return; }
+    while IFS='|' read -r tag n sha; do
+        [ "$tag" = MOVED ] || continue
+        br="$(LC_ALL=C awk -F'|' -v n="$n" '$1 == "BRANCH" && $2 == n { print $3; exit }' "$b")"
+        if [ -z "$br" ]; then
+            echo "FAIL: G-ter re-attach: no branch recorded at E for $n, which the restore moved"
+        elif [ "$br" = - ] && { [ "$n" = sigmond ] || [ "$n" = hs-uploader ]; }; then
+            echo "FAIL: G-ter re-attach: $n sat detached at E, so it has no branch to return to"
+        elif [ "$br" = - ]; then
+            # A pinned checkout (bring-up and align detach onto .pin): the
+            # update holds it at its pin either way.
+            echo "UNCHECKED: G-ter re-attach of $n (it sat detached at E, on its pin; left where the restore put it)"
+        elif ! LC_ALL=C grep -qxE '[A-Za-z0-9_.+-]+' <<<"$n" \
+             || ! LC_ALL=C grep -qxE '[A-Za-z0-9_.+][A-Za-z0-9_./+-]*' <<<"$br" \
+             || ! LC_ALL=C grep -qxE '[0-9a-f]{4,40}' <<<"$sha"; then
+            echo "FAIL: G-ter re-attach: refusing an odd name, branch or SHA ($n, $br, $sha)"
+        else
+            echo "PLAN|$n|$br|$sha"
+        fi
+    done < "$m"
+    echo "PLANDONE:1"
+}
+
+# sp2u_reattach_script <plan>: the guest script.  For each PLAN line it runs
+# `git checkout -B <branch> <sha>` as the checkout's owner, refuses a
+# checkout root owns, and prints
+#   REATTACH|<name>|<branch>|<owner>|<rc>|<branch now>|<HEAD>|<upstream>
+# then REATTACHDONE:1.  The exit code comes from a variable, never a pipe.
+sp2u_reattach_script() {
+    cat <<'SP2UEOF'
+B="${SP2U_ROOT:-}/opt/git/sigmond"
+RU="${SP2U_RUNUSER:-runuser}"
+ST="${SP2U_STAT:-stat}"
+while IFS='|' read -r tag n br sha; do
+    [ "$tag" = PLAN ] || continue
+    d="$B/$n"
+    o="$("$ST" -c %U "$d" 2>/dev/null)"
+    if [ -z "$o" ] || [ "$o" = root ]; then
+        echo "REATTACH|$n|$br|${o:-?}|refused|-|-|-"
+        continue
+    fi
+    g(){ "$RU" -u "$o" -- git --no-optional-locks -C "$d" "$@"; }
+    out="$(g checkout -B "$br" "$sha" 2>&1)"; rc=$?
+    printf '%s\n' "$out" | sed 's/^/  git checkout | /'
+    now="$(g symbolic-ref -q --short HEAD 2>/dev/null)"
+    head="$(g rev-parse -q --verify HEAD 2>/dev/null)"
+    up="$(g rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null)" || up=""
+    echo "REATTACH|$n|$br|$o|$rc|${now:--}|${head:--}|${up:--}"
+done <<'PLANEOF'
+SP2UEOF
+    grep '^PLAN|' "$1"
+    cat <<'SP2UEOF'
+PLANEOF
+echo "REATTACHDONE:1"
+exit 0
+SP2UEOF
+}
+
+# sp2u_reattach_verdict <plan> <reattach-output>
+sp2u_reattach_verdict() {
+    _sp2u_finish _sp2u_reattach "$@"
+}
+_sp2u_reattach() {
+    local p="$1" r="$2" tag n br sha line rn rb ro rc now head up k=0
+    _sp2u_inputs "G-ter re-attach: the plan" "$p" PLANDONE \
+                 "G-ter re-attach: the guest" "$r" REATTACHDONE || return
+    grep -E '^(FAIL|UNCHECKED):' "$p"
+    while IFS='|' read -r tag n br sha; do
+        [ "$tag" = PLAN ] || continue
+        k=$((k + 1))
+        line="$(LC_ALL=C awk -F'|' -v n="$n" '$1 == "REATTACH" && $2 == n { print; exit }' "$r")"
+        if [ -z "$line" ]; then
+            echo "FAIL: G-ter re-attach: the guest gave no answer for $n (not a verdict)"; continue
+        fi
+        IFS='|' read -r _ rn rb ro rc now head up <<<"$line"
+        if [ "$rc" = refused ]; then
+            echo "FAIL: G-ter re-attach: $n belongs to ${ro:-?}; the rig never runs git there as root"
+        elif [ "$rc" != 0 ]; then
+            echo "FAIL: G-ter re-attach: git checkout -B $br $sha in $n exited $rc"
+        elif [ "$now" != "$br" ]; then
+            echo "FAIL: G-ter re-attach: $n sits on '$now' after the checkout, not on $br"
+        elif [ "${head#"$sha"}" = "$head" ]; then
+            echo "FAIL: G-ter re-attach: $n's HEAD reads $head, not the restored $sha"
+        elif [ "$up" = - ] || [ -z "$up" ]; then
+            echo "FAIL: G-ter re-attach: $n's branch $br tracks no upstream, so smd update cannot pull it"
+        else
+            echo "OK: G-ter re-attach: $n back on $br at $sha (as $ro, tracking $up)"
+        fi
+    done < "$p"
+    [ "$k" -gt 0 ] || grep -qE '^(FAIL|UNCHECKED):' "$p" \
+        || echo "UNCHECKED: the re-attach before the second update (the restore moved no checkout)"
+}
+
+# sp2u_update_facts <update-output> <moved-facts>: which of sigmond and
+# hs-uploader the restore moved, and whether the second update planned a
+# pull of each ("  [pull] <name>", bin/smd cmd_update; its --apply prints
+# the plan line ahead of each step).  UPDFACTS:1 last.
+sp2u_update_facts() {
+    local u="$1" m="$2" c
+    [ "$(sp2_tok "$m" MOVEDDONE)" = 1 ] || return 0
+    for c in sigmond:SIG hs-uploader:HSU; do
+        if grep -q "^MOVED|${c%%:*}|" "$m"; then echo "MOVED_${c#*:}:1"; else echo "MOVED_${c#*:}:0"; fi
+        if LC_ALL=C grep -qE "^[[:space:]]*\[pull\] ${c%%:*}[[:space:]]*\$" "$u" 2>/dev/null; then
+            echo "PULL_${c#*:}:1"; else echo "PULL_${c#*:}:0"; fi
+    done
+    echo "UPDFACTS:1"
+}
+
+# _sp2u_finish <body> <args...>: run a verdict body, and end with
+# VERDICT:done only when it printed at least one finding (OK, FAIL or
+# UNCHECKED).  A body that is missing, or died before its first finding,
+# leaves no sentinel, and sp2u_report refuses it.
+_sp2u_finish() {
+    local out
+    out="$("$@" 2>&1)"
+    [ -z "$out" ] || printf '%s\n' "$out"
+    if grep -qE '^(OK|FAIL|UNCHECKED):' <<<"$out"; then echo "VERDICT:done"; fi
+    return 0
+}
+
+# sp2u_gter_verdict <state-at-G-bis> <step-facts> <state-at-G-ter> <update-facts>
 sp2u_gter_verdict() {
-    _sp2u_gter "$@"
-    echo "VERDICT:done"
+    _sp2u_finish _sp2u_gter "$@"
 }
 _sp2u_gter() {
-    local b="$1" s="$2" g="$3" v d
+    local b="$1" s="$2" g="$3" u="$4" v d
     _sp2u_inputs "G-ter: the switch probe after the restore" "$b" SINKSDONE \
                  "G-ter: the second manifest step's facts" "$s" STEPFACTS \
-                 "G-ter: the switch probe after the second update" "$g" SINKSDONE || return
+                 "G-ter: the switch probe after the second update" "$g" SINKSDONE \
+                 "G-ter: the second update's facts" "$u" UPDFACTS || return
     v="$(sp2_tok "$s" SMDERR)"
     [ "$v" = 0 ] || echo "FAIL: G-ter: the second manifest step printed ${v:-?} 'smd: uploader:' error line(s)"
     # Every client file at G-bis or now, compared whole: [[history]] and all.
@@ -1655,17 +1870,31 @@ _sp2u_gter() {
         if ! d="$(_sp2u_diff "$b" "$g" CLIENT)"; then
             echo "FAIL: G-ter: the client switch-file comparison did not finish (not a verdict)"
         elif [ -n "$d" ]; then
-            echo "FAIL: G-ter: client switch files changed across the second update: $d"
+            case ",$d," in
+                *",added "*) v="; an added file means the second step wrote a switch file for a client that had none at G-bis: a client the second update installed or enabled, or a carry-over that wrote past a standing file" ;;
+                *) v="" ;;
+            esac
+            echo "FAIL: G-ter: client switch files changed across the second update: $d$v"
         else
             echo "OK: G-ter: all $(sp2_tok "$g" CLIENTN) client switch file(s) stand byte for byte as at G-bis"
         fi
     fi
+    # The carry-over's second run (V8), once the re-attach let the second
+    # update pull sigmond and hs-uploader forward.
+    if [ "$(sp2_tok "$u" MOVED_SIG)" != 1 ]; then
+        echo "UNCHECKED: the carry-over's second run (the restore moved no sigmond: the target has not moved past the image, so nothing rolled back)"
+        return
+    fi
+    v=0
+    [ "$(sp2_tok "$u" PULL_SIG)" = 1 ] \
+        || { echo "FAIL: G-ter: the second update planned no '[pull] sigmond': the restored sigmond stayed in place, so no carry-over could run"; v=1; }
+    if [ "$(sp2_tok "$u" MOVED_HSU)" = 1 ] && [ "$(sp2_tok "$u" PULL_HSU)" != 1 ]; then
+        echo "FAIL: G-ter: the second update planned no '[pull] hs-uploader': the restored hs-uploader, which offers no gate, stayed in place"; v=1
+    fi
     if [ "$(sp2_tok "$s" F_GATE)" = 1 ]; then
         _sp2u_carried "$s" "$g" G-ter
-    elif [ "$(sp2_tok "$s" F_LINE)" = 1 ]; then
-        echo "UNCHECKED: the carry-over's second run (the second update's hs-uploader offers no gate: $(sp2_tok "$s" F_WORDS))"
-    else
-        echo "UNCHECKED: the carry-over's second run (the second update left the restored release's sigmond in place, which has no carry-over)"
+    elif [ "$v" = 0 ]; then
+        echo "FAIL: G-ter: the second manifest step's hs-uploader offers no gate (features: $(sp2_tok "$s" F_WORDS)), so the carry-over could not run again"
     fi
 }
 
@@ -1677,6 +1906,8 @@ sp2u_report() {
     local l n=0
     grep -qx 'VERDICT:done' "$1" 2>/dev/null \
         || fatal "$1" "$3: the sink switch verdict did not finish (it crashed or was cut short; not a verdict)"
+    grep -qE '^(OK|FAIL|UNCHECKED):' "$1" \
+        || fatal "$1" "$3: the sink switch verdict holds no finding (not a verdict)"
     while IFS= read -r l; do
         case "$l" in
             OK:*)        say "${l#OK: } ✓" ;;
@@ -1688,14 +1919,6 @@ sp2u_report() {
     [ "$n" = 0 ] || fatal "$2" "$3: $n sink switch finding(s) above"
 }
 # <<< sink2b_update
-
-# The readers above take KEY:value with the nested rig's sp2_tok, from its
-# sink_part2 block (test-nested-sink-part2.sh tests that block).  The block
-# defines only sp2_*/SP2_* names and runs nothing when loaded.
-eval "$(sed -n '/^# >>> sink_part2/,/^# <<< sink_part2/p' "$NESTED_TEST" 2>/dev/null)"
-type sp2_tok >/dev/null 2>&1 \
-    || fatal - "no sp2_tok in $NESTED_TEST's sink_part2 block: the sink switch checks of E-bis, G-bis and G-ter cannot read their facts"
-SINK2_UNCHECKED=""
 
 # ── the store before the manifest step ─────────────────────────────────
 gx_ok 120 eb0-store-pre "$UPL_STORE" "E-bis: the send-record store before the manifest step"
@@ -2281,6 +2504,11 @@ fi
 # the calendar.
 MOVED="$(restore_moved "$WORK/g3-restore-apply.out")"
 [ -n "$MOVED" ] || MOVED=unknown
+# Which checkouts the restore moved, by name, from its own lines: G-bis and
+# G-ter read this, never a bare grep that "hs-sigmond" would also match.
+sp2u_moved "$WORK/g3-restore-apply.out" > "$WORK/g3-moved.facts"
+[ "$(sp2_tok "$WORK/g3-moved.facts" MOVEDDONE)" = 1 ] \
+    || fatal "$WORK/g3-restore-apply.out" "the restore's moved checkouts could not be read (not a verdict)"
 say "restore --apply exit 0, self-verified ✓ (components moved: $MOVED)"
 
 # ── the live tree must now BE the manifest, read back independently ────
@@ -2355,7 +2583,7 @@ udiffs "$GX_OUT" "$WORK/units-restored.txt"
 UNITS_NEW="$(comm -13 "$WORK/units-pre.txt" "$WORK/units-restored.txt" | tr '\n' ' ')"
 [ -z "$UNITS_NEW" ] || fatal "$GX_OUT" "after the rollback these installed sigmond units differ from the restored checkout, and did not before the update: $UNITS_NEW. A rollback must leave the units as the older release installs them"
 say "every sigmond unit stands as the restored release installs it ✓"
-if grep -q 'sigmond: checked out' "$WORK/g3-restore-apply.out"; then
+if grep -q '^MOVED|sigmond|' "$WORK/g3-moved.facts"; then
     grep -q 'sigmond: install.sh exit 0' "$WORK/g3-restore-apply.out" \
         || fatal "$WORK/g3-restore-apply.out" "restore moved sigmond but printed no 'sigmond: install.sh exit 0': it did not run the older release's install"
     say "restore ran the restored sigmond's install.sh ✓"
@@ -2405,7 +2633,7 @@ say "restore: $GB_RR ✓"
 # A restore that moved nothing leaves the updated sigmond in place, and its
 # step prints the line, so only a restore that moved a checkout can tell.
 mig3_facts "$WORK/g3-restore-apply.out" > "$WORK/gb0-mig3.facts"
-if grep -q 'sigmond: checked out' "$WORK/g3-restore-apply.out"; then
+if grep -q '^MOVED|sigmond|' "$WORK/g3-moved.facts"; then
     [ "$(gx_tok "$WORK/gb0-mig3.facts" F_LINE)" = 0 ] \
         || fatal "$WORK/g3-restore-apply.out" "the rollback's re-render printed a 'hs-uploader features:' line: the sigmond that re-rendered is not the restored release's (D11)"
     say "the re-render printed no features line, as the restored release's sigmond ✓"
@@ -2420,7 +2648,7 @@ fi
 # _restore_below_part2), and leaves every switch file in place.  Compared
 # against the state E-bis left.
 GB_SIGMOVED=0
-grep -q 'sigmond: checked out' "$WORK/g3-restore-apply.out" && GB_SIGMOVED=1
+grep -q '^MOVED|sigmond|' "$WORK/g3-moved.facts" && GB_SIGMOVED=1
 sp2u_restore_facts "$WORK/g3-restore-apply.out" > "$WORK/gb0-restore.facts"
 gx_ok 120 gb0-sinks "$UPL_SINKS" "G-bis: the switch files after the restore"
 sed 's/^/      /' "$GX_OUT"
@@ -2507,6 +2735,21 @@ say "PHASE G-bis PASS — the restored release re-rendered its manifest, and its
 # ════════════════════════════════════════════════════════════════════════
 say "════ PHASE G-ter: a second update leaves both split keys in place ════"
 
+# ── step 0: re-attach the restored checkouts (stands in for smd align) ──
+# The restore left every checkout it moved detached, and `smd update` pulls
+# only a checkout on its branch (bin/smd cmd_update: HEAD..@{u}).  On a
+# station `smd align` would put each back; here the rig does, as each
+# checkout's owner, onto the branch E recorded, at the SHA the restore left
+# (ruling C24-1; see sp2u_reattach_plan).  Then the update below pulls
+# forward, as it would on a station after align.
+say "── G-ter step 0: re-attach the checkouts the restore moved (stands in for smd align)"
+sp2u_reattach_plan "$WORK/g3-moved.facts" "$WORK/branches-at-e.txt" > "$WORK/gt0-reattach.plan"
+sed 's/^/      /' "$WORK/gt0-reattach.plan"
+gx_ok 300 gt0-reattach "$(sp2u_reattach_script "$WORK/gt0-reattach.plan")" "G-ter: re-attach the restored checkouts"
+sed 's/^/      /' "$GX_OUT"
+sp2u_reattach_verdict "$WORK/gt0-reattach.plan" "$WORK/gt0-reattach.out" > "$WORK/gt0-reattach.verdict"
+sp2u_report "$WORK/gt0-reattach.verdict" "$WORK/gt0-reattach.out" "G-ter re-attach"
+
 # The rollback left the store at its migrated version, with the split
 # records and the frozen old record.  Rolling forward again renders the split
 # pipelines and finds nothing to migrate.
@@ -2526,7 +2769,8 @@ sed 's/^/      /' "$WORK/gt2-manifest.out"
 sp2u_step_facts "$WORK/gt2-manifest.out" > "$WORK/gt2-sink.facts"
 gx_ok 120 gt2-sinks "$UPL_SINKS" "G-ter: the switch files after the second update"
 sed 's/^/      /' "$GX_OUT"
-sp2u_gter_verdict "$WORK/gb0-sinks.out" "$WORK/gt2-sink.facts" "$WORK/gt2-sinks.out" > "$WORK/gt2-sink.verdict"
+sp2u_update_facts "$WORK/gt1-update-apply.out" "$WORK/g3-moved.facts" > "$WORK/gt1-update.facts"
+sp2u_gter_verdict "$WORK/gb0-sinks.out" "$WORK/gt2-sink.facts" "$WORK/gt2-sinks.out" "$WORK/gt1-update.facts" > "$WORK/gt2-sink.verdict"
 sp2u_report "$WORK/gt2-sink.verdict" "$WORK/gt2-manifest.out" "G-ter"
 gx_ok 120 gt3-split "$UPL_SPLIT" "G-ter: the key split after the second update"
 sed 's/^/      /' "$GX_OUT"
@@ -2549,11 +2793,11 @@ say "migrate --check: nothing to write after the second update ✓"
 GT_UV="$(gx_tok "$GX_OUT" USERVER)"
 [ "$GT_UV" = 3 ] || fatal "$GX_OUT" "PRAGMA user_version reads ${GT_UV:-?} after the second update, want 3"
 # The second manifest step found a version-3 store: migrate printed no
-# migration.  The features line comes back only when the second update moved
-# sigmond forward.  After `smd admin manifest restore` the checkouts sit
-# detached at the blessed SHAs, and `smd update` then reports "cannot compare
-# against upstream" and moves nothing (v3.78 rig, 2026-10-21), so the step
-# that follows is the restored release's own, which has no features probe.
+# migration.  The features line comes back when the second update moved
+# sigmond forward.  Step 0 re-attached the checkouts the restore detached, so
+# the update pulls sigmond whenever the restore moved it; the sink verdict
+# above already FAILs a restore-moved sigmond the update did not pull.  A
+# restore that moved nothing leaves nothing to pull (a calendar fact).
 mig3_facts "$WORK/gt2-manifest.out" > "$WORK/gt2-mig3.facts"
 [ "$(gx_tok "$WORK/gt2-mig3.facts" APPLIED3)" = 0 ] \
     || fatal "$WORK/gt2-manifest.out" "the second manifest step applied migration 3 again: the rollback lowered the store's version, or the step re-ran a finished migration"
@@ -2562,7 +2806,7 @@ if grep -q '\[pull\] sigmond$' "$WORK/gt1-update-apply.out"; then
         || fatal "$WORK/gt2-manifest.out" "the second update moved sigmond, but its manifest step printed no features line naming the updated hs-uploader's features"
     say "the second update moved sigmond, and its manifest step names the features ✓"
 else
-    say "WARNING: the second update did not move sigmond (detached at the restored SHA), so the features line is NOT EVALUATED here"
+    say "the second update did not move sigmond (the restore did not move it either), so the features line is not evaluated here"
 fi
 # Not asserted: no "copied send record" or "kept " line in this output.  The
 # restored daemon wrote the old shared key again, so the second step's fill

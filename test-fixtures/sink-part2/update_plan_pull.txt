@@ -1,0 +1,17 @@
+(dry run — re-run with --apply)
+
+  [pull] hs-uploader
+     1 commit(s) behind upstream — no install script: a library consumed editably through its consumers' [tool.uv.sources], so the pull is the whole update
+     verify: git rev-parse HEAD == origin/main
+
+  [pull] sigmond
+     1 commit(s) behind upstream
+     verify: git rev-parse HEAD == origin/main
+
+  [install] sigmond
+     run scripts/install.sh (uv sync honours [tool.uv.sources]); NOT deploy.sh, which re-installs the consumer alone and leaves sibling copies stale
+     verify: <venv>/bin/python -c "import ka9q,os;print(os.path.dirname(ka9q.__file__))" resolves to the shared checkout, not the venv
+
+  [restart] services
+     radiod first, then the recorders once it is stable — a recorder started against a restarting radiod picks up a bad anchor
+     verify: systemctl is-active for each unit; journal free of errors

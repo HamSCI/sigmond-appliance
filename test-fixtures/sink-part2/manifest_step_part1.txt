@@ -1,0 +1,2 @@
+uploader: hs-uploader features: pipelines.d send-log-v3 switch-files
+uploader: wrote /etc/hs-uploader/pipelines.toml (1 pipeline(s))
