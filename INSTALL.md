@@ -484,7 +484,7 @@ until the station knows where it stands:
    (The station pages keep the grid from the first install.) Then run
    `smd sink status`. If it says `site sink: upload`, someone raised the
    switch earlier; verify on wsprnet after about 15 minutes. If it gives any
-   reason but `new station: …`, or says `hold (legacy)`, someone set the
-   switch on purpose; ask your fleet admin. If it still gives the reason
+   reason but `new station: …`, or says `fill` or `hold (legacy)`, someone
+   set the switch on purpose; ask your fleet admin. If it still gives the reason
    `new station: …`, run `smd sink upload` (§9 explains the packing window),
    then verify on wsprnet after about 15 minutes.
