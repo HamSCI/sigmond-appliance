@@ -523,16 +523,74 @@ sp2_report(){
     [ "$n" = 0 ] || { sed 's/^/      /' "$2" | tail -20; exit 1; }
 }
 
+# sp2_pre_script: the carry-over's own rule for which clients it governs
+# (sigmond sink_carryover._read_station), read here in the guest, never by
+# calling sigmond: an enabled client whose deploy.toml, at a fixed path,
+# declares at least one [[hs_uploader.pipeline]].  The fixed paths are
+# _deploy_fixed's: topology.toml's [sigmond] client_dir, then
+# /opt/git/sigmond, each /<client>/deploy.toml.  One line per client:
+#   PRE|<client>|<switch file 0/1>|<enabled 0/1>|<governed 1/0/nofixed>
+#   ROWS|<client>|<sink.db rows stored under its producer name>
+# "nofixed": no deploy.toml at a fixed path (the carry-over may still find
+# one by asking the client).  Rows a disabled client left in sink.db can
+# make the carry-over govern it too.  Reads only.  SP2_ROOT exists for the
+# hermetic test.
+sp2_pre_script() {
+    cat <<'SP2EOF'
+python3 -B - "${SP2_ROOT:-}" <<'PY'
+import os, sqlite3, sys, tomllib, urllib.parse
+R = sys.argv[1]
+def load(path):
+    try:
+        with open(path, 'rb') as fh:
+            d = tomllib.load(fh)
+        return d if isinstance(d, dict) else {}
+    except (OSError, ValueError):
+        return None
+topo = load(R + '/etc/sigmond/topology.toml') or {}
+comp = topo.get('component') if isinstance(topo.get('component'), dict) else {}
+sig = topo.get('sigmond') if isinstance(topo.get('sigmond'), dict) else {}
+bases = [b for b in (sig.get('client_dir'), '/opt/git/sigmond') if isinstance(b, str) and b]
+rows = {}
+db = R + '/var/lib/sigmond/sink.db'
+if os.path.lexists(db):
+    try:
+        con = sqlite3.connect('file:' + urllib.parse.quote(db) + '?mode=ro', uri=True)
+        try:
+            cols = {r[1] for r in con.execute('PRAGMA table_info(pending_uploads)')}
+            if 'producer' in cols:
+                rows = dict(con.execute("SELECT producer, count(*) FROM pending_uploads "
+                                        "WHERE producer != '' GROUP BY producer"))
+        finally:
+            con.close()
+    except sqlite3.Error as exc:
+        print('PRENOTE|cannot read sink.db (%s); its rows were not counted' % type(exc).__name__)
+for c in ('psk-recorder', 'meteor-scatter', 'wspr-recorder', 'mag-recorder'):
+    f = 1 if os.path.lexists(R + '/etc/hs-uploader/sinks/%s.toml' % c) else 0
+    e = 1 if isinstance(comp.get(c), dict) and comp[c].get('enabled') is True else 0
+    g = 'nofixed'
+    for b in bases:
+        path = R + b.rstrip('/') + '/' + c + '/deploy.toml'
+        if os.path.isfile(path):
+            d = load(path) or {}
+            hu = d.get('hs_uploader') if isinstance(d.get('hs_uploader'), dict) else {}
+            decls = hu.get('pipeline')
+            g = '1' if isinstance(decls, list) and decls else '0'
+            break
+    print('PRE|%s|%d|%d|%s' % (c, f, e, g))
+    print('ROWS|%s|%d' % (c, rows.get(c, 0)))
+PY
+SP2EOF
+}
+
 # sp2_plant_script: the guest script that plants what `smd sink fill` must
 # lower (§13.1): a psk-recorder instance sending direct, a meteor-scatter
 # instance with no delivery mode and a callsign and grid, wspr-uploader
 # enabled, and mag-recorder's fallback uploader enabled.
 #
-# First, before it changes anything, it records for each of the four clients
-# whether its switch file exists and whether topology enables it
-# (PRE|<client>|<file 0/1>|<enabled 0/1>): the carry-over must have written a
-# file for every enabled client, and the plant must never hide one it did
-# not write.  The plant writes a switch file (at upload, through hs-uploader's
+# First, before it changes anything, it prints sp2_pre_script's facts: the
+# carry-over must have written a file for every client it governs, and the
+# plant must never hide one it did not write.  The plant writes a switch file (at upload, through hs-uploader's
 # own `sink set`) only for a client that topology leaves disabled, and says
 # so (NOTE|...).  A client this image does not install, or that topology
 # disables, gets no instance: the lever step cannot reach it.
@@ -547,6 +605,7 @@ sp2_report(){
 # Edits keep each file's owner and mode.  Planted instances go to
 # /run/sp2-rig/planted.
 sp2_plant_script() {
+    sp2_pre_script
     cat <<'SP2EOF'
 set -u
 export PYTHONDONTWRITEBYTECODE=1
@@ -564,10 +623,6 @@ except Exception:
     print(0)
 PY
 }
-for c in psk-recorder meteor-scatter wspr-recorder mag-recorder; do
-    if [ -e "$SINKS/$c.toml" ]; then e=1; else e=0; fi
-    printf 'PRE|%s|%s|%s\n' "$c" "$e" "$(topo_on "$c")"
-done
 # keep FILE: back FILE up once before its first edit, or note it as new.
 keep(){
     local f="$1" b
@@ -684,7 +739,8 @@ plant_instance meteor-scatter MS METEOR_SCATTER_DELIVERY_MODE ''
 if systemctl cat wspr-uploader.service >/dev/null 2>&1; then
     echo "WU:1"
     prev=$(systemctl show -p UnitFileState --value wspr-uploader.service 2>/dev/null)
-    printf 'UNITFILE|wspr-uploader.service|%s|\n' "$prev" >> "$D/undo"
+    if [ "$(systemctl is-active wspr-uploader.service 2>/dev/null)" = active ]; then ran=1; else ran=0; fi
+    printf 'UNITFILE|wspr-uploader.service|%s|%s|\n' "$prev" "$ran" >> "$D/undo"
     systemctl enable wspr-uploader.service >/dev/null 2>&1; echo "WU_ENABLE:$?"
     switch_for wspr-recorder WU "$(topo_on wspr-recorder)"
 else
@@ -705,12 +761,14 @@ SP2EOF
 
 # sp2_unplant_script: undo the plant from /run/sp2-rig/undo, after the
 # verdict's reads.  Edited files come back from their backups and created
-# ones go; each drop-in goes, then an invented instance stops, and an
-# instance that ran before the plant restarts on its own process (one that
-# did not run stops).  wspr-uploader is enabled again only if it stood
-# enabled before.  The lever values the fill wrote go with the restored
-# files.  Switch files the plant made stay (removing one would read off).
-# SP2_RUN and SP2_SYSTEMCTL exist for the hermetic test alone.
+# ones go; each stand-in drop-in file goes (its directory too, once empty);
+# then an invented instance stops, and an instance that ran before the plant
+# restarts on its own process (one that did not run stops).  wspr-uploader
+# is enabled again if it stood enabled, and started again if it ran.  The
+# lever values the fill wrote go with the restored files.  Switch files the
+# plant made stay (removing one would read off).  Every step's exit code is
+# read; a step that fails prints RESIDUE|<step>|<rc>, which the rig says as
+# plant residue.  SP2_RUN and SP2_SYSTEMCTL exist for the hermetic test.
 sp2_unplant_script() {
     cat <<'SP2EOF'
 set -u
@@ -718,26 +776,43 @@ D="${SP2_RUN:-/run/sp2-rig}"
 SC="${SP2_SYSTEMCTL:-systemctl}"
 [ -r "$D/undo" ] || { echo "UNDO:0"; echo "END:1"; exit 0; }
 echo "UNDO:1"
+step(){ # <what> <command...>: run it, and say RESIDUE when it fails
+    local what="$1" rc; shift
+    "$@" >/dev/null 2>&1; rc=$?
+    [ "$rc" = 0 ] || echo "RESIDUE|$what|$rc"
+    return "$rc"
+}
 reload=0
 while IFS='|' read -r kind a b c d _; do
     case "$kind" in
-        RESTORE) if cp -p -- "$b" "$a"; then echo "RESTORED|$a"; else echo "UNDOFAIL|$a"; fi ;;
-        REMOVE)  if rm -f -- "$a"; then echo "REMOVED|$a"; else echo "UNDOFAIL|$a"; fi ;;
-        DROPIN)  rm -rf -- "$b"; reload=1; echo "DROPIN-REMOVED|$a" ;;
+        RESTORE) step "restore $a" cp -p -- "$b" "$a" && echo "RESTORED|$a" ;;
+        REMOVE)  step "remove $a" rm -f -- "$a" && echo "REMOVED|$a" ;;
+        DROPIN)
+            reload=1
+            if step "remove $b/sp2-standin.conf" rm -f -- "$b/sp2-standin.conf"; then
+                echo "DROPIN-REMOVED|$a"
+                # the directory goes only when nothing else lives in it
+                [ -d "$b" ] && [ -z "$(ls -A "$b" 2>/dev/null)" ] && step "rmdir $b" rmdir -- "$b"
+            fi ;;
     esac
 done < "$D/undo"
-[ "$reload" = 1 ] && "$SC" daemon-reload >/dev/null 2>&1
+[ "$reload" = 1 ] && step "systemctl daemon-reload" "$SC" daemon-reload
 while IFS='|' read -r kind a b c d _; do
     case "$kind" in
         DROPIN)
             if [ "$d" = 1 ] || [ "$c" != 1 ]; then
-                "$SC" stop "$a" >/dev/null 2>&1; "$SC" reset-failed "$a" >/dev/null 2>&1
-                echo "STOPPED|$a"
+                step "systemctl stop $a" "$SC" stop "$a" && echo "STOPPED|$a"
+                "$SC" reset-failed "$a" >/dev/null 2>&1   # nothing to reset is no failure
             else
-                "$SC" restart "$a" >/dev/null 2>&1; echo "RESTARTED|$a|$?"
+                step "systemctl restart $a" "$SC" restart "$a" && echo "RESTARTED|$a"
             fi ;;
         UNITFILE)
-            if [ "$b" = enabled ]; then "$SC" enable "$a" >/dev/null 2>&1; echo "REENABLED|$a|$?"; fi ;;
+            if [ "$b" = enabled ]; then
+                step "systemctl enable $a" "$SC" enable "$a" && echo "REENABLED|$a"
+            fi
+            if [ "$c" = 1 ]; then
+                step "systemctl start $a" "$SC" start "$a" && echo "STARTED|$a"
+            fi ;;
     esac
 done < "$D/undo"
 echo "END:1"
@@ -920,10 +995,18 @@ for name, lines in (('plant', plant), ('before', before), ('smd sink fill', fill
     if tok(lines, 'END') != '1':
         print('FAIL: the %s probe gave no answer (guest exec failed; not a verdict)' % name)
         done()
-# The carry-over, read before the plant touched anything.
-for c, exists, enabled in recs(plant, 'PRE'):
-    if enabled == '1' and exists != '1':
+# The carry-over, read before the plant touched anything, by its own rule:
+# an enabled client whose deploy.toml at a fixed path declares pipelines.
+rows = {r[0]: num(r[1]) for r in recs(plant, 'ROWS')}
+for c, exists, enabled, governed in (r[:4] for r in recs(plant, 'PRE')):
+    if exists == '1':
+        continue
+    if enabled == '1' and governed == '1':
         print('FAIL: the carry-over wrote no switch file for an enabled client: %s' % c)
+    elif enabled == '1' and governed == 'nofixed':
+        print('UNCHECKED: whether the carry-over owed %s a switch file (enabled, but no deploy.toml at a fixed path)' % c)
+    elif enabled != '1' and (rows.get(c) or 0) > 0:
+        print('UNCHECKED: whether the carry-over owed %s a switch file (disabled, but %d sink.db row(s) carry its name)' % (c, rows[c]))
 if tok(fill, 'FILLRC') != '0':
     print('FAIL: smd sink fill --reason rig exited %s' % tok(fill, 'FILLRC'))
 if tok(fill, 'SITE_FILL') != '1':
@@ -954,6 +1037,8 @@ def switch_ok(tag, c):
     s = tok(plant, tag + '_SWITCH')
     if s == 'failed':
         print('FAIL: the rig could not write a switch file for %s (not a verdict on smd)' % c)
+    elif s == 'missing':
+        print('UNCHECKED: the %s lever (%s has no switch file, so smd sink fill does not reach it)' % (c, c))
     return s in ('pre', 'made')
 for c, (tag, chg, val) in want.items():
     if tok(plant, tag) != '1':
@@ -982,7 +1067,12 @@ for u, st in sorted(b2.items()):
     aa = a.get(u)
     if not named:
         if aa != st:
-            print('FAIL: %s moved during the fill (%s -> %s), and smd sink fill names no restart of it' % (u, st, aa))
+            if b1.get(u) != st:
+                # it moved between the two pre-fill reads too: a unit that
+                # restarts on its own says nothing about the fill
+                print('UNCHECKED: %s did not hold still before the fill (%s, then %s), and moved during it (-> %s)' % (u, b1.get(u), st, aa))
+            else:
+                print('FAIL: %s moved during the fill (%s -> %s), and smd sink fill names no restart of it' % (u, st, aa))
         continue
     one = b1.get(u)
     if not one or one != st or one[0] != 'active':
@@ -2061,10 +2151,12 @@ else
             sp2_gx 300 "$(sp2_unplant_script)" "$SP2D/unplant.raw"
             if sp2_unwrap "$SP2D/unplant.raw" "$SP2D/unplant.txt" && [ "$(sp2_tok "$SP2D/unplant.txt" END)" = 1 ]; then
                 sed 's/^/      unplant| /' "$SP2D/unplant.txt" | tail -24
-                say "the plant undone: edited files restored, invented instances stopped and removed, stand-in drop-ins gone;"
+                say "the plant undone: edited files restored, invented instances stopped and removed, stand-in drop-ins gone"
+                say "  (a PLANT RESIDUE line below names any undo step that failed);"
                 say "  switch files the plant made for disabled clients stay, at upload"
-                grep -q '^UNDOFAIL|' "$SP2D/unplant.txt" \
-                    && say "⚠ PLANT RESIDUE: some files could not be restored (UNDOFAIL lines above); later phases see them"
+                while IFS='|' read -r _ _sp2w _sp2rc; do
+                    say "⚠ PLANT RESIDUE: the undo step '$_sp2w' failed (exit $_sp2rc); later phases see what it left"
+                done < <(grep '^RESIDUE|' "$SP2D/unplant.txt")
             else
                 say "⚠ PLANT RESIDUE: the undo probe returned no answer; the planted instances, stand-in drop-ins"
                 say "  and edited env/config files (lever values in place) remain for the phases below"

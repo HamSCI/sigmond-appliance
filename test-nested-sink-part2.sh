@@ -22,7 +22,7 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 SRC="${1:-$HERE/test-nested-v3.sh}"
 FX="$HERE/test-fixtures/sink-part2"
 eval "$(sed -n '/^# >>> sink_part2/,/^# <<< sink_part2/p' "$SRC")"
-for fn in sp2_unwrap sp2_tok sp2_probe_script sp2_facts sp2_verdict sp2_report \
+for fn in sp2_unwrap sp2_tok sp2_probe_script sp2_facts sp2_verdict sp2_report sp2_pre_script \
           sp2_plant_script sp2_unplant_script sp2_state_script sp2_fill_facts sp2_lever_verdict; do
     type "$fn" >/dev/null 2>&1 || { echo "FAIL: $fn not found between the sink_part2 markers in $SRC"; exit 1; }
 done
@@ -267,10 +267,14 @@ check "a missing verdict file is FATAL" 1 "$(report vnone "$T/no-such-file")"
 P=psk-recorder@W1AW.service
 W=wspr-recorder@W1AW.service
 plant(){ cat <<X
-PRE|psk-recorder|${PSKPRE:-1}|1
-PRE|meteor-scatter|0|0
-PRE|wspr-recorder|${WSPRPRE:-1}|1
-PRE|mag-recorder|1|1
+PRE|psk-recorder|${PSKPRE:-1}|1|${PSKGOV:-1}
+ROWS|psk-recorder|0
+PRE|meteor-scatter|0|0|nofixed
+ROWS|meteor-scatter|${MSROWS:-0}
+PRE|wspr-recorder|${WSPRPRE:-1}|1|1
+ROWS|wspr-recorder|0
+PRE|mag-recorder|${MAGPRE:-1}|1|${MAGGOV:-1}
+ROWS|mag-recorder|0
 PSK:1
 PSK_TOPO:1
 PSK_SWITCH:${PSKSW:-pre}
@@ -402,6 +406,10 @@ check "two psk instances: no FAIL" 0 "$(nlines "$T/psk2.lv" '^FAIL')"
 { cat "$T/a.txt"; printf 'UNIT|A|wspr-recorder@K1ABC.service|active|3300\nSTARTS|wspr-recorder@K1ABC.service|1\n'; } > "$T/ak.txt"
 lv unnamed "$T/p.txt" "$T/bk.txt" "$T/fill.facts" "$T/ak.txt"
 has "an instance smd never named moved" "$T/unnamed.lv" "FAIL: wspr-recorder@K1ABC.service moved during the fill"
+{ cat "$T/b.txt"; printf 'UNIT|1|wspr-recorder@K1ABC.service|activating|1200\nUNIT|2|wspr-recorder@K1ABC.service|active|1250\n'; } > "$T/bloop.txt"
+lv crashloop "$T/p.txt" "$T/bloop.txt" "$T/fill.facts" "$T/ak.txt"
+has "a crash-looping unnamed instance that moves is said" "$T/crashloop.lv" "UNCHECKED: wspr-recorder@K1ABC.service did not hold still before the fill"
+check "not failed" 0 "$(nlines "$T/crashloop.lv" '^FAIL')"
 
 echo "the carry-over before the plant (I-2):"
 PSKPRE=0 PSKSW=missing plant > "$T/pmiss.txt"
@@ -410,6 +418,18 @@ has "an enabled client without a switch file" "$T/carrymiss.lv" "FAIL: the carry
 WSPRPRE=0 plant > "$T/pmissw.txt"
 lv carrymissw "$T/pmissw.txt" "$T/b.txt" "$T/fill.facts" "$T/a.txt"
 has "whatever the plant does after" "$T/carrymissw.lv" "FAIL: the carry-over wrote no switch file for an enabled client: wspr-recorder"
+PSKPRE=0 PSKGOV=0 PSKSW=missing plant > "$T/pngov.txt"
+lv notgoverned "$T/pngov.txt" "$T/b.txt" "$T/fill.facts" "$T/a.txt"
+hasnt "an enabled client declaring no pipeline is owed no file" "$T/notgoverned.lv" "the carry-over wrote no switch file"
+has "and its lever is said unreachable" "$T/notgoverned.lv" "UNCHECKED: the psk-recorder lever (psk-recorder has no switch file"
+MAGPRE=0 MAGGOV=nofixed plant > "$T/pninst.txt"
+lv notinstalled "$T/pninst.txt" "$T/b.txt" "$T/fill.facts" "$T/a.txt"
+check "enabled but not installed: no FAIL" 0 "$(nlines "$T/notinstalled.lv" '^FAIL')"
+has "said unchecked" "$T/notinstalled.lv" "UNCHECKED: whether the carry-over owed mag-recorder a switch file (enabled, but no deploy.toml at a fixed path)"
+MSROWS=3 plant > "$T/prows.txt"
+lv disabledrows "$T/prows.txt" "$T/b.txt" "$T/fill.facts" "$T/a.txt"
+has "a disabled client with sink.db rows is said" "$T/disabledrows.lv" "UNCHECKED: whether the carry-over owed meteor-scatter a switch file (disabled, but 3 sink.db row(s)"
+check "and fails nothing" 0 "$(nlines "$T/disabledrows.lv" '^FAIL')"
 PSKSW=failed plant > "$T/pfail.txt"
 lv swfail "$T/pfail.txt" "$T/b.txt" "$T/fill.facts" "$T/a.txt"
 has "a switch file the rig could not write" "$T/swfail.lv" "FAIL: the rig could not write a switch file for psk-recorder"
@@ -452,6 +472,8 @@ import fnmatch, os, sys
 args = sys.argv[1:]
 with open(os.environ['STUB_LOG'], 'a') as fh:
     fh.write(' '.join(args) + '\n')
+if args[:1] and args[0] == os.environ.get('STUB_FAIL'):
+    sys.exit(1)            # the verb the test makes fail
 table = {}
 for l in open(os.environ['STUB_TABLE']):
     l = l.rstrip('\n')
@@ -576,6 +598,53 @@ check "and its unit escaped once" 'psk-recorder@AC0G\x3dB4.service' "psk-recorde
 : > "$IR/etc/psk-recorder/env/AC0G=B4.env"
 check "the storage name preferred" "AC0G=B4" "$(SP2_ROOT="$IR" inst_for psk-recorder)"
 
+# ── sp2_pre_script, hermetic (N-2) ─────────────────────────────────────────
+echo "sp2_pre_script (the carry-over's own rule):"
+PR="$T/pre"; mkdir -p "$PR/etc/sigmond" "$PR/etc/hs-uploader/sinks" "$PR/var/lib/sigmond" \
+    "$PR/opt/git/sigmond/psk-recorder" "$PR/opt/git/sigmond/wspr-recorder" "$PR/srv/clients/mag-recorder"
+cat > "$PR/etc/sigmond/topology.toml" <<'X'
+[sigmond]
+client_dir = "/srv/clients"
+
+[component.psk-recorder]
+enabled = true
+
+[component.wspr-recorder]
+enabled = true
+
+[component.mag-recorder]
+enabled = true
+
+[component.meteor-scatter]
+enabled = false
+X
+printf '[[hs_uploader.pipeline]]\nname = "psk-pskreporter"\n' > "$PR/opt/git/sigmond/psk-recorder/deploy.toml"
+printf '[package]\nname = "wspr-recorder"\n' > "$PR/opt/git/sigmond/wspr-recorder/deploy.toml"
+printf '[[hs_uploader.pipeline]]\nname = "mag-psws"\n' > "$PR/srv/clients/mag-recorder/deploy.toml"
+: > "$PR/etc/hs-uploader/sinks/wspr-recorder.toml"
+python3 - "$PR/var/lib/sigmond/sink.db" <<'PY'
+import sqlite3, sys
+c = sqlite3.connect(sys.argv[1])
+c.execute("CREATE TABLE pending_uploads (id INTEGER PRIMARY KEY, producer TEXT)")
+c.executemany("INSERT INTO pending_uploads (producer) VALUES (?)", [("meteor-scatter",), ("meteor-scatter",), ("",)])
+c.commit()
+PY
+SP2_ROOT="$PR" bash <(sp2_pre_script) > "$T/pre.out" 2>&1
+check "enabled, governed at /opt/git/sigmond, no file" 1 "$(grep -cx 'PRE|psk-recorder|0|1|1' "$T/pre.out")"
+check "enabled, deploy.toml declares no pipeline"        1 "$(grep -cx 'PRE|wspr-recorder|1|1|0' "$T/pre.out")"
+check "governed through topology's client_dir"           1 "$(grep -cx 'PRE|mag-recorder|0|1|1' "$T/pre.out")"
+check "disabled, not installed"                          1 "$(grep -cx 'PRE|meteor-scatter|0|0|nofixed' "$T/pre.out")"
+check "its sink.db rows counted"                         1 "$(grep -cx 'ROWS|meteor-scatter|2' "$T/pre.out")"
+rm "$PR/srv/clients/mag-recorder/deploy.toml"
+SP2_ROOT="$PR" bash <(sp2_pre_script) > "$T/pre2.out" 2>&1
+check "no deploy.toml at a fixed path: nofixed"          1 "$(grep -cx 'PRE|mag-recorder|0|1|nofixed' "$T/pre2.out")"
+{ cat "$T/pre.out"; grep -v '^PRE|\|^ROWS|' "$T/p.txt"; } > "$T/ppre.txt"
+lv prechain "$T/ppre.txt" "$T/b.txt" "$T/fill.facts" "$T/a.txt"
+has "the chain fails psk-recorder"          "$T/prechain.lv" "FAIL: the carry-over wrote no switch file for an enabled client: psk-recorder"
+has "and mag-recorder"                      "$T/prechain.lv" "FAIL: the carry-over wrote no switch file for an enabled client: mag-recorder"
+hasnt "never wspr-recorder (no pipelines)"  "$T/prechain.lv" "client: wspr-recorder"
+has "meteor-scatter's rows said"            "$T/prechain.lv" "UNCHECKED: whether the carry-over owed meteor-scatter a switch file (disabled, but 2 sink.db row(s)"
+
 # ── sp2_unplant_script, hermetic (M-6) ─────────────────────────────────────
 echo "sp2_unplant_script:"
 UD="$T/ud"; mkdir -p "$UD/run/backup" "$UD/etc" "$UD/dropin.d"
@@ -586,7 +655,7 @@ RESTORE|$UD/etc/edited.env|$UD/run/backup/b1|
 REMOVE|$UD/etc/created.env|
 DROPIN|psk-recorder@W1AW.service|$UD/dropin.d|1|0|
 DROPIN|psk-recorder@N0CALL\\x3dT1.service|$UD/nodir.d|0|1|
-UNITFILE|wspr-uploader.service|enabled|
+UNITFILE|wspr-uploader.service|enabled|1|
 X
 : > "$STUB_LOG"
 SP2_RUN="$UD/run" SP2_SYSTEMCTL="$T/bin/systemctl" bash <(sp2_unplant_script) > "$T/unplant.out" 2>&1
@@ -597,14 +666,34 @@ check "systemd reloaded, once" 1 "$(grep -cx 'daemon-reload' "$STUB_LOG")"
 check "an instance that ran restarts on its own process" 1 "$(grep -cx 'restart psk-recorder@W1AW.service' "$STUB_LOG")"
 check "an invented instance stops" 1 "$(grep -cxF 'stop psk-recorder@N0CALL\x3dT1.service' "$STUB_LOG")"
 check "wspr-uploader enabled again, as it stood" 1 "$(grep -cx 'enable wspr-uploader.service' "$STUB_LOG")"
+check "and started again, since it ran" 1 "$(grep -cx 'start wspr-uploader.service' "$STUB_LOG")"
+check "no residue" 0 "$(grep -c '^RESIDUE|' "$T/unplant.out")"
 check "the undo finished" 1 "$(grep -cx 'END:1' "$T/unplant.out")"
+# U-1: only the stand-in file goes; a directory holding another drop-in stays.
+UD2="$T/ud2"; mkdir -p "$UD2/run" "$UD2/keep.d"
+: > "$UD2/keep.d/sp2-standin.conf"; printf '[Service]\nNice=5\n' > "$UD2/keep.d/operator.conf"
+cat > "$UD2/run/undo" <<X
+DROPIN|psk-recorder@W1AW.service|$UD2/keep.d|1|0|
+UNITFILE|wspr-uploader.service|disabled|0|
+X
+: > "$STUB_LOG"
+SP2_RUN="$UD2/run" SP2_SYSTEMCTL="$T/bin/systemctl" STUB_FAIL=restart bash <(sp2_unplant_script) > "$T/unplant2.out" 2>&1
+check "the stand-in file removed" 0 "$( [ -e "$UD2/keep.d/sp2-standin.conf" ] && echo 1 || echo 0)"
+check "another drop-in left in place" 1 "$( [ -e "$UD2/keep.d/operator.conf" ] && echo 1 || echo 0)"
+# U-2: a failed restart is residue, named.
+has "a failed restart is residue" "$T/unplant2.out" "RESIDUE|systemctl restart psk-recorder@W1AW.service|1"
+hasnt "and is not said done" "$T/unplant2.out" "RESTARTED|psk-recorder@W1AW.service"
+check "wspr-uploader that stood disabled and stopped: left alone" 0 "$(grep -cE '^(enable|start) wspr-uploader' "$STUB_LOG")"
+: > "$STUB_LOG"
+SP2_RUN="$UD2/run" SP2_SYSTEMCTL="$T/bin/systemctl" STUB_FAIL=daemon-reload bash <(sp2_unplant_script) > "$T/unplant3.out" 2>&1
+has "a failed reload is residue" "$T/unplant3.out" "RESIDUE|systemctl daemon-reload|1"
 check "no undo record, nothing done" "UNDO:0" "$(SP2_RUN="$T/nothing" SP2_SYSTEMCTL="$T/bin/systemctl" bash <(sp2_unplant_script) | head -1)"
 
 # ── the guest scripts: ASCII only, and bash parses them ────────────────────
 echo "the guest scripts:"
 printf '%s\n' "$SP2_FILL" > "$T/fill.sh"
 check "SP2_FILL holds only ASCII" 0 "$(LC_ALL=C grep -c '[^ -~	]' "$T/fill.sh")"
-for s in "sp2_probe_script" "sp2_plant_script" "sp2_unplant_script" "sp2_state_script before" "sp2_state_script after"; do
+for s in "sp2_probe_script" "sp2_pre_script" "sp2_plant_script" "sp2_unplant_script" "sp2_state_script before" "sp2_state_script after"; do
     $s > "$T/s.sh"
     check "$s holds only ASCII" 0 "$(LC_ALL=C grep -c '[^ -~	]' "$T/s.sh")"
     bash -n "$T/s.sh" 2>/dev/null; check "$s parses" 0 "$?"
