@@ -745,6 +745,11 @@ if systemctl cat wspr-uploader.service >/dev/null 2>&1; then
     prev=$(systemctl show -p UnitFileState --value wspr-uploader.service 2>/dev/null)
     if [ "$(systemctl is-active wspr-uploader.service 2>/dev/null)" = active ]; then ran=1; else ran=0; fi
     printf 'UNITFILE|wspr-uploader.service|%s|%s|\n' "$prev" "$ran" >> "$D/undo"
+    echo "WU_PREV:$prev"
+    # On a linked unit the fill removes the enablement link this enable adds
+    # and records it here, for the raise to put back (sigmond Task 28 F2).
+    # The record did not stand before the plant, so the undo removes it.
+    keep /etc/sigmond/sink-levers/wspr-uploader.links
     systemctl enable wspr-uploader.service >/dev/null 2>&1; echo "WU_ENABLE:$?"
     switch_for wspr-recorder WU "$(topo_on wspr-recorder)"
 else
@@ -772,7 +777,12 @@ SP2EOF
 # lever values the fill wrote go with the restored files.  Switch files the
 # plant made stay (removing one would read off).  Every step's exit code is
 # read; a step that fails prints RESIDUE|<step>|<rc>, which the rig says as
-# plant residue.  SP2_RUN and SP2_SYSTEMCTL exist for the hermetic test.
+# plant residue.  Last, each recorded unit's end state is read: one that
+# differs from what its undo record asks for (not-found included) prints
+# DIFFERS|<unit>|<LoadState>|<UnitFileState>|<ActiveState>|<wanted>, also
+# residue (Task 28 F2: a fill that unlinked wspr-uploader left the undo
+# nothing to run, and nothing said so).  SP2_RUN and SP2_SYSTEMCTL exist for
+# the hermetic test.
 sp2_unplant_script() {
     cat <<'SP2EOF'
 set -u
@@ -819,8 +829,47 @@ while IFS='|' read -r kind a b c d _; do
             fi ;;
     esac
 done < "$D/undo"
+# endstate UNIT: LoadState|UnitFileState|ActiveState, as systemd reads them now
+endstate(){
+    "$SC" show -p LoadState -p UnitFileState -p ActiveState "$1" 2>/dev/null \
+        | awk -F= '$1 == "LoadState" { l = $2 } $1 == "UnitFileState" { f = $2 }
+                   $1 == "ActiveState" { a = $2 } END { printf "%s|%s|%s", l, f, a }'
+}
+runs(){ case "$1" in active|activating|reloading) return 0 ;; esac; return 1; }
+while IFS='|' read -r kind a b c d _; do
+    case "$kind" in
+        DROPIN)
+            IFS='|' read -r l f s <<< "$(endstate "$a")"
+            if [ "$d" != 1 ] && [ "$c" = 1 ]; then want=running; else want=stopped; fi
+            if [ "$l" != loaded ] || { [ "$want" = running ] && ! runs "$s"; } \
+                    || { [ "$want" = stopped ] && runs "$s"; }; then
+                echo "DIFFERS|$a|$l|$f|$s|$want"
+            fi ;;
+        UNITFILE)
+            IFS='|' read -r l f s <<< "$(endstate "$a")"
+            if [ "$c" = 1 ]; then want=running; else want=stopped; fi
+            if [ "$l" != loaded ] || [ "$f" != "$b" ] \
+                    || { [ "$want" = running ] && ! runs "$s"; } \
+                    || { [ "$want" = stopped ] && runs "$s"; }; then
+                echo "DIFFERS|$a|$l|$f|$s|loaded $b, $want"
+            fi ;;
+    esac
+done < "$D/undo"
 echo "END:1"
 SP2EOF
+}
+
+# sp2_residue_lines <unplant reply>: one PLANT RESIDUE line per undo step
+# that failed and per unit whose end state differs from its undo record.
+sp2_residue_lines() {
+    local w rc u l f s want now
+    while IFS='|' read -r _ w rc; do
+        printf '%s\n' "⚠ PLANT RESIDUE: the undo step '$w' failed (exit $rc); later phases see what it left"
+    done < <(grep '^RESIDUE|' "$1")
+    while IFS='|' read -r _ u l f s want; do
+        if [ "$l" = loaded ]; then now="$l${f:+ $f}, $s"; else now="${l:-nothing}"; fi
+        printf '%s\n' "⚠ PLANT RESIDUE: $u reads $now after the undo; its undo record says $want; later phases see it so"
+    done < <(grep '^DIFFERS|' "$1")
 }
 
 # sp2_state_script <before|after>: start times (ActiveEnterTimestampMonotonic)
@@ -2165,11 +2214,12 @@ else
             if sp2_unwrap "$SP2D/unplant.raw" "$SP2D/unplant.txt" && [ "$(sp2_tok "$SP2D/unplant.txt" END)" = 1 ]; then
                 sed 's/^/      unplant| /' "$SP2D/unplant.txt" | tail -24
                 say "the plant undone: edited files restored, invented instances stopped and removed, stand-in drop-ins gone"
-                say "  (a PLANT RESIDUE line below names any undo step that failed);"
+                say "  (a PLANT RESIDUE line below names any undo step that failed, and any unit"
+                say "  whose end state differs from its undo record, a vanished unit included);"
                 say "  switch files the plant made for disabled clients stay, at upload"
-                while IFS='|' read -r _ _sp2w _sp2rc; do
-                    say "⚠ PLANT RESIDUE: the undo step '$_sp2w' failed (exit $_sp2rc); later phases see what it left"
-                done < <(grep '^RESIDUE|' "$SP2D/unplant.txt")
+                while IFS= read -r _sp2line; do
+                    say "$_sp2line"
+                done < <(sp2_residue_lines "$SP2D/unplant.txt")
             else
                 say "⚠ PLANT RESIDUE: the undo probe returned no answer; the planted instances, stand-in drop-ins"
                 say "  and edited env/config files (lever values in place) remain for the phases below"

@@ -23,7 +23,7 @@ SRC="${1:-$HERE/test-nested-v3.sh}"
 FX="$HERE/test-fixtures/sink-part2"
 eval "$(sed -n '/^# >>> sink_part2/,/^# <<< sink_part2/p' "$SRC")"
 for fn in sp2_unwrap sp2_tok sp2_probe_script sp2_facts sp2_verdict sp2_report sp2_pre_script \
-          sp2_plant_script sp2_unplant_script sp2_state_script sp2_fill_facts sp2_lever_verdict; do
+          sp2_plant_script sp2_unplant_script sp2_residue_lines sp2_state_script sp2_fill_facts sp2_lever_verdict; do
     type "$fn" >/dev/null 2>&1 || { echo "FAIL: $fn not found between the sink_part2 markers in $SRC"; exit 1; }
 done
 T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
@@ -485,7 +485,7 @@ for l in open(os.environ['STUB_TABLE']):
 def props(u):
     p = table.get(u) or {'ActiveState': 'inactive', 'ActiveEnterTimestampMonotonic': '0',
                          'sub': 'dead', 'UnitFileState': '', 'desc': ''}
-    return dict(p, Id=u)
+    return dict(p, Id=u, LoadState='loaded' if u in table else 'not-found')
 pats = [a for a in args[1:] if not a.startswith('-')]
 if args[:1] == ['show']:
     ps = [args[i + 1] for i, a in enumerate(args) if a == '-p']
@@ -717,6 +717,12 @@ DROPIN|psk-recorder@W1AW.service|$UD/dropin.d|1|0|
 DROPIN|psk-recorder@N0CALL\\x3dT1.service|$UD/nodir.d|0|1|
 UNITFILE|wspr-uploader.service|enabled|1|
 X
+# the end state each undo record asks for (the stand-in serves it)
+cat > "$STUB_TABLE" <<'X'
+psk-recorder@W1AW.service|active|3000|running||psk
+psk-recorder@N0CALL\x3dT1.service|inactive|0|dead||psk
+wspr-uploader.service|active|3100|running|enabled|wu
+X
 : > "$STUB_LOG"
 SP2_RUN="$UD/run" SP2_SYSTEMCTL="$T/bin/systemctl" bash <(sp2_unplant_script) > "$T/unplant.out" 2>&1
 check "an edited file restored" "ORIGINAL=1" "$(cat "$UD/etc/edited.env")"
@@ -728,7 +734,9 @@ check "an invented instance stops" 1 "$(grep -cxF 'stop psk-recorder@N0CALL\x3dT
 check "wspr-uploader enabled again, as it stood" 1 "$(grep -cx 'enable wspr-uploader.service' "$STUB_LOG")"
 check "and started again, since it ran" 1 "$(grep -cx 'start wspr-uploader.service' "$STUB_LOG")"
 check "no residue" 0 "$(grep -c '^RESIDUE|' "$T/unplant.out")"
+check "every unit as its undo record says" 0 "$(grep -c '^DIFFERS|' "$T/unplant.out")"
 check "the undo finished" 1 "$(grep -cx 'END:1' "$T/unplant.out")"
+check "and the rig says no residue" "" "$(sp2_residue_lines "$T/unplant.out")"
 # U-1: only the stand-in file goes; a directory holding another drop-in stays.
 UD2="$T/ud2"; mkdir -p "$UD2/run" "$UD2/keep.d"
 : > "$UD2/keep.d/sp2-standin.conf"; printf '[Service]\nNice=5\n' > "$UD2/keep.d/operator.conf"
@@ -747,6 +755,30 @@ check "wspr-uploader that stood disabled and stopped: left alone" 0 "$(grep -cE 
 : > "$STUB_LOG"
 SP2_RUN="$UD2/run" SP2_SYSTEMCTL="$T/bin/systemctl" STUB_FAIL=daemon-reload bash <(sp2_unplant_script) > "$T/unplant3.out" 2>&1
 has "a failed reload is residue" "$T/unplant3.out" "RESIDUE|systemctl daemon-reload|1"
+# Task 28 F2's trace: a linked wspr-uploader the fill's `disable` unlinked.
+# The undo has nothing to run for it, so only the end state shows the loss.
+UD4="$T/ud4"; mkdir -p "$UD4/run"
+printf 'UNITFILE|wspr-uploader.service|linked|0|\n' > "$UD4/run/undo"
+: > "$STUB_TABLE"
+SP2_RUN="$UD4/run" SP2_SYSTEMCTL="$T/bin/systemctl" bash <(sp2_unplant_script) > "$T/unplant4.out" 2>&1
+has "a vanished unit differs from its record" "$T/unplant4.out" "DIFFERS|wspr-uploader.service|not-found||inactive|loaded linked, stopped"
+sp2_residue_lines "$T/unplant4.out" > "$T/res4.txt"
+has "and the rig says it as plant residue" "$T/res4.txt" "PLANT RESIDUE: wspr-uploader.service reads not-found after the undo; its undo record says loaded linked, stopped"
+check "one residue line" 1 "$(grep -c 'PLANT RESIDUE' "$T/res4.txt")"
+echo 'wspr-uploader.service|inactive|0|dead|enabled|wu' > "$STUB_TABLE"
+SP2_RUN="$UD4/run" SP2_SYSTEMCTL="$T/bin/systemctl" bash <(sp2_unplant_script) > "$T/unplant5.out" 2>&1
+has "a unit left enabled differs" "$T/unplant5.out" "DIFFERS|wspr-uploader.service|loaded|enabled|inactive|loaded linked, stopped"
+echo 'wspr-uploader.service|inactive|0|dead|linked|wu' > "$STUB_TABLE"
+SP2_RUN="$UD4/run" SP2_SYSTEMCTL="$T/bin/systemctl" bash <(sp2_unplant_script) > "$T/unplant6.out" 2>&1
+check "linked and stopped again: no difference" 0 "$(grep -c '^DIFFERS|' "$T/unplant6.out")"
+printf 'DROPIN|psk-recorder@W1AW.service|%s|1|0|\n' "$UD4/none.d" > "$UD4/run/undo"
+echo 'psk-recorder@W1AW.service|inactive|0|dead||psk' > "$STUB_TABLE"
+SP2_RUN="$UD4/run" SP2_SYSTEMCTL="$T/bin/systemctl" bash <(sp2_unplant_script) > "$T/unplant7.out" 2>&1
+has "an instance that ran and stands stopped differs" "$T/unplant7.out" "DIFFERS|psk-recorder@W1AW.service|loaded||inactive|running"
+# The plant notes sigmond's record of removed enablement links (absent before
+# the plant), so the undo removes it with the rest.
+check "the plant keeps the lever's links record before it enables" 1 \
+    "$(sp2_plant_script | awk '/keep \/etc\/sigmond\/sink-levers\/wspr-uploader.links/ { k = NR } /systemctl enable wspr-uploader/ { e = NR } END { print (k && e && k < e) ? 1 : 0 }')"
 check "no undo record, nothing done" "UNDO:0" "$(SP2_RUN="$T/nothing" SP2_SYSTEMCTL="$T/bin/systemctl" bash <(sp2_unplant_script) | head -1)"
 
 # ── the guest scripts: ASCII only, and bash parses them ────────────────────
