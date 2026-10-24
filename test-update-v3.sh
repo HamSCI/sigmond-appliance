@@ -2740,12 +2740,21 @@ GB_RR="$(grep -m1 -o 'pipelines\.toml re-rendered by the restored sigmond.*' "$W
     || fatal "$WORK/g3-restore-apply.out" "restore --apply moved $MOVED component(s) but printed no re-render line: it left pipelines.toml as the newer sigmond rendered it (D11)"
 say "restore: $GB_RR ✓"
 
-# The restored sigmond predates the features probe, so its re-render prints no
-# features line: the manifest matches the restored release, not the newer one.
-# A restore that moved nothing leaves the updated sigmond in place, and its
-# step prints the line, so only a restore that moved a checkout can tell.
+# A restored sigmond that predates the features probe (v3.76 and older)
+# prints no features line, so the line's absence ties the re-render to the
+# restored release.  From v3.77 the restored sigmond prints the same line the
+# updated one does, and the line ties nothing; the manifest check below (gb1:
+# the restored smd reads pipelines.toml as up to date, with no split pipeline)
+# carries the tie alone.  A restore that moved nothing leaves the updated
+# sigmond in place, and its step prints the line, so only a restore that moved
+# a checkout can tell.
 mig3_facts "$WORK/g3-restore-apply.out" > "$WORK/gb0-mig3.facts"
-if grep -q '^MOVED|sigmond|' "$WORK/g3-moved.facts"; then
+gx_ok 60 gb0-probe 'echo "HASPROBE:$(grep -c "hs-uploader features: " /opt/git/sigmond/sigmond/lib/sigmond/commands/uploader.py)"' "G-bis: does the restored sigmond probe the features?"
+GB_HASPROBE="$(gx_tok "$GX_OUT" HASPROBE)"
+[ -n "$GB_HASPROBE" ] || fatal "$GX_OUT" "G-bis: the features-probe read returned no count (not a verdict)"
+if [ "$GB_HASPROBE" -gt 0 ] && grep -q '^MOVED|sigmond|' "$WORK/g3-moved.facts"; then
+    say "the restored sigmond probes the features itself (v3.77 or later), so its features line ties nothing; the manifest check below carries the tie"
+elif grep -q '^MOVED|sigmond|' "$WORK/g3-moved.facts"; then
     [ "$(gx_tok "$WORK/gb0-mig3.facts" F_LINE)" = 0 ] \
         || fatal "$WORK/g3-restore-apply.out" "the rollback's re-render printed a 'hs-uploader features:' line: the sigmond that re-rendered is not the restored release's (D11)"
     say "the re-render printed no features line, as the restored release's sigmond ✓"
