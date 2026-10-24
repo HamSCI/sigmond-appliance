@@ -57,7 +57,7 @@ for f in manifest_step_part2.txt sink_fill_part2.txt sink_status_site-off.json \
          sink_status_all-upload.json sink_status_marker-absent.json \
          pipelines_gate.toml sigmond_gate.toml pipelines_part1.toml \
          switch_view_all-upload.txt switch_view_site-off.txt lever_lines_more.txt \
-         lever_lines_linked.txt smd_err_line.txt SOURCE systemd_show_blocks.txt systemd_show_one.txt \
+         lever_lines_linked.txt lever_lines_linked_failed.txt smd_err_line.txt SOURCE systemd_show_blocks.txt systemd_show_one.txt \
          systemd_list_units.txt journal_cat.txt SYSTEMD_SOURCE; do
     [ -s "$FX/$f" ] || { echo "FAIL: fixture $FX/$f missing; run test-fixtures/sink-part2/capture.sh (and capture-systemd.sh)"; exit 1; }
 done
@@ -471,13 +471,38 @@ through "$T/fillwl.out" "$T/fillwl.txt"; sp2_fill_facts "$T/fillwl.txt" > "$T/fi
 check "its enablement link removal counted" 1 "$(sp2_tok "$T/fillwl.facts" WU_UNWANTED)"
 check "its stop counted"                    1 "$(sp2_tok "$T/fillwl.facts" WU_STOPPED)"
 check "and no disable"                      0 "$(sp2_tok "$T/fillwl.facts" WU_DISABLED)"
+check "the removed link named"               1 "$(nlines "$T/fillwl.facts" '^UNWANTED|/etc/systemd/system/multi-user.target.wants/wspr-uploader.service$')"
 plant "$(printf 'WU:1\nWU_PREV:linked\nWU_ENABLE:0\nWU_SWITCH:pre')" "$(printf 'MAG:1\nMAG_SET:0\nMAG_SWITCH:pre')" > "$T/pwl.txt"
-after 3000 1 100 500 server-raw 'linked|inactive' > "$T/a7.txt"
+# withrec <after file>: the after reply plus sigmond's links record naming
+# the removed link, as the state probe prints it
+WLREC='WULINK|/etc/systemd/system/multi-user.target.wants/wspr-uploader.service|/opt/git/sigmond/wspr-recorder/systemd/wspr-uploader.service'
+withrec(){ { grep -v '^END:' "$1"; echo 'WULINKREC:1'; echo "$WLREC"; echo 'END:1'; } > "$1.r" && mv "$1.r" "$1"; }
+after 3000 1 100 500 server-raw 'linked|inactive' > "$T/a7.txt"; withrec "$T/a7.txt"
 check "the plant prints WU_PREV, the state before its enable" 1 \
     "$(sp2_plant_script | awk '/echo "WU_PREV:\$prev"/ { k = NR } /systemctl enable wspr-uploader/ { e = NR } END { print (k && e && k < e) ? 1 : 0 }')"
 lv wl "$T/pwl.txt" "$T/b.txt" "$T/fillwl.facts" "$T/a7.txt"
 check "linked, link removed, stopped: no FAIL" 0 "$(nlines "$T/wl.lv" '^FAIL')"
-hasnt "no wspr-uploader finding" "$T/wl.lv" "wspr-uploader"
+has "the raise's restore named a bench obligation" "$T/wl.lv" "UNCHECKED: restore of wspr-uploader enablement links at the raise to upload (bench obligation)"
+check "the only wspr-uploader finding" 1 "$(nlines "$T/wl.lv" 'wspr-uploader')"
+# Review I-2: the record the raise restores from must stand and name the link.
+after 3000 1 100 500 server-raw 'linked|inactive' > "$T/a7n.txt"
+{ grep -v '^END:' "$T/a7n.txt"; echo 'WULINKREC:0'; echo 'END:1'; } > "$T/a7n.r"; mv "$T/a7n.r" "$T/a7n.txt"
+lv wlnorec "$T/pwl.txt" "$T/b.txt" "$T/fillwl.facts" "$T/a7n.txt"
+has "no links record fails" "$T/wlnorec.lv" "FAIL: smd sink fill wrote no record of the enablement links it removed"
+after 3000 1 100 500 server-raw 'linked|inactive' > "$T/a7o.txt"
+{ grep -v '^END:' "$T/a7o.txt"; echo 'WULINKREC:1'; echo 'WULINK|/etc/systemd/system/timers.target.wants/wspr-uploader.service|/x'; echo 'END:1'; } > "$T/a7o.r"; mv "$T/a7o.r" "$T/a7o.txt"
+lv wlother "$T/pwl.txt" "$T/b.txt" "$T/fillwl.facts" "$T/a7o.txt"
+has "a record without the removed link fails" "$T/wlother.lv" "FAIL: the links record does not name /etc/systemd/system/multi-user.target.wants/wspr-uploader.service"
+after 3000 1 100 500 server-raw 'linked|inactive' > "$T/a7x.txt"
+lv wlnoprobe "$T/pwl.txt" "$T/b.txt" "$T/fillwl.facts" "$T/a7x.txt"
+has "an after probe that never read the record fails" "$T/wlnoprobe.lv" "FAIL: smd sink fill wrote no record of the enablement links it removed"
+# Review M-2: a stop beside a failed link removal is no lever done.
+grep mag-recorder "$FX/lever_lines_more.txt" | cat - "$FX/lever_lines_linked_failed.txt" > "$T/wf-lines.txt"
+fillout "$T/fillwf.out" 0 "$FX/sink_fill_part2.txt" "$T/wf-lines.txt"
+through "$T/fillwf.out" "$T/fillwf.txt"; sp2_fill_facts "$T/fillwf.txt" > "$T/fillwf.facts"
+check "a stop with its enablement standing is not counted" 0 "$(sp2_tok "$T/fillwf.facts" WU_STOPPED)"
+lv wlfailed "$T/pwl.txt" "$T/b.txt" "$T/fillwf.facts" "$T/a7.txt"
+has "and the verdict fails it" "$T/wlfailed.lv" "FAIL: smd sink fill did not remove the linked wspr-uploader.service's enablement link and stop it"
 lv wlold "$T/pwl.txt" "$T/b.txt" "$T/fillwm.facts" "$T/a.txt"
 has "the v3.79 fill (disable on a linked unit) fails" "$T/wlold.lv" "FAIL: smd sink fill disabled the linked wspr-uploader.service"
 after 3000 1 100 500 server-raw '|inactive' > "$T/a8.txt"
@@ -637,12 +662,18 @@ statex(){ # <phase> <out>
 }
 statex before "$T/sxb.txt"
 has "its UNIT line keeps the escape" "$T/sxb.txt" "UNIT|2|$PX|active|1000"
+check "no links record: said" 1 "$(grep -cx 'WULINKREC:0' "$T/sxb.txt")"
 hasnt "and never reads it as =" "$T/sxb.txt" "N0CALL=T1.service"
 XT0M=$(sp2_tok "$T/sxb.txt" T0MONO)
 sed -i "s/^\(psk-recorder@[^|]*\)|active|1000|/\1|active|$((XT0M + 1000))|/" "$STUB_TABLE"
 journal_for "$PX" 1
 printf 'PSK_DELIVERY_PIPELINES=server-raw\n' > "$EX"
+mkdir -p "$SX/root/etc/sigmond/sink-levers"
+printf '/etc/systemd/system/multi-user.target.wants/wspr-uploader.service\t/opt/x/wspr-uploader.service\n' \
+    > "$SX/root/etc/sigmond/sink-levers/wspr-uploader.links"
 statex after "$T/sxa.txt"
+check "the links record read" 1 "$(grep -cx 'WULINKREC:1' "$T/sxa.txt")"
+has "and each line in it" "$T/sxa.txt" "WULINK|/etc/systemd/system/multi-user.target.wants/wspr-uploader.service|/opt/x/wspr-uploader.service"
 has "after the fill, the same name" "$T/sxa.txt" "UNIT|A|$PX|active|$((XT0M + 1000))"
 has "its journal start counted" "$T/sxa.txt" "STARTS|$PX|1"
 P="$PX" plant > "$T/px.txt"
@@ -802,6 +833,11 @@ printf 'DROPIN|psk-recorder@W1AW.service|%s|1|0|\n' "$UD4/none.d" > "$UD4/run/un
 echo 'psk-recorder@W1AW.service|inactive|0|dead||psk' > "$STUB_TABLE"
 SP2_RUN="$UD4/run" SP2_SYSTEMCTL="$T/bin/systemctl" bash <(sp2_unplant_script) > "$T/unplant7.out" 2>&1
 has "an instance that ran and stands stopped differs" "$T/unplant7.out" "DIFFERS|psk-recorder@W1AW.service|loaded||inactive|running"
+# Review M-3: an invented instance, due to stand stopped, whose unit vanished.
+printf 'DROPIN|psk-recorder@N0CALL\\x3dT1.service|%s|0|1|\n' "$UD4/none.d" > "$UD4/run/undo"
+: > "$STUB_TABLE"
+SP2_RUN="$UD4/run" SP2_SYSTEMCTL="$T/bin/systemctl" bash <(sp2_unplant_script) > "$T/unplant8.out" 2>&1
+has "a planted instance gone differs" "$T/unplant8.out" 'DIFFERS|psk-recorder@N0CALL\x3dT1.service|not-found||inactive|stopped'
 # The plant notes sigmond's record of removed enablement links (absent before
 # the plant), so the undo removes it with the rest.
 check "the plant keeps the lever's links record before it enables" 1 \

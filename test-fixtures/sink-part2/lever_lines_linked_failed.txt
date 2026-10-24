@@ -1,0 +1,2 @@
+  [31m✗[0m  lever: stopped wspr-uploader.service (its unit file is a link; its enablement stays, see the FAILED line)
+  [31m✗[0m  lever: FAILED wspr-uploader.service: cannot write the record of its enablement links ([Errno 21] Is a directory); removed none, left enabled

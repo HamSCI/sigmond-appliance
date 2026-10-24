@@ -28,6 +28,8 @@
 #   lever_lines_linked.txt       the same for a linked wspr-uploader the
 #                                plant enabled: its enablement link removed,
 #                                the unit stopped (sigmond Task 28 F2)
+#   lever_lines_linked_failed.txt  the same when the links record could
+#                                not be written: stopped, enablement standing
 #   smd_err_line.txt             one manifest-step error line, as
 #                                commands/uploader.py _err prints it
 #   restore_part2/               a restore to a sigmond below part 2 and the
@@ -147,6 +149,17 @@ buf = io.StringIO()
 with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
     cfg._say_lines(lv.lines())
 (out / "lever_lines_linked.txt").write_text(buf.getvalue())
+# The same unit when its links record could not be written: nothing
+# removed, the unit stopped, its enablement standing (review M-2).
+lv = sink_levers.LeverResult(
+    stopped=["wspr-uploader.service"], unwant_tried=True,
+    failures=[("wspr-uploader.service", "cannot write the record of its "
+               "enablement links ([Errno 21] Is a directory); removed none, "
+               "left enabled")])
+buf = io.StringIO()
+with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
+    cfg._say_lines(lv.lines())
+(out / "lever_lines_linked_failed.txt").write_text(buf.getvalue())
 
 # One error line as the manifest step prints it to stderr (_err: every such
 # line reads "smd: uploader: "), here the failed features probe's.

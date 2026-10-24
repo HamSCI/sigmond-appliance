@@ -931,6 +931,17 @@ facts(){
     "$SC" show -p UnitFileState -p ActiveState wspr-uploader.service 2>/dev/null \
         | awk -F= '$1 == "UnitFileState" { f = $2 } $1 == "ActiveState" { a = $2 }
                    END { printf "WUSTATE|%s|%s\n", f, a }'
+    # sigmond's record of the enablement links its lever removed from a
+    # linked wspr-uploader, which the raise to upload restores (Task 28)
+    WL="$R/etc/sigmond/sink-levers/wspr-uploader.links"
+    if [ -r "$WL" ]; then
+        echo "WULINKREC:1"
+        while IFS=$'\t' read -r l t; do
+            [ -n "$l" ] && printf 'WULINK|%s|%s\n' "$l" "$t"
+        done < "$WL"
+    else
+        echo "WULINKREC:0"
+    fi
     python3 -B - "$R/etc/mag-recorder/mag-recorder-config.toml" <<'PY'
 import sys, tomllib
 try:
@@ -981,7 +992,7 @@ sp2_fill_facts() {
 import re, sys
 lines = open(sys.argv[1], encoding='utf-8', errors='replace').read().splitlines()
 chg = {'psk-recorder': 0, 'meteor-scatter': 0, 'wspr-recorder': 0, 'mag': 0}
-restarts, toks, changed = {}, [], []
+restarts, toks, changed, unwanted = {}, [], [], []
 n = dict(wu=0, wu_unwanted=0, wu_stopped=0, failed=0, armed=0, site=0, hsu=0)
 for ln in lines:
     s = ln.strip()
@@ -1002,7 +1013,12 @@ for ln in lines:
     n['wu'] += 'lever: stopped and disabled wspr-uploader.service' in ln
     # a linked unit (sigmond Task 28 F2): its enablement link goes, it stops
     n['wu_unwanted'] += bool(re.search(r'lever: removed \S+\.(wants|requires)/wspr-uploader\.service', ln))
-    n['wu_stopped'] += bool(re.search(r'lever: stopped wspr-uploader\.service( |$)', ln))
+    # only the stop that follows a removal: a stop beside a failed removal
+    # leaves the unit enabled (review M-2)
+    n['wu_stopped'] += bool(re.search(r'lever: stopped wspr-uploader\.service \(its unit file is a link: its enablement links removed', ln))
+    m = re.search(r'lever: removed (\S+\.(?:wants|requires)/wspr-uploader\.service)', ln)
+    if m:
+        unwanted.append(m.group(1))
     n['failed'] += bool(re.search(r'lever( step)?: FAILED|stale-writer restarts: FAILED', ln))
     n['armed'] += 'lever: still armed' in ln
     n['site'] += 'site sink switch set to fill' in ln
@@ -1018,6 +1034,7 @@ out = toks + ['CHG_PSK:%d' % chg['psk-recorder'], 'CHG_MS:%d' % chg['meteor-scat
               'RESTARTED:%d' % len(restarts)]
 out += ['CHANGED|%s' % p for p in changed]
 out += ['RESTART|%s|%d' % (u, k) for u, k in sorted(restarts.items())]
+out += ['UNWANTED|%s' % p for p in unwanted]
 print('\n'.join(out))
 PY
 }
@@ -1165,6 +1182,17 @@ elif switch_ok('WU', 'wspr-recorder') and tok(plant, 'WU_PREV') == 'linked':
         print("FAIL: smd sink fill did not remove the linked wspr-uploader.service's enablement link and stop it")
     if not wu or wu[0][0] != 'linked' or wu[0][1] not in ('inactive', 'failed'):
         print('FAIL: wspr-uploader.service reads %s after the fill; a linked unit keeps its link and loses only its enablement' % (wu[0] if wu else 'nothing'))
+    # The raise restores from sigmond's record; it must stand and name
+    # each link the fill removed.  No phase here raises wspr-recorder back.
+    recorded = {r[0] for r in recs(after, 'WULINK') if r}
+    if tok(after, 'WULINKREC') != '1':
+        print('FAIL: smd sink fill wrote no record of the enablement links it removed '
+              '(/etc/sigmond/sink-levers/wspr-uploader.links); the raise to upload could not restore them')
+    else:
+        for r in recs(fill, 'UNWANTED'):
+            if r and r[0] not in recorded:
+                print('FAIL: the links record does not name %s, which smd sink fill removed' % r[0])
+    print('UNCHECKED: restore of wspr-uploader enablement links at the raise to upload (bench obligation)')
 elif switch_ok('WU', 'wspr-recorder'):
     if tok(fill, 'WU_DISABLED') != '1':
         print('FAIL: smd sink fill did not stop and disable wspr-uploader.service')
