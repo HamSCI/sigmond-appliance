@@ -852,10 +852,12 @@ rec(){ # TAG
     local u
     while IFS= read -r u; do
         [ -n "$u" ] || continue
+        # The name reaches awk through ENVIRON: `awk -v` would read the escape
+        # in psk-recorder@N0CALL\x3dT1.service as "=" (Task 28 F1).
         "$SC" show -p ActiveState -p ActiveEnterTimestampMonotonic "$u" 2>/dev/null \
-            | awk -F= -v t="$1" -v u="$u" '
+            | SP2U="$u" awk -F= -v t="$1" '
                 $1 == "ActiveState" { st = $2 } $1 == "ActiveEnterTimestampMonotonic" { mo = $2 }
-                END { printf "UNIT|%s|%s|%s|%s\n", t, u, st, mo }'
+                END { printf "UNIT|%s|%s|%s|%s\n", t, ENVIRON["SP2U"], st, mo }'
     done < "$D/units"
     "$SC" show -p Id -p ActiveState -p ActiveEnterTimestampMonotonic 'radiod@*' radiod.service 2>/dev/null \
         | awk -F= -v t="$1" '

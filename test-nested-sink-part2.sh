@@ -533,7 +533,8 @@ check "the captured journal holds a start episode" 1 "$(printf '%s\n' "$EPISODE"
 journal_for(){
     local f="$STUB_JOURNAL/$(printf '%s' "$1" | md5sum | cut -c1-16)" i
     : > "$f"
-    for i in $(seq 1 "$2"); do printf '%s\n' "$EPISODE" | sed "s/$JRN_U/$1/g" >> "$f"; done
+    # the name goes into sed's replacement escaped: \x3d stays four bytes
+    for i in $(seq 1 "$2"); do printf '%s\n' "$EPISODE" | sed "s/$JRN_U/$(printf '%s' "$1" | sed 's/[\\&/]/\\&/g')/g" >> "$f"; done
 }
 
 echo "sp2_state_script on a stood-in guest:"
@@ -587,6 +588,44 @@ journal_for "$P" 2
 state after "$T/sa2.txt"
 lv hermetic2 "$T/pwm.txt" "$T/sb.txt" "$T/fillwm.facts" "$T/sa2.txt"
 has "two journal starts fail" "$T/hermetic2.lv" "FAIL: $P started 2 times since the fill began"
+
+# Task 28 F1: the plant's own instance, N0CALL=T1, runs as a unit whose name
+# holds systemd's escape \x3d.  Every line must carry that name byte for byte,
+# as smd's restart lines and the journal do; `awk -v` once turned it into "=".
+echo "sp2_state_script on a unit name holding \\x3d:"
+PX='psk-recorder@N0CALL\x3dT1.service'
+SX="$T/sx"; mkdir -p "$SX/run" "$SX/root/etc/psk-recorder/env"
+EX="$SX/root/etc/psk-recorder/env/N0CALL=T1.env"
+printf 'PSK_DELIVERY_PIPELINES=direct\n' > "$EX"
+printf 'PLANTED|psk-recorder|%s|%s\n' "$PX" "$EX" > "$SX/run/planted"
+cat > "$STUB_TABLE" <<X
+$PX|active|1000|running||psk
+hs-uploader.service|active|500|running||hsu
+radiod@rx888.service|active|100|running||radiod
+X
+statex(){ # <phase> <out>
+    SP2_RUN="$SX/run" SP2_ROOT="$SX/root" SP2_SYSTEMCTL="$T/bin/systemctl" SP2_JOURNALCTL="$T/bin/journalctl" SP2_SLEEP=0 \
+        bash <(sp2_state_script "$1") > "$T/x$1.out" 2>&1
+    through "$T/x$1.out" "$2"
+}
+statex before "$T/sxb.txt"
+has "its UNIT line keeps the escape" "$T/sxb.txt" "UNIT|2|$PX|active|1000"
+hasnt "and never reads it as =" "$T/sxb.txt" "N0CALL=T1.service"
+XT0M=$(sp2_tok "$T/sxb.txt" T0MONO)
+sed -i "s/^\(psk-recorder@[^|]*\)|active|1000|/\1|active|$((XT0M + 1000))|/" "$STUB_TABLE"
+journal_for "$PX" 1
+printf 'PSK_DELIVERY_PIPELINES=server-raw\n' > "$EX"
+statex after "$T/sxa.txt"
+has "after the fill, the same name" "$T/sxa.txt" "UNIT|A|$PX|active|$((XT0M + 1000))"
+has "its journal start counted" "$T/sxa.txt" "STARTS|$PX|1"
+P="$PX" plant > "$T/px.txt"
+sed "s/^RESTART|psk-recorder@W1AW.service|/RESTART|psk-recorder@N0CALL\\\\x3dT1.service|/; /^RESTART|wspr-recorder@W1AW/d" "$T/fill.facts" > "$T/fillx.facts"
+has "the fill names the escaped unit" "$T/fillx.facts" "RESTART|$PX|1"
+lv escaped "$T/px.txt" "$T/sxb.txt" "$T/fillx.facts" "$T/sxa.txt"
+hasnt "the verdict sees its restart, not a move" "$T/escaped.lv" "moved during the fill"
+hasnt "nor an unwatched restart" "$T/escaped.lv" "UNCHECKED: the restart of $PX"
+check "no FAIL" 0 "$(nlines "$T/escaped.lv" '^FAIL')"
+check "finished" 1 "$(done_ "$T/escaped.lv")"
 
 # ── inst_for: an escaped env file name is not escaped twice (M-5) ──────────
 echo "inst_for:"
