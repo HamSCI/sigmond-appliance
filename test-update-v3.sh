@@ -587,15 +587,32 @@ doctor_kinds(){
 # at all means summarise()'s header shape has moved, and the pair check would
 # degrade to a kind check without a word.
 pairs_orphans(){ awk '$1 == "?" { print $2 }' "$1" | sort -u; }
-# new_pairs <pre-pairs> <post-pairs>: pairs present in post and absent from
-# pre, minus every pair whose KIND the operator sanctioned in
-# U2_ALLOW_NEW_KINDS.  The sanction stays per kind, as it always was: a kind
-# ruled acceptable-new is acceptable on any component.
+# new_pairs <pre-pairs> <post-pairs> [kind...]: pairs present in post and
+# absent from pre, minus every pair whose KIND the operator sanctioned in
+# U2_ALLOW_NEW_KINDS or the caller names as expected.  The sanction stays per
+# kind, as it always was: a kind ruled acceptable-new is acceptable on any
+# component.
 new_pairs(){
-    LC_ALL=C comm -13 "$1" "$2" \
-        | awk -v allow="${U2_ALLOW_NEW_KINDS:-}" '
+    local pre="$1" post="$2"; shift 2
+    LC_ALL=C comm -13 "$pre" "$post" \
+        | awk -v allow="${U2_ALLOW_NEW_KINDS:-} $*" '
             BEGIN { n = split(allow, a, /[, ]+/); for (i = 1; i <= n; i++) if (a[i] != "") ok[a[i]] = 1 }
             !($2 in ok)'
+}
+# PAIR_WARN_KINDS: the kinds whose NEW pairs WARN rather than stop the run,
+# in PHASE E and in PHASE G alike.  Ruling, mjh 2026-10-24: "ownership" WARNs.
+# Ownership is a known, open fleet-wide program; `smd doctor --fix` repairs
+# it; it blocks no rollback; and the bare-kind check every blessed release
+# passed never failed on it.  Every other kind stays FATAL per pair.  This
+# list stands apart from U2_ALLOW_NEW_KINDS: a kind named there drops out
+# silently, while a kind named here still prints each pair.
+PAIR_WARN_KINDS="ownership"
+# pair_verdict <pre-pairs> <post-pairs> [kind...]: new_pairs, each line
+# prefixed "WARN|" when its kind stands in PAIR_WARN_KINDS, else "FATAL|".
+pair_verdict(){
+    new_pairs "$@" | awk -v warn="$PAIR_WARN_KINDS" '
+        BEGIN { n = split(warn, a, /[, ]+/); for (i = 1; i <= n; i++) if (a[i] != "") w[a[i]] = 1 }
+        { print (($2 in w) ? "WARN" : "FATAL") "|" $1 " " $2 }'
 }
 # <<< doctor_pairs
 # assert_kinds_parsed <label> <doctor-rc> <kinds-file> <doctor-output>: a
@@ -1160,13 +1177,17 @@ assert_kinds_parsed "post-update doctor" "$DOCTOR_POST_RC" "$WORK/kinds-post.txt
 doctor_pairs "$WORK/doctor-post.txt" "$WORK/pairs-post.txt"
 assert_pairs_parsed "post-update doctor" "$WORK/pairs-post.txt" "$WORK/doctor-post.txt"
 say "post-update smd doctor exit $DOCTOR_POST_RC; finding kinds: $(tr '\n' ' ' < "$WORK/kinds-post.txt")"
-NEWP="$(new_pairs "$WORK/pairs-pre.txt" "$WORK/pairs-post.txt" | sed 's/ /:/' | tr '\n' ' ')"
+pair_verdict "$WORK/pairs-pre.txt" "$WORK/pairs-post.txt" > "$WORK/pairs-new.txt"
+sed -n 's/^WARN|\([^ ]*\) \(.*\)$/WARN: the update left a new \2 finding on \1 (ownership ruling, mjh 2026-10-24: smd doctor --fix repairs it; not a failure)/p' "$WORK/pairs-new.txt" \
+    | while IFS= read -r l; do say "$l"; done
+NEWW="$(grep -c '^WARN|' "$WORK/pairs-new.txt")"
+NEWP="$(sed -n 's/^FATAL|\([^ ]*\) /\1:/p' "$WORK/pairs-new.txt" | tr '\n' ' ')"
 if [ -n "$NEWP" ]; then
     NEWK="$(printf '%s' "$NEWP" | tr ' ' '\n' | sed -n 's/^.*://p' | sort -u | paste -sd, -)"
     excerpt "$WORK/doctor-post.txt" 40
     fatal - "smd doctor gained NEW findings across the update, as component:kind: $NEWP(pre: $(sed 's/ /:/' "$WORK/pairs-pre.txt" | tr '\n' ' ')). If one of these kinds is a ruled-on, sanctioned consequence of an install.sh run — uv.lock churn is the known case — re-run with U2_ALLOW_NEW_KINDS=$NEWK (the sanction covers that kind on every component)"
 fi
-say "no NEW doctor findings, by component and kind, across the update ✓"
+say "no NEW doctor findings, by component and kind, across the update$([ "$NEWW" -gt 0 ] && echo " beyond $NEWW ownership WARN(s)") ✓"
 
 # ── the awareness payload survives an update, not just an install ───────
 # The station this rig updates has the heartbeat switched on.  The sibling's
@@ -2628,6 +2649,8 @@ DOCTOR_G_RC="$GX_RC"
 cp "$GX_OUT" "$WORK/doctor-post-restore.txt"
 doctor_kinds "$WORK/doctor-post-restore.txt" "$WORK/kinds-restored.txt"
 assert_kinds_parsed "post-restore doctor" "$DOCTOR_G_RC" "$WORK/kinds-restored.txt" "$WORK/doctor-post-restore.txt"
+doctor_pairs "$WORK/doctor-post-restore.txt" "$WORK/pairs-restored.txt"
+assert_pairs_parsed "post-restore doctor" "$WORK/pairs-restored.txt" "$WORK/doctor-post-restore.txt"
 say "post-restore smd doctor exit $DOCTOR_G_RC; finding kinds: $(tr '\n' ' ' < "$WORK/kinds-restored.txt")"
 # `detached` is EXPECTED here when restore actually moved something:
 # `git checkout --detach <sha>` is how it pins a checkout (bin/smd ~:4025),
@@ -2675,17 +2698,23 @@ fi
 RB_ALLOW="$(printf '%s\n' "${U2_ALLOW_ROLLBACK_KINDS:-}" | tr ', ' '\n' | sed '/^$/d' | sort -u)"
 RB_BAD="$(printf '%s\n' "$RB_ALLOW" | grep -xE 'radiod-dropins-missing|qga-dropin-stale' | tr '\n' ' ')"
 [ -z "$RB_BAD" ] || fatal - "U2_ALLOW_ROLLBACK_KINDS names $RB_BAD: unit drift after a rollback cannot be sanctioned"
-NEWG="$(new_kinds "$WORK/kinds-pre.txt" "$WORK/kinds-restored.txt" detached $RB_ALLOW | tr '\n' ' ')"
+# Per component, as in PHASE E, and under the same ownership ruling
+# (PAIR_WARN_KINDS).
+pair_verdict "$WORK/pairs-pre.txt" "$WORK/pairs-restored.txt" detached $RB_ALLOW > "$WORK/pairs-new-restored.txt"
+sed -n 's/^WARN|\([^ ]*\) \(.*\)$/WARN: the rollback left a new \2 finding on \1 (ownership ruling, mjh 2026-10-24: smd doctor --fix repairs it; not a failure)/p' "$WORK/pairs-new-restored.txt" \
+    | while IFS= read -r l; do say "$l"; done
+NEWGW="$(grep -c '^WARN|' "$WORK/pairs-new-restored.txt")"
+NEWG="$(sed -n 's/^FATAL|\([^ ]*\) /\1:/p' "$WORK/pairs-new-restored.txt" | tr '\n' ' ')"
 if [ -n "$NEWG" ]; then
     excerpt "$WORK/doctor-post-restore.txt" 40
-    fatal - "smd doctor gained NEW finding kinds across the rollback (beyond the expected 'detached'): $NEWG (pre-E baseline: $(tr '\n' ' ' < "$WORK/kinds-pre.txt")). If one of these is a ruled-on, sanctioned consequence of the older release's own install.sh, re-run with U2_ALLOW_ROLLBACK_KINDS=$(printf '%s' "$NEWG" | tr ' ' ',' | sed 's/,$//')"
+    fatal - "smd doctor gained NEW findings across the rollback (beyond the expected 'detached'), as component:kind: $NEWG(pre-E baseline: $(sed 's/ /:/' "$WORK/pairs-pre.txt" | tr '\n' ' ')). If one of these kinds is a ruled-on, sanctioned consequence of the older release's own install.sh, re-run with U2_ALLOW_ROLLBACK_KINDS=$(printf '%s' "$NEWG" | tr ' ' '\n' | sed -n 's/^.*://p' | sort -u | paste -sd, -) (the sanction covers that kind on every component)"
 fi
-RB_USED="$(comm -13 "$WORK/kinds-pre.txt" "$WORK/kinds-restored.txt" | grep -xF -f <(printf '%s\n' "$RB_ALLOW" | sed '/^$/d') 2>/dev/null | tr '\n' ' ')"
+RB_USED="$(LC_ALL=C comm -13 "$WORK/pairs-pre.txt" "$WORK/pairs-restored.txt" | awk -v ks="$(printf '%s ' $RB_ALLOW)" 'BEGIN { n = split(ks, a, / +/); for (i = 1; i <= n; i++) if (a[i] != "") k[a[i]] = 1 } ($2 in k) { printf "%s:%s ", $1, $2 }')"
 if [ -n "$RB_USED" ]; then
     excerpt "$WORK/doctor-post-restore.txt" 40
     say "⚠ SANCTIONED FOR THE ROLLBACK ALONE: $RB_USED— new after the rollback, allowed by U2_ALLOW_ROLLBACK_KINDS"
 fi
-say "no NEW doctor finding kinds across the rollback beyond the expected 'detached'${RB_USED:+ and the sanctioned $RB_USED}✓"
+say "no NEW doctor findings, by component and kind, across the rollback beyond the expected 'detached'${RB_USED:+ and the sanctioned $RB_USED}$([ "$NEWGW" -gt 0 ] && echo " and $NEWGW ownership WARN(s)") ✓"
 
 say "PHASE G PASS — rolled back to the blessed baseline and proved it strictly"
 

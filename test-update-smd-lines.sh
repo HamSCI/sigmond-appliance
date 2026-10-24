@@ -179,7 +179,7 @@ fi
 eval "$(sed -n '/^# >>> sha_equal/,/^# <<< sha_equal/p' "$SRC")"
 eval "$(sed -n '/^# >>> doctor_pairs/,/^# <<< doctor_pairs/p' "$SRC")"
 eval "$(sed -n '/^# >>> manifest_drift/,/^# <<< manifest_drift/p' "$SRC")"
-for f in sha_equal sha_of doctor_pairs doctor_kinds new_pairs pairs_orphans manifest_drift; do
+for f in sha_equal sha_of doctor_pairs doctor_kinds new_pairs pairs_orphans pair_verdict manifest_drift; do
     type "$f" >/dev/null 2>&1 || { echo "  FAIL $f not found between its markers in $SRC"; fail=1; }
 done
 V="$HERE/test-fixtures/update-v380"
@@ -218,6 +218,42 @@ if type new_pairs >/dev/null 2>&1; then
     printf '  hf-timestd:\n    dirty: 1 modified file(s): x\n  superdarn-sounder:\n    dirty: 1 modified file(s): uv.lock\n' > "$T/doctor-moved.txt"
     doctor_pairs "$T/doctor-moved.txt" "$T/pairs-moved"
     same "a moved header shape leaves orphan kinds" "dirty" "$(pairs_orphans "$T/pairs-moved" | paste -sd'|')"
+fi
+
+# ── pair_verdict: the ownership ruling (mjh 2026-10-24) ─────────────────
+# A new ownership pair WARNs; every other new pair stays FATAL.  The v3.80
+# update's own doctor holds both in one file.
+if type pair_verdict >/dev/null 2>&1; then
+    same "the ownership ruling names one kind" "ownership" "${PAIR_WARN_KINDS:-}"
+    same "v3.80 update: ownership WARNs, the new dirt is FATAL" \
+        "WARN|hamsci-dsp ownership|FATAL|superdarn-sounder dirty|WARN|superdarn-sounder ownership" \
+        "$(U2_ALLOW_NEW_KINDS='' pair_verdict "$T/pairs-pre" "$T/pairs-post" | paste -sd'|')"
+    same "U2_ALLOW_NEW_KINDS still removes a kind outright" \
+        "FATAL|superdarn-sounder dirty" \
+        "$(U2_ALLOW_NEW_KINDS=ownership pair_verdict "$T/pairs-pre" "$T/pairs-post" | paste -sd'|')"
+    # PHASE G.  No rig run has yet reached g6-doctor with this check, so no
+    # post-restore capture exists.  g6 runs the same `smd doctor` through the
+    # same channel as e2 and e7, so this fixture takes v3.80's pre-update
+    # doctor and makes three edits: hf-tec gains "detached" (expected after a
+    # restore), codar-sounder gains "ownership" (WARN), and superdarn-sounder
+    # gains "dirty" while hf-timestd already holds one (FATAL; bare kinds
+    # miss it).
+    {
+        cat "$V/doctor-pre.txt"
+        printf 'codar-sounder:\n    ownership: 3 path(s) not owned by sigmond (e.g. uv.lock) [--fix repairs this]\n'
+        printf 'hf-tec:\n    detached: HEAD is detached and no .pin records which commit it should be at\n'
+        printf 'superdarn-sounder:\n    dirty: 1 modified file(s): uv.lock (diff against origin before discarding)\n'
+    } > "$T/doctor-restored.txt"
+    doctor_pairs "$T/doctor-restored.txt" "$T/pairs-restored"
+    doctor_kinds "$T/doctor-restored.txt" "$T/kinds-restored"
+    same "control: bare kinds see nothing new across this rollback" "" \
+        "$(comm -13 "$T/kinds-pre" "$T/kinds-restored" | grep -vx detached | paste -sd'|')"
+    same "rollback: detached exempt, ownership WARNs, the new dirt is FATAL" \
+        "WARN|codar-sounder ownership|FATAL|superdarn-sounder dirty" \
+        "$(U2_ALLOW_NEW_KINDS='' pair_verdict "$T/pairs-pre" "$T/pairs-restored" detached | paste -sd'|')"
+    same "rollback: U2_ALLOW_ROLLBACK_KINDS=dirty sanctions the dirt" \
+        "WARN|codar-sounder ownership" \
+        "$(U2_ALLOW_NEW_KINDS='' pair_verdict "$T/pairs-pre" "$T/pairs-restored" detached dirty | paste -sd'|')"
 fi
 
 if type manifest_drift >/dev/null 2>&1; then
@@ -259,10 +295,15 @@ done
   && [ "$(lnum 'manifest_drift "$WORK/live-pre.rows"')" -lt "$(lnum 'gx_ok 3600 e3-update-apply')" ] \
     && echo "  ok   the manifest drift check runs after install, before the update" \
     || { echo "  FAIL the manifest drift check is missing or out of order"; fail=1; }
-[ -n "$(lnum 'new_pairs "$WORK/pairs-pre.txt" "$WORK/pairs-post.txt"')" ] \
-  && [ "$(lnum 'doctor_pairs "$WORK/doctor-post.txt"')" -lt "$(lnum 'new_pairs "$WORK/pairs-pre.txt" "$WORK/pairs-post.txt"')" ] \
+[ -n "$(lnum 'pair_verdict "$WORK/pairs-pre.txt" "$WORK/pairs-post.txt"')" ] \
+  && [ "$(lnum 'doctor_pairs "$WORK/doctor-post.txt"')" -lt "$(lnum 'pair_verdict "$WORK/pairs-pre.txt" "$WORK/pairs-post.txt"')" ] \
     && echo "  ok   PHASE E compares (component, kind) pairs" \
     || { echo "  FAIL PHASE E does not compare (component, kind) pairs"; fail=1; }
+[ -n "$(lnum 'pair_verdict "$WORK/pairs-pre.txt" "$WORK/pairs-restored.txt" detached')" ] \
+  && [ "$(lnum 'doctor_pairs "$WORK/doctor-post-restore.txt"')" -lt "$(lnum 'pair_verdict "$WORK/pairs-pre.txt" "$WORK/pairs-restored.txt" detached')" ] \
+  && [ -z "$(lnum 'new_kinds "$WORK/kinds-pre.txt" "$WORK/kinds-restored.txt"')" ] \
+    && echo "  ok   PHASE G compares (component, kind) pairs" \
+    || { echo "  FAIL PHASE G does not compare (component, kind) pairs"; fail=1; }
 
 [ "$fail" = 0 ] && echo "PASS: held_names, restore_moved, PANEL_DEFECT_RE, doctor_pairs, manifest_drift" || echo "FAILED: held_names, restore_moved, PANEL_DEFECT_RE, doctor_pairs, manifest_drift"
 exit "$fail"
