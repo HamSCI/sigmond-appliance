@@ -1,0 +1,20 @@
+ft8_lib:
+    untracked: 1 untracked path(s): .pin (harmless in place; `git add -A` would commit them)
+hamsci-dsp:
+    ownership: 7 path(s) not owned by sigmond (e.g. src/hamsci_dsp.egg-info) [--fix repairs this]
+hf-timestd:
+    dirty: 1 modified file(s): scripts/lib-chrony-refclocks.sh (diff against origin before discarding)
+ka9q-python:
+    ownership: 1 path(s) not owned by sigmond (e.g. ka9q_python.egg-info/PKG-INFO) [--fix repairs this]
+ka9q-radio:
+    detached: HEAD is detached and no .pin records which commit it should be at
+ka9q-web:
+    untracked: 1 untracked path(s): config_paths.h (harmless in place; `git add -A` would commit them)
+sigmond:
+    ownership: 1 path(s) not owned by sigmond (e.g. lib/sigmond.egg-info/PKG-INFO) [--fix repairs this]
+superdarn-sounder:
+    ownership: 9 path(s) not owned by sigmond (e.g. uv.lock) [--fix repairs this]
+    dirty: 1 modified file(s): uv.lock (diff against origin before discarding)
+wsjtx:
+    untracked: 2 untracked path(s): MODIFICATIONS.sigmond.txt, build-sigmond/ (harmless in place; `git add -A` would commit them)
+     4 finding(s) repairable with: smd doctor --fix

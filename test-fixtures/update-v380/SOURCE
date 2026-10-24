@@ -1,0 +1,13 @@
+The v3.80 update rig run of 2026-10-24 (16:18-16:56Z), copied unchanged from
+the rig's update-evidence/ directory.  The run booted the v3.78 image
+(sigmond-appliance-v3.78-20261021-release) and rolled it to sigmond 8134d4b.
+
+  doctor-pre.txt   smd doctor before the update (PHASE E, e2-doctor-pre)
+  doctor-post.txt  smd doctor after it (e7-doctor-post)
+  live-pre.rows    smd version's components block before the update
+  manifest.rows    the v3.78 blessed manifest's components block
+
+The defects these files hold: hf-timestd sat "dirty" before the update, the
+update dirtied superdarn-sounder, and the bare-kind check passed it.  Bring-up
+had already pulled hf-timestd, psk-recorder and wspr-recorder past the
+manifest, and nothing said so.

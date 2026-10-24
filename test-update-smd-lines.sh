@@ -9,6 +9,11 @@
 # out of restore's success line, which decides what PHASE G may assert.
 # PANEL_DEFECT_RE tells the rig whether the base image's console panel sends
 # the agent request that Proxmox truncates.
+# doctor_pairs reads smd doctor's findings as (component, kind), so PHASE E
+# sees a second component catch a kind a first one already had.
+# manifest_drift names each installed checkout that bring-up left off the
+# blessed manifest.  Those two read the v3.80 update run's own captures, in
+# test-fixtures/update-v380/.
 #
 # Why: the first version passed every check I ran by hand and failed on the rig
 # (2026-10-08 23:03Z, "components still behind their upstream: onion(1)").  It
@@ -165,5 +170,99 @@ if [ -r "$FB" ]; then
     else echo "  note this checkout's panel carries no signature (the rig will leave it running)"; fi
 fi
 
-[ "$fail" = 0 ] && echo "PASS: held_names, restore_moved, PANEL_DEFECT_RE" || echo "FAILED: held_names, restore_moved, PANEL_DEFECT_RE"
+# ── doctor_pairs, new_pairs, manifest_drift ─────────────────────────────
+# Fed the v3.80 update run's own captures (test-fixtures/update-v380/SOURCE).
+# That run had hf-timestd "dirty" before the update; the update dirtied
+# superdarn-sounder, and PHASE E, comparing bare kinds, passed it.  The same
+# run's bring-up had pulled three checkouts past the blessed manifest, and
+# nothing said so.
+eval "$(sed -n '/^# >>> sha_equal/,/^# <<< sha_equal/p' "$SRC")"
+eval "$(sed -n '/^# >>> doctor_pairs/,/^# <<< doctor_pairs/p' "$SRC")"
+eval "$(sed -n '/^# >>> manifest_drift/,/^# <<< manifest_drift/p' "$SRC")"
+for f in sha_equal sha_of doctor_pairs doctor_kinds new_pairs pairs_orphans manifest_drift; do
+    type "$f" >/dev/null 2>&1 || { echo "  FAIL $f not found between its markers in $SRC"; fail=1; }
+done
+V="$HERE/test-fixtures/update-v380"
+same() {  # same <name> <want> <got>
+    if [ "$2" = "$3" ]; then echo "  ok   $1"
+    else echo "  FAIL $1: got '$3', want '$2'"; fail=1; fi
+}
+if type new_pairs >/dev/null 2>&1; then
+    doctor_pairs "$V/doctor-pre.txt"  "$T/pairs-pre"
+    doctor_pairs "$V/doctor-post.txt" "$T/pairs-post"
+    same "pre-update pairs, one per finding line" 17 "$(awk 'END{print NR}' "$T/pairs-pre")"
+    same "hf-timestd was dirty before the update" 1 "$(grep -cx 'hf-timestd dirty' "$T/pairs-pre")"
+    same "the footer line is no finding" 0 "$(grep -c 'finding' "$T/pairs-pre")"
+    same "the update's new pairs, nothing sanctioned" \
+        "hamsci-dsp ownership|superdarn-sounder dirty|superdarn-sounder ownership" \
+        "$(U2_ALLOW_NEW_KINDS='' new_pairs "$T/pairs-pre" "$T/pairs-post" | paste -sd'|')"
+    same "U2_ALLOW_NEW_KINDS=ownership leaves the new dirt" \
+        "superdarn-sounder dirty" \
+        "$(U2_ALLOW_NEW_KINDS=ownership new_pairs "$T/pairs-pre" "$T/pairs-post" | paste -sd'|')"
+    same "U2_ALLOW_NEW_KINDS='ownership, dirty' sanctions both" "" \
+        "$(U2_ALLOW_NEW_KINDS='ownership, dirty' new_pairs "$T/pairs-pre" "$T/pairs-post" | paste -sd'|')"
+    same "a pair that persists is not new" "" \
+        "$(U2_ALLOW_NEW_KINDS='' new_pairs "$T/pairs-post" "$T/pairs-post" | paste -sd'|')"
+    # doctor_kinds now reads its kinds off the same parser; PHASE G still
+    # compares kinds, so its output must not have moved.
+    doctor_kinds "$V/doctor-pre.txt" "$T/kinds-pre"
+    doctor_kinds "$V/doctor-post.txt" "$T/kinds-post"
+    same "doctor_kinds keeps its kinds" "detached dirty ownership untracked" "$(paste -sd' ' "$T/kinds-pre")"
+    # Positive control: the bare-kind comparison must find NOTHING new in this
+    # fixture, or it does not reproduce the defect.
+    same "control: bare kinds see nothing new across the v3.80 update" "" "$(comm -13 "$T/kinds-pre" "$T/kinds-post" | paste -sd'|')"
+    same "no orphan kinds in a real doctor report" "" "$(pairs_orphans "$T/pairs-pre" | paste -sd'|')"
+    # A doctor whose component headers moved (here: indented) leaves every
+    # kind without a component, and a pair check would degrade to a kind
+    # check without a word.  pairs_orphans names those kinds.
+    printf '  hf-timestd:\n    dirty: 1 modified file(s): x\n  superdarn-sounder:\n    dirty: 1 modified file(s): uv.lock\n' > "$T/doctor-moved.txt"
+    doctor_pairs "$T/doctor-moved.txt" "$T/pairs-moved"
+    same "a moved header shape leaves orphan kinds" "dirty" "$(pairs_orphans "$T/pairs-moved" | paste -sd'|')"
+fi
+
+if type manifest_drift >/dev/null 2>&1; then
+    manifest_drift "$V/live-pre.rows" "$V/manifest.rows" > "$T/drift"
+    same "the v3.80 drift, one WARN per component" \
+"WARN: installed hf-timestd e5009c2 differs from the manifest 55c9670 (bring-up pulls; ruling: fix deferred to v3.82)|WARN: installed psk-recorder 84e81aa differs from the manifest 0bb62df (bring-up pulls; ruling: fix deferred to v3.82)|WARN: installed wspr-recorder b523524 differs from the manifest d171d24 (bring-up pulls; ruling: fix deferred to v3.82)|WARN: 3 of 25 installed component(s) differ from the blessed manifest (bring-up pulls; ruling: fix deferred to v3.82)" \
+        "$(paste -sd'|' "$T/drift")"
+    manifest_drift "$V/manifest.rows" "$V/manifest.rows" > "$T/drift-none"
+    same "a manifest against itself drifts nowhere" \
+        "installed components match the blessed manifest (25 compared) ✓" "$(paste -sd'|' "$T/drift-none")"
+    # The same commit, abbreviated to different lengths, is no drift; a row
+    # on one side only is no sha difference.
+    printf 'sigmond f362461\nwsjtx ccdfaf3c1\nonly-live 1234567\n' > "$T/live-abbr.rows"
+    printf 'sigmond f362461a\nwsjtx ccdfaf3\nonly-manifest 89abcde\n' > "$T/man-abbr.rows"
+    same "abbreviation length is no drift" \
+        "installed components match the blessed manifest (2 compared) ✓" \
+        "$(manifest_drift "$T/live-abbr.rows" "$T/man-abbr.rows" | paste -sd'|')"
+fi
+
+# Every name these blocks define must first be used after its block ends: the
+# rig runs top to bottom, while this test evals each block up front and so can
+# never see a use that comes too early.
+lnum(){ grep -nF -- "$1" "$SRC" | head -1 | cut -d: -f1; }
+for blk in sha_equal doctor_pairs manifest_drift; do
+    BS="$(lnum "# >>> $blk")"; BE="$(lnum "# <<< $blk")"
+    [ -n "$BS" ] && [ -n "$BE" ] || { echo "  FAIL no $blk markers in $SRC"; fail=1; continue; }
+    early=""
+    for nm in $(sed -n "${BS},${BE}p" "$SRC" | sed -nE 's/^([A-Za-z_][A-Za-z0-9_]*)\(\) *\{.*/\1/p' | sort -u); do
+        first="$(awk -v s="$BS" -v e="$BE" -v n="$nm" '(NR < s || NR > e) && $0 !~ /^[[:space:]]*#/ && $0 ~ ("(^|[^A-Za-z0-9_])" n "([^A-Za-z0-9_=]|$)") {print NR; exit}' "$SRC")"
+        [ -n "$first" ] && [ "$first" -lt "$BS" ] && early="$early $nm@$first"
+    done
+    [ -z "$early" ] && echo "  ok   nothing the $blk block defines is used before it" \
+        || { echo "  FAIL used before the $blk block defines it:$early"; fail=1; }
+done
+# PHASE E's order: the drift check reads live-pre.rows after smd version
+# writes it and before the update applies; the pair check reads doctor-post.
+[ -n "$(lnum 'manifest_drift "$WORK/live-pre.rows"')" ] \
+  && [ "$(lnum 'components_rows "$GX_OUT" "$WORK/live-pre.rows"')" -lt "$(lnum 'manifest_drift "$WORK/live-pre.rows"')" ] \
+  && [ "$(lnum 'manifest_drift "$WORK/live-pre.rows"')" -lt "$(lnum 'gx_ok 3600 e3-update-apply')" ] \
+    && echo "  ok   the manifest drift check runs after install, before the update" \
+    || { echo "  FAIL the manifest drift check is missing or out of order"; fail=1; }
+[ -n "$(lnum 'new_pairs "$WORK/pairs-pre.txt" "$WORK/pairs-post.txt"')" ] \
+  && [ "$(lnum 'doctor_pairs "$WORK/doctor-post.txt"')" -lt "$(lnum 'new_pairs "$WORK/pairs-pre.txt" "$WORK/pairs-post.txt"')" ] \
+    && echo "  ok   PHASE E compares (component, kind) pairs" \
+    || { echo "  FAIL PHASE E does not compare (component, kind) pairs"; fail=1; }
+
+[ "$fail" = 0 ] && echo "PASS: held_names, restore_moved, PANEL_DEFECT_RE, doctor_pairs, manifest_drift" || echo "FAILED: held_names, restore_moved, PANEL_DEFECT_RE, doctor_pairs, manifest_drift"
 exit "$fail"

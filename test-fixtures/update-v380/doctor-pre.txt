@@ -1,0 +1,32 @@
+callhash:
+    ownership: 7 path(s) not owned by sigmond (e.g. src/callhash.egg-info) [--fix repairs this]
+ft8_lib:
+    untracked: 1 untracked path(s): .pin (harmless in place; `git add -A` would commit them)
+gmag-webui:
+    ownership: 5718 path(s) not owned by sigmond (e.g. .env) [--fix repairs this]
+gpsdo-monitor:
+    ownership: 8 path(s) not owned by sigmond (e.g. src/gpsdo_monitor.egg-info) [--fix repairs this]
+hamsci-physics:
+    ownership: 8 path(s) not owned by sigmond (e.g. src/hamsci_physics.egg-info) [--fix repairs this]
+hf-timestd:
+    ownership: 9 path(s) not owned by sigmond (e.g. src/hf_timestd.egg-info) [--fix repairs this]
+    dirty: 1 modified file(s): scripts/lib-chrony-refclocks.sh (diff against origin before discarding)
+ka9q-python:
+    ownership: 1 path(s) not owned by sigmond (e.g. ka9q_python.egg-info/PKG-INFO) [--fix repairs this]
+ka9q-radio:
+    ownership: 197 path(s) not owned by sigmond (e.g. src/main.o) [--fix repairs this]
+    detached: HEAD is detached and no .pin records which commit it should be at
+ka9q-web:
+    ownership: 8 path(s) not owned by sigmond (e.g. ka9q-web) [--fix repairs this]
+    untracked: 1 untracked path(s): config_paths.h (harmless in place; `git add -A` would commit them)
+meteor-scatter:
+    ownership: 8 path(s) not owned by sigmond (e.g. src/meteor_scatter.egg-info) [--fix repairs this]
+psk-recorder:
+    ownership: 8 path(s) not owned by sigmond (e.g. src/psk_recorder.egg-info) [--fix repairs this]
+sigmond:
+    ownership: 1 path(s) not owned by sigmond (e.g. lib/sigmond.egg-info/PKG-INFO) [--fix repairs this]
+station-web:
+    ownership: 8 path(s) not owned by sigmond (e.g. src/station_web.egg-info) [--fix repairs this]
+wsjtx:
+    untracked: 2 untracked path(s): MODIFICATIONS.sigmond.txt, build-sigmond/ (harmless in place; `git add -A` would commit them)
+     12 finding(s) repairable with: smd doctor --fix

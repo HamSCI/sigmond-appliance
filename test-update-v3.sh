@@ -174,8 +174,10 @@ env overrides (for a scratch rig; never needed for a normal run):
   NESTED_PM_RE         hostname regex the nested PM must match before ANY
                        mutation is attempted
   U2_ALLOW_NEW_KINDS   comma-separated doctor finding kinds an operator has
-                       ALREADY ruled on and sanctioned as acceptable-new
-                       (default: empty — a new kind is a failure)
+                       ALREADY ruled on and sanctioned as acceptable-new,
+                       on any component (PHASE E compares (component,
+                       kind) pairs; the sanction stays per kind)
+                       (default: empty — a new pair is a failure)
   U2_ALLOW_ROLLBACK_KINDS
                        the same, for the rollback check in Phase G ALONE;
                        the forward roll stays strict.  For a finding the
@@ -470,6 +472,7 @@ MIN_ROWS=10        # sigmond.doctor.MIN_COMPONENT_ROWS — a thinner block is
                    # what a truncated capture looks like, not a small host
 rows_count(){ awk 'END{print NR}' "$1"; }
 
+# >>> sha_equal (test-update-smd-lines.sh loads exactly this block)
 # sha_equal <a> <b>: mirrors sigmond.doctor._sha_equal (MIN_SHA_PREFIX=4).
 # String equality would be WRONG here: `git rev-parse --short` picks its
 # abbreviation length per repository, and a real manifest already carries 7,
@@ -482,6 +485,7 @@ sha_equal(){
     [ "${a:0:$n}" = "${b:0:$n}" ]
 }
 sha_of(){ awk -v n="$2" '$1==n {print $2; exit}' "$1"; }
+# <<< sha_equal
 
 # >>> held_names (test-update-smd-lines.sh loads exactly this block)
 # held_names <smd-update-output>: the components that output reports as HELD,
@@ -532,13 +536,68 @@ rows_match(){
     [ "$bad" = 0 ]
 }
 
-# doctor_kinds <doctor-output> <outfile>: the KINDS of finding, sorted and
-# deduped.  doctor.summarise prints "<component>:" then "    <kind>: detail".
-# Comparing kinds (not whole lines) is what makes "no NEW findings" a
-# meaningful assertion across a run that legitimately changes counts.
-doctor_kinds(){
-    awk '/^    [A-Za-z][A-Za-z0-9_-]*:/ { k=$1; sub(/:$/, "", k); print k }' "$1" | sort -u > "$2"
+# >>> manifest_drift (test-update-smd-lines.sh loads exactly this block)
+# manifest_drift <live-rows> <manifest-rows>: one WARN line per component
+# whose installed sha differs from the blessed manifest's, then a count.
+# Bring-up's `smd install` fetches and resets every client to origin/main, so
+# a fresh install can stand past its own manifest before any update runs (v3.80
+# rig: hf-timestd, psk-recorder and wspr-recorder), and the PM's manifest tie
+# cannot see it, because both its sides were written at image time.  Michael
+# ruled the bring-up pull a v3.82 fix; until then this check makes the drift
+# visible and blocks nothing.  A row on one side only carries no sha to
+# compare, so it counts in neither number.
+manifest_drift(){
+    local n sl sm d=0 both=0 why="(bring-up pulls; ruling: fix deferred to v3.82)"
+    while read -r n sl; do
+        sm="$(sha_of "$2" "$n")"
+        [ -n "$sm" ] || continue
+        both=$((both + 1))
+        sha_equal "$sl" "$sm" && continue
+        echo "WARN: installed $n $sl differs from the manifest $sm $why"
+        d=$((d + 1))
+    done < "$1"
+    if [ "$d" -gt 0 ]; then echo "WARN: $d of $both installed component(s) differ from the blessed manifest $why"
+    else echo "installed components match the blessed manifest ($both compared) ✓"; fi
 }
+# <<< manifest_drift
+
+# >>> doctor_pairs (test-update-smd-lines.sh loads exactly this block)
+# doctor_pairs <doctor-output> <outfile>: one "<component> <kind>" line per
+# finding, sorted and deduped.  doctor.summarise prints "<component>:" then
+# "    <kind>: detail".  Comparing kinds (not whole lines) is what makes "no
+# NEW findings" a meaningful assertion across a run that legitimately changes
+# counts.  Comparing them PER COMPONENT is what makes it see a second
+# component catch a kind a first one already had: the v3.80 update dirtied
+# superdarn-sounder while hf-timestd sat "dirty" from bring-up, and the bare
+# kind check passed it.  A kind line with no header above it pairs with "?"
+# (pairs_orphans names those).
+doctor_pairs(){
+    awk '/^[^[:space:]:]+:[[:space:]]*$/ { c=$1; sub(/:$/, "", c); next }
+         /^    [A-Za-z][A-Za-z0-9_-]*:/ { k=$1; sub(/:$/, "", k); print (c == "" ? "?" : c), k }' "$1" \
+        | LC_ALL=C sort -u > "$2"
+}
+# doctor_kinds <doctor-output> <outfile>: the KINDS alone, sorted and deduped,
+# read off the same parser.  PHASE G's rollback checks still compare these.
+doctor_kinds(){
+    doctor_pairs "$1" "$2.pairs"
+    awk '{ print $2 }' "$2.pairs" | sort -u > "$2"
+    rm -f "$2.pairs"
+}
+# pairs_orphans <pairs>: the kinds that found no "<component>:" header.  Any
+# at all means summarise()'s header shape has moved, and the pair check would
+# degrade to a kind check without a word.
+pairs_orphans(){ awk '$1 == "?" { print $2 }' "$1" | sort -u; }
+# new_pairs <pre-pairs> <post-pairs>: pairs present in post and absent from
+# pre, minus every pair whose KIND the operator sanctioned in
+# U2_ALLOW_NEW_KINDS.  The sanction stays per kind, as it always was: a kind
+# ruled acceptable-new is acceptable on any component.
+new_pairs(){
+    LC_ALL=C comm -13 "$1" "$2" \
+        | awk -v allow="${U2_ALLOW_NEW_KINDS:-}" '
+            BEGIN { n = split(allow, a, /[, ]+/); for (i = 1; i <= n; i++) if (a[i] != "") ok[a[i]] = 1 }
+            !($2 in ok)'
+}
+# <<< doctor_pairs
 # assert_kinds_parsed <label> <doctor-rc> <kinds-file> <doctor-output>: a
 # doctor that REPORTED findings (exit 1) but from which this parser
 # extracted no kinds means summarise()'s "    <kind>: detail" shape has
@@ -550,6 +609,16 @@ assert_kinds_parsed(){
     [ "$rc" = "1" ] || return 0
     [ ! -s "$kinds" ] || return 0
     fatal "$out" "$label: doctor kind parser matched nothing while doctor reported findings (exit 1) — smd doctor's finding format has moved, and every no-new-kinds assertion in this rig would pass vacuously"
+}
+
+# assert_pairs_parsed <label> <pairs-file> <doctor-output>: FATAL when a kind
+# found no component header above it (pairs_orphans).  Same reasoning as
+# assert_kinds_parsed: a pair check that has quietly become a kind check
+# would pass exactly what it exists to catch.
+assert_pairs_parsed(){
+    local o
+    o="$(pairs_orphans "$2" | tr '\n' ' ')"
+    [ -z "$o" ] || fatal "$3" "$1: doctor finding kind(s) with no '<component>:' header above them: $o— smd doctor's grouping has moved, and the per-component check would compare kinds alone"
 }
 
 # new_kinds <pre> <post> : kinds present in post and absent from pre, minus
@@ -946,12 +1015,18 @@ PREROWS="$(rows_count "$WORK/live-pre.rows")"
 [ "$PREROWS" -ge "$MIN_ROWS" ] || fatal "$GX_OUT" "smd version yielded only $PREROWS component rows (floor $MIN_ROWS) — a truncated capture, not a pre-state"
 say "pre-update live components ($PREROWS):"
 sed 's/^/      /' "$WORK/live-pre.rows"
+# Installed against blessed: where bring-up left each checkout, before the
+# update moves anything.  WARN only (manifest_drift says why).
+manifest_drift "$WORK/live-pre.rows" "$WORK/manifest.rows" > "$WORK/manifest-drift.txt"
+while IFS= read -r l; do say "$l"; done < "$WORK/manifest-drift.txt"
 
 gx_ok 900 e2-doctor-pre 'smd doctor' "pre-state: smd doctor"
 DOCTOR_PRE_RC="$GX_RC"
 cp "$GX_OUT" "$WORK/doctor-pre.txt"
 doctor_kinds "$WORK/doctor-pre.txt" "$WORK/kinds-pre.txt"
 assert_kinds_parsed "pre-update doctor" "$DOCTOR_PRE_RC" "$WORK/kinds-pre.txt" "$WORK/doctor-pre.txt"
+doctor_pairs "$WORK/doctor-pre.txt" "$WORK/pairs-pre.txt"
+assert_pairs_parsed "pre-update doctor" "$WORK/pairs-pre.txt" "$WORK/doctor-pre.txt"
 say "pre-update smd doctor exit $DOCTOR_PRE_RC; finding kinds: $(tr '\n' ' ' < "$WORK/kinds-pre.txt")"
 excerpt "$WORK/doctor-pre.txt" 20
 gx_ok 120 e2-units-pre "$UNIT_CMP" "pre-state: sigmond units against the checkout"
@@ -1074,19 +1149,24 @@ ASSESSED="$(awk '$1=="BEHIND"' "$WORK/e6-behind.out" | awk 'END{print NR}')"
 [ -z "$NOUP" ] && say "every component checkout is level with its upstream ✓ ($ASSESSED assessed)" \
                || say "every component with an upstream is level ✓ ($ASSESSED assessed; no upstream, not assessed: $NOUP)"
 
-# ── doctor gained no NEW finding kinds ──────────────────────────────────
+# ── doctor gained no NEW (component, kind) findings ─────────────────────
+# Per component, not per kind: v3.80's bare-kind check passed superdarn-
+# sounder's new "dirty" because hf-timestd already carried one.
 gx_ok 900 e7-doctor-post 'smd doctor' "post-update: smd doctor"
 DOCTOR_POST_RC="$GX_RC"
 cp "$GX_OUT" "$WORK/doctor-post.txt"
 doctor_kinds "$WORK/doctor-post.txt" "$WORK/kinds-post.txt"
 assert_kinds_parsed "post-update doctor" "$DOCTOR_POST_RC" "$WORK/kinds-post.txt" "$WORK/doctor-post.txt"
+doctor_pairs "$WORK/doctor-post.txt" "$WORK/pairs-post.txt"
+assert_pairs_parsed "post-update doctor" "$WORK/pairs-post.txt" "$WORK/doctor-post.txt"
 say "post-update smd doctor exit $DOCTOR_POST_RC; finding kinds: $(tr '\n' ' ' < "$WORK/kinds-post.txt")"
-NEWK="$(new_kinds "$WORK/kinds-pre.txt" "$WORK/kinds-post.txt" | tr '\n' ' ')"
-if [ -n "$NEWK" ]; then
+NEWP="$(new_pairs "$WORK/pairs-pre.txt" "$WORK/pairs-post.txt" | sed 's/ /:/' | tr '\n' ' ')"
+if [ -n "$NEWP" ]; then
+    NEWK="$(printf '%s' "$NEWP" | tr ' ' '\n' | sed -n 's/^.*://p' | sort -u | paste -sd, -)"
     excerpt "$WORK/doctor-post.txt" 40
-    fatal - "smd doctor gained NEW finding kinds across the update: $NEWK (pre: $(tr '\n' ' ' < "$WORK/kinds-pre.txt")). If one of these is a ruled-on, sanctioned consequence of an install.sh run — uv.lock churn is the known case — re-run with U2_ALLOW_NEW_KINDS=$(printf '%s' "$NEWK" | tr ' ' ',' | sed 's/,$//')"
+    fatal - "smd doctor gained NEW findings across the update, as component:kind: $NEWP(pre: $(sed 's/ /:/' "$WORK/pairs-pre.txt" | tr '\n' ' ')). If one of these kinds is a ruled-on, sanctioned consequence of an install.sh run — uv.lock churn is the known case — re-run with U2_ALLOW_NEW_KINDS=$NEWK (the sanction covers that kind on every component)"
 fi
-say "no NEW doctor finding kinds across the update ✓"
+say "no NEW doctor findings, by component and kind, across the update ✓"
 
 # ── the awareness payload survives an update, not just an install ───────
 # The station this rig updates has the heartbeat switched on.  The sibling's
