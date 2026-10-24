@@ -1109,16 +1109,6 @@ if grep -qi 'not enabled' "$WORK/e8-heartbeat.out"; then
 fi
 say "heartbeat still wired after the update: exit 0, no not-enabled ✓"
 
-# The branch each checkout sits on, for G-ter's re-attach (ruling C24-1):
-# a restore detaches every checkout it moves, and the second update can
-# only pull a checkout that sits on its branch.
-gx_ok 120 e9-branches "$UPL_BRANCHES" "the branch each checkout sits on"
-sed 's/^/      /' "$GX_OUT"
-[ "$(sp2_tok "$GX_OUT" BRANCHDONE)" = 1 ] \
-    || fatal "$GX_OUT" "the branch probe gave no answer (not a verdict): G-ter could not re-attach the restored checkouts"
-cp "$GX_OUT" "$WORK/branches-at-e.txt"
-say "recorded the branch of $(grep -c '^BRANCH|' "$WORK/branches-at-e.txt") checkout(s) for G-ter's re-attach"
-
 say "PHASE E PASS — rolled forward to $TARGET_SHA, idempotent, level, no new findings"
 
 # ════════════════════════════════════════════════════════════════════════
@@ -1919,6 +1909,19 @@ sp2u_report() {
     [ "$n" = 0 ] || fatal "$2" "$3: $n sink switch finding(s) above"
 }
 # <<< sink2b_update
+
+# The branch each checkout sits on, for G-ter's re-attach (ruling C24-1):
+# a restore detaches every checkout it moves, and the second update can
+# only pull a checkout that sits on its branch.  It runs here, after the
+# sink2b_update block defines UPL_BRANCHES (v3.80 rig: read at the end of
+# PHASE E, it died on an unbound variable).  Nothing between E and here
+# moves a checkout, so these are still the branches E left.
+gx_ok 120 e9-branches "$UPL_BRANCHES" "the branch each checkout sits on"
+sed 's/^/      /' "$GX_OUT"
+[ "$(sp2_tok "$GX_OUT" BRANCHDONE)" = 1 ] \
+    || fatal "$GX_OUT" "the branch probe gave no answer (not a verdict): G-ter could not re-attach the restored checkouts"
+cp "$GX_OUT" "$WORK/branches-at-e.txt"
+say "recorded the branch of $(grep -c '^BRANCH|' "$WORK/branches-at-e.txt") checkout(s) for G-ter's re-attach"
 
 # ── the store before the manifest step ─────────────────────────────────
 gx_ok 120 eb0-store-pre "$UPL_STORE" "E-bis: the send-record store before the manifest step"

@@ -594,6 +594,18 @@ ln(){ grep -nF -- "$1" "$SRC" | head -1 | cut -d: -f1; }
     && echo "  ok    the branches are recorded before the restore" || { echo "  FAIL  branch probe order"; fail=1; }
 [ "$(ln 'gx_ok 900 gt2-manifest')" -lt "$(ln 'gx_ok 120 gt2-sinks')" ] \
     && echo "  ok    G-ter probes after the second step" || { echo "  FAIL  G-ter probe order"; fail=1; }
+# Every name the block defines must first be used after the block ends: the
+# rig runs top to bottom, while this test evals the whole block up front and
+# so can never see a use that comes too early (v3.80 rig: $UPL_BRANCHES read
+# at the end of PHASE E, defined later, an unbound-variable death).
+BSTART="$(ln '# >>> sink2b_update')"; BEND="$(ln '# <<< sink2b_update')"
+early=""
+for nm in $(sed -n "${BSTART},${BEND}p" "$SRC" | sed -nE 's/^([A-Za-z_][A-Za-z0-9_]*)(=\$\(cat <<|\(\) *\{).*/\1/p' | sort -u); do
+    first="$(awk -v s="$BSTART" -v e="$BEND" -v n="$nm" '(NR < s || NR > e) && $0 !~ /^[[:space:]]*#/ && (index($0, "$" n) || index($0, "${" n) || $0 ~ ("(^|[^A-Za-z0-9_])" n "([^A-Za-z0-9_=]|$)")) {print NR; exit}' "$SRC")"
+    [ -n "$first" ] && [ "$first" -lt "$BSTART" ] && early="$early $nm@$first"
+done
+[ -z "$early" ] \
+    && echo "  ok    nothing the block defines is used before it" || { echo "  FAIL  used before the sink2b_update block defines it:$early"; fail=1; }
 [ "$(ln "type sp2_tok >/dev/null 2>&1")" -lt "$(ln '# >>> sink2b_update')" ] && [ "$(ln "type sp2_tok >/dev/null 2>&1")" -lt "$(ln 'resolve_ssh(){')" ] \
     && echo "  ok    sp2_tok is checked at startup" || { echo "  FAIL  sp2_tok is not checked at startup"; fail=1; }
 
