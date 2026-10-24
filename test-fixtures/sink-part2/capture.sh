@@ -25,6 +25,9 @@
 #                                the mag fallback, as `smd sink fill` prints
 #                                them (sink_levers *Result.lines() through
 #                                commands/config.py _say_lines)
+#   lever_lines_linked.txt       the same for a linked wspr-uploader the
+#                                plant enabled: its enablement link removed,
+#                                the unit stopped (sigmond Task 28 F2)
 #   smd_err_line.txt             one manifest-step error line, as
 #                                commands/uploader.py _err prints it
 #   restore_part2/               a restore to a sigmond below part 2 and the
@@ -134,6 +137,16 @@ with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
     cfg._say_lines(lv.lines())
     cfg._say_lines(st.lines())
 (out / "lever_lines_more.txt").write_text(buf.getvalue())
+# A linked wspr-uploader that the plant enabled (sigmond Task 28 F2): the
+# lever removes its enablement link and stops it, never disables it.
+lv = sink_levers.LeverResult(
+    unwanted=[Path("/etc/systemd/system/multi-user.target.wants/"
+                   "wspr-uploader.service")],
+    stopped=["wspr-uploader.service"])
+buf = io.StringIO()
+with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
+    cfg._say_lines(lv.lines())
+(out / "lever_lines_linked.txt").write_text(buf.getvalue())
 
 # One error line as the manifest step prints it to stderr (_err: every such
 # line reads "smd: uploader: "), here the failed features probe's.
@@ -263,6 +276,6 @@ sink_status_<case>.json  <- tests/fixtures/sink_status/<case>.json
 restore_part2/           <- tests/fixtures/restore_part2/ (capture_restore_part2.py)
 update_plan_pull.txt     <- bin/smd cmd_update (dry run) at the commit, printed by capture.sh
 manifest_step_part1.txt  <- lib/sigmond/commands/uploader.py at part 1, printed by capture.sh
-pipelines_*.toml, sigmond_gate.toml, switch_view_*.txt, lever_lines_more.txt, smd_err_line.txt <- printed by capture.sh from lib/ at that commit
+pipelines_*.toml, sigmond_gate.toml, switch_view_*.txt, lever_lines_*.txt, smd_err_line.txt <- printed by capture.sh from lib/ at that commit
 SRC
 echo "capture: wrote $here from sigmond $commit"

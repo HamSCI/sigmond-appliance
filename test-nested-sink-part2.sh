@@ -57,7 +57,7 @@ for f in manifest_step_part2.txt sink_fill_part2.txt sink_status_site-off.json \
          sink_status_all-upload.json sink_status_marker-absent.json \
          pipelines_gate.toml sigmond_gate.toml pipelines_part1.toml \
          switch_view_all-upload.txt switch_view_site-off.txt lever_lines_more.txt \
-         smd_err_line.txt SOURCE systemd_show_blocks.txt systemd_show_one.txt \
+         lever_lines_linked.txt smd_err_line.txt SOURCE systemd_show_blocks.txt systemd_show_one.txt \
          systemd_list_units.txt journal_cat.txt SYSTEMD_SOURCE; do
     [ -s "$FX/$f" ] || { echo "FAIL: fixture $FX/$f missing; run test-fixtures/sink-part2/capture.sh (and capture-systemd.sh)"; exit 1; }
 done
@@ -461,6 +461,33 @@ after 3000 1 100 500 server-raw 'enabled|inactive' "'false'" > "$T/a6.txt"
 lv wmdisk "$T/pwm.txt" "$T/b.txt" "$T/fillwm.facts" "$T/a6.txt"
 has "wspr-uploader still enabled" "$T/wmdisk.lv" "FAIL: wspr-uploader.service reads"
 has "mag's enabled a string"      "$T/wmdisk.lv" "not the boolean false"
+
+# sigmond Task 28 F2: a wspr-uploader linked before the plant enabled it.
+# The fill removes its enablement link and stops it; disable would unlink it.
+echo "a linked wspr-uploader planted:"
+grep mag-recorder "$FX/lever_lines_more.txt" | cat - "$FX/lever_lines_linked.txt" > "$T/wl-lines.txt"
+fillout "$T/fillwl.out" 0 "$FX/sink_fill_part2.txt" "$T/wl-lines.txt"
+through "$T/fillwl.out" "$T/fillwl.txt"; sp2_fill_facts "$T/fillwl.txt" > "$T/fillwl.facts"
+check "its enablement link removal counted" 1 "$(sp2_tok "$T/fillwl.facts" WU_UNWANTED)"
+check "its stop counted"                    1 "$(sp2_tok "$T/fillwl.facts" WU_STOPPED)"
+check "and no disable"                      0 "$(sp2_tok "$T/fillwl.facts" WU_DISABLED)"
+plant "$(printf 'WU:1\nWU_PREV:linked\nWU_ENABLE:0\nWU_SWITCH:pre')" "$(printf 'MAG:1\nMAG_SET:0\nMAG_SWITCH:pre')" > "$T/pwl.txt"
+after 3000 1 100 500 server-raw 'linked|inactive' > "$T/a7.txt"
+check "the plant prints WU_PREV, the state before its enable" 1 \
+    "$(sp2_plant_script | awk '/echo "WU_PREV:\$prev"/ { k = NR } /systemctl enable wspr-uploader/ { e = NR } END { print (k && e && k < e) ? 1 : 0 }')"
+lv wl "$T/pwl.txt" "$T/b.txt" "$T/fillwl.facts" "$T/a7.txt"
+check "linked, link removed, stopped: no FAIL" 0 "$(nlines "$T/wl.lv" '^FAIL')"
+hasnt "no wspr-uploader finding" "$T/wl.lv" "wspr-uploader"
+lv wlold "$T/pwl.txt" "$T/b.txt" "$T/fillwm.facts" "$T/a.txt"
+has "the v3.79 fill (disable on a linked unit) fails" "$T/wlold.lv" "FAIL: smd sink fill disabled the linked wspr-uploader.service"
+after 3000 1 100 500 server-raw '|inactive' > "$T/a8.txt"
+lv wlgone "$T/pwl.txt" "$T/b.txt" "$T/fillwl.facts" "$T/a8.txt"
+has "a linked unit gone after the fill fails" "$T/wlgone.lv" "FAIL: wspr-uploader.service reads"
+after 3000 1 100 500 server-raw 'enabled|inactive' > "$T/a9.txt"
+lv wlen "$T/pwl.txt" "$T/b.txt" "$T/fillwl.facts" "$T/a9.txt"
+has "a linked unit still enabled fails" "$T/wlen.lv" "FAIL: wspr-uploader.service reads"
+lv wlmiss "$T/pwl.txt" "$T/b.txt" "$T/fill.facts" "$T/a7.txt"
+has "no removal line fails" "$T/wlmiss.lv" "FAIL: smd sink fill did not remove the linked wspr-uploader.service's enablement link and stop it"
 
 # ── sp2_state_script, hermetic (M-2) ───────────────────────────────────────
 # systemctl and journalctl stood in by scripts that serve a table of units in

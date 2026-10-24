@@ -1,0 +1,2 @@
+     lever: removed /etc/systemd/system/multi-user.target.wants/wspr-uploader.service (wspr-uploader.service's enablement; its unit link stays, and the raise to upload puts this back)
+     lever: stopped wspr-uploader.service (its unit file is a link: its enablement links removed, the link kept)

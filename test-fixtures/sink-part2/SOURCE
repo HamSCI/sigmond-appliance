@@ -1,4 +1,4 @@
-sigmond 913bfed35345a1021ad5bcb4673c70e46936ce77
+sigmond 43aff4c2b0e3149722337b92ff07eeccbee79084
 part 1 be91e226e270435f5a075fce774a36223c0f1571
 manifest_step_part2.txt  <- tests/fixtures/manifest_step_part2.txt
 sink_fill_part2.txt      <- tests/fixtures/sink_fill_part2.txt
@@ -6,4 +6,4 @@ sink_status_<case>.json  <- tests/fixtures/sink_status/<case>.json
 restore_part2/           <- tests/fixtures/restore_part2/ (capture_restore_part2.py)
 update_plan_pull.txt     <- bin/smd cmd_update (dry run) at the commit, printed by capture.sh
 manifest_step_part1.txt  <- lib/sigmond/commands/uploader.py at part 1, printed by capture.sh
-pipelines_*.toml, sigmond_gate.toml, switch_view_*.txt, lever_lines_more.txt, smd_err_line.txt <- printed by capture.sh from lib/ at that commit
+pipelines_*.toml, sigmond_gate.toml, switch_view_*.txt, lever_lines_*.txt, smd_err_line.txt <- printed by capture.sh from lib/ at that commit

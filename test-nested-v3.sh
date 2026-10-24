@@ -982,7 +982,7 @@ import re, sys
 lines = open(sys.argv[1], encoding='utf-8', errors='replace').read().splitlines()
 chg = {'psk-recorder': 0, 'meteor-scatter': 0, 'wspr-recorder': 0, 'mag': 0}
 restarts, toks, changed = {}, [], []
-n = dict(wu=0, failed=0, armed=0, site=0, hsu=0)
+n = dict(wu=0, wu_unwanted=0, wu_stopped=0, failed=0, armed=0, site=0, hsu=0)
 for ln in lines:
     s = ln.strip()
     if re.fullmatch(r'[A-Z][A-Z0-9_]*:-?[0-9]+', s):
@@ -1000,6 +1000,9 @@ for ln in lines:
     if m:
         restarts[m.group(1)] = restarts.get(m.group(1), 0) + 1
     n['wu'] += 'lever: stopped and disabled wspr-uploader.service' in ln
+    # a linked unit (sigmond Task 28 F2): its enablement link goes, it stops
+    n['wu_unwanted'] += bool(re.search(r'lever: removed \S+\.(wants|requires)/wspr-uploader\.service', ln))
+    n['wu_stopped'] += bool(re.search(r'lever: stopped wspr-uploader\.service( |$)', ln))
     n['failed'] += bool(re.search(r'lever( step)?: FAILED|stale-writer restarts: FAILED', ln))
     n['armed'] += 'lever: still armed' in ln
     n['site'] += 'site sink switch set to fill' in ln
@@ -1008,7 +1011,8 @@ for ln in lines:
     n['hsu'] += bool(re.search(r'restarting hs-uploader|uploader: wrote \S*pipelines', ln))
 out = toks + ['CHG_PSK:%d' % chg['psk-recorder'], 'CHG_MS:%d' % chg['meteor-scatter'],
               'CHG_WSPR:%d' % chg['wspr-recorder'], 'CHG_MAG:%d' % chg['mag'],
-              'WU_DISABLED:%d' % n['wu'], 'LV_FAILED:%d' % n['failed'],
+              'WU_DISABLED:%d' % n['wu'], 'WU_UNWANTED:%d' % n['wu_unwanted'],
+              'WU_STOPPED:%d' % n['wu_stopped'], 'LV_FAILED:%d' % n['failed'],
               'LV_ARMED:%d' % n['armed'],
               'SITE_FILL:%d' % n['site'], 'HSU_RESTART:%d' % n['hsu'],
               'RESTARTED:%d' % len(restarts)]
@@ -1152,6 +1156,15 @@ if tok(plant, 'WU') != '1':
     print('UNCHECKED: the wspr-uploader lever (this image installs no wspr-uploader.service)')
 elif tok(plant, 'WU_ENABLE') != '0':
     print('FAIL: the rig could not enable wspr-uploader (not a verdict on smd)')
+elif switch_ok('WU', 'wspr-recorder') and tok(plant, 'WU_PREV') == 'linked':
+    # Linked before the plant enabled it (sigmond Task 28 F2): the lever
+    # removes the enablement link and stops it; disable would unlink it.
+    if tok(fill, 'WU_DISABLED') != '0':
+        print('FAIL: smd sink fill disabled the linked wspr-uploader.service, which removes its unit link')
+    elif (num(tok(fill, 'WU_UNWANTED')) or 0) < 1 or tok(fill, 'WU_STOPPED') != '1':
+        print("FAIL: smd sink fill did not remove the linked wspr-uploader.service's enablement link and stop it")
+    if not wu or wu[0][0] != 'linked' or wu[0][1] not in ('inactive', 'failed'):
+        print('FAIL: wspr-uploader.service reads %s after the fill; a linked unit keeps its link and loses only its enablement' % (wu[0] if wu else 'nothing'))
 elif switch_ok('WU', 'wspr-recorder'):
     if tok(fill, 'WU_DISABLED') != '1':
         print('FAIL: smd sink fill did not stop and disable wspr-uploader.service')
