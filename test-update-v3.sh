@@ -2877,10 +2877,32 @@ sp2u_report "$WORK/gt0-reattach.verdict" "$WORK/gt0-reattach.out" "G-ter re-atta
 gx_ok 3600 gt1-update-apply "systemd-run --quiet --wait --pipe --collect --unit=rig-update-apply2 /bin/bash -lc 'smd update --apply'" "smd update --apply (second)"
 GT_RC="$GX_RC"
 sed 's/^/      /' "$WORK/gt1-update-apply.out" | tail -15
-case "$GT_RC" in
-    0|3) say "second smd update --apply exit $GT_RC" ;;
-    *) fatal "$WORK/gt1-update-apply.out" "the second smd update --apply exited $GT_RC" ;;
-esac
+# Nest limit (ruled mjh 2026-10-25): this nest never writes hf-timestd's
+# config, and `smd update` runs install.sh with no --yes and stdin open, so an
+# hf-timestd install here starts the setup wizard and exits 1.  Stations carry
+# the config (B4, ND checked 2026-10-25), so the wizard never starts there;
+# v3.82 passes --yes, as restore does.  The exit is a nest limit only when it
+# is the update's sole failure, it is hf-timestd's wizard, and the guest holds
+# no config.  Anything else stays fatal.
+GT_NEST_TIMESTD=0
+if [ "$GT_RC" != 0 ] && [ "$GT_RC" != 3 ]; then
+    GT_ERRS="$(grep -c $'\e\[31m' "$WORK/gt1-update-apply.out")"
+    if [ "$GT_ERRS" = 1 ] \
+       && grep $'\e\[31m' "$WORK/gt1-update-apply.out" | grep -q 'hf-timestd: install.sh exit 1' \
+       && grep -q 'No config found .* running setup wizard' "$WORK/gt1-update-apply.out"; then
+        gx_ok 60 gt1-timestd-conf 'echo "HASCONF:$(test -e /etc/hf-timestd/timestd-config.toml && echo 1 || echo 0)"' "G-ter: does the guest hold hf-timestd's config?"
+        [ "$(gx_tok "$GX_OUT" HASCONF)" = 0 ] && GT_NEST_TIMESTD=1
+    fi
+fi
+if [ "$GT_NEST_TIMESTD" = 1 ]; then
+    say "⚠ HF-TIMESTD INSTALL NOT EVALUATED (nest limit) — the second update's sole failure is hf-timestd's setup wizard on a guest with no hf-timestd config; smd update gives install.sh no --yes (v3.82)"
+    KS_UNCHECKED="${KS_UNCHECKED:+$KS_UNCHECKED; }the second update's hf-timestd install (no config in this nest)"
+else
+    case "$GT_RC" in
+        0|3) say "second smd update --apply exit $GT_RC" ;;
+        *) fatal "$WORK/gt1-update-apply.out" "the second smd update --apply exited $GT_RC" ;;
+    esac
+fi
 gx_ok 900 gt2-manifest 'smd admin uploader manifest --write --enable' "G-ter: smd admin uploader manifest --write --enable"
 sed 's/^/      /' "$WORK/gt2-manifest.out"
 [ "$GX_RC" -eq 0 ] || fatal "$WORK/gt2-manifest.out" "the second manifest step exited $GX_RC"
