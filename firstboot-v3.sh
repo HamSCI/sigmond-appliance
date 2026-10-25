@@ -3024,6 +3024,30 @@ fi
     ipurl(){ case "${1:-}" in *:*) printf '[%s]\n' "$1";; *) printf '%s\n' "${1:-}";; esac; }
     _NETLIB_MISSING=1
 }
+# >>> panel_colour (test-panel-colour.sh loads exactly this block)
+# Colour for the console only: VT1 and /etc/issue.  /etc/motd, which SSH, the
+# RAC and pam_motd read, gets the plain text.  Colour marks addresses (bold
+# cyan), logins (bold green) and the default password (bold yellow); the words
+# around them say the same thing without it.  Only the main panel's tokens
+# take codes: never the markers (the sed ranges match them at column 0) and
+# never a phrase the rig greps.  SIGMOND_PANEL_COLOUR=0 turns it off.
+_hl(){
+    local _k="$1"; shift
+    local _c
+    case "$_k" in
+        addr)  _c='1;36' ;;
+        login) _c='1;32' ;;
+        pw)    _c='1;33' ;;
+        *)     _c='' ;;
+    esac
+    if [ "${SIGMOND_PANEL_COLOUR:-1}" = 0 ] || [ -z "$_c" ]; then
+        printf '%s' "$*"
+    else
+        printf '\033[%sm%s\033[0m' "$_c" "$*"
+    fi
+}
+_panel_plain(){ sed 's/\x1b\[[0-9;]*m//g'; }
+# <<< panel_colour
 VMID="${SIGMOND_VMID:-100}"
 VERSION="$(cat /etc/sigmond-appliance/version 2>/dev/null || echo '?')"
 CONF="$(cat /etc/sigmond-appliance/.configured 2>/dev/null)"
@@ -3439,7 +3463,7 @@ PWLINE="the password you set at install"
 _h=$(awk -F: '$1=="root"{print $2}' /etc/shadow 2>/dev/null)
 case "$_h" in
   \$*) [ "$(perl -e 'print crypt($ARGV[1], $ARGV[0])' "$_h" hamsci-sigmond 2>/dev/null)" = "$_h" ] \
-          && PWLINE="hamsci-sigmond   <-- image default, CHANGE IT" ;;
+          && PWLINE="$(_hl pw hamsci-sigmond)   <-- image default, CHANGE IT" ;;
 esac
 
 # >>> rac_block (test-panel-remote.sh loads exactly this block)
@@ -3814,30 +3838,36 @@ fi
 # six times, which is what forced one-item-per-line.  Stated once, the services
 # fit three to a line.  rob: "the lines on my monitor could be quite a bit
 # longer ... they only occupy about half of the monitor."
+_HIP=$(_hl addr "${HOSTIP:-<no-ip-yet>}")
+_VIP=${VMIP:+$(_hl addr "$VMIP")}
+_LROOT=$(_hl login root); _LSIG=$(_hl login sigmond); _LHAM=$(_hl login hamsci)
 PANEL=$(cat <<PEOF
 ════ Sigmond appliance $VERSION ${CONF:+— station ${CONF%% *}} ════
  The station is the DECODER VIRTUAL MACHINE below — this screen is the
  computer that hosts it.
  Press Enter here for a hypervisor login; typing does not echo, which is normal.
 ${NETWARN}${BRINGUP}${RXWARN}
- Proxmox host   ssh root@${HOSTIP:-<no-ip-yet>}   ·   web UI  https://$(ipurl "${HOSTIP:-<no-ip-yet>}"):8006
+ Proxmox host   ssh ${_LROOT}@${_HIP}   ·   web UI  $(_hl addr "https://$(ipurl "${HOSTIP:-<no-ip-yet>}"):8006")
 
- Decoder virtual machine   ${VMIP:-<starting — this panel refreshes every 5 min>}${VMNOTE}${VMBEHIND}
-   from here      ssh sigmond@${VMIP:-<starting>}   (or: sigmond-vm;  also hamsci@)
-   via this host  ssh -p 2222 sigmond@${HOSTIP:-<no-ip-yet>}
-   via this host  http://$(ipurl "${HOSTIP:-<no-ip-yet>}"):PORT  where PORT =
+ Decoder virtual machine   ${_VIP:-<starting — this panel refreshes every 5 min>}${VMNOTE}${VMBEHIND}
+   from here      ssh ${_LSIG}@${_VIP:-<starting>}   (or: sigmond-vm;  also ${_LHAM}@)
+   via this host  ssh -p 2222 ${_LSIG}@${_HIP}
+   via this host  $(_hl addr "http://$(ipurl "${HOSTIP:-<no-ip-yet>}")"):PORT  where PORT =
                   ka9q-web 8081 · station-web 8000 · magnetometer 8082 · mag feed ws 8765
 
  Passwords   for the logins above and the Proxmox web UI
-             host             root / $PWLINE
-             virtual machine  sigmond / same password
+             host             ${_LROOT} / $PWLINE
+             virtual machine  ${_LSIG} / same password
 ${RACBLOCK}
  From the host:  sigmond-check (is it working?) · sigmond-vm (a shell in
                  the virtual machine) · qm terminal $VMID · sigmond-setup --reconfigure
 ════ end Sigmond panel ════  $VERSION ${CONF:+· station ${CONF%% *} }════
 PEOF
 )
+# /etc/issue and VT1 take the colour; /etc/motd takes the plain text.
+PANEL_PLAIN=$(printf '%s' "$PANEL" | _panel_plain)
 for f in /etc/issue /etc/motd; do
+    _body="$PANEL"; [ "$f" = /etc/motd ] && _body="$PANEL_PLAIN"
     # remove the old panel AND the trailing blank lines: appending '\n\n'
     # while deleting only the block leaked one blank line per refresh —
     # ~1000 lines in /etc/issue after 3 days (AI6VN 2026-09-09).  Two sed
@@ -3851,7 +3881,7 @@ for f in /etc/issue /etc/motd; do
     _scrub_panel_file "$f"
     sed -i '/^════ Sigmond appliance /,/^════ end Sigmond panel/d' "$f" 2>/dev/null
     sed -i -e :a -e '/^\n*$/{$d;N;ba' -e '}' "$f" 2>/dev/null
-    printf '\n%s\n' "$PANEL" >> "$f"
+    printf '\n%s\n' "$_body" >> "$f"
 done
 # The files above only matter when getty (re)paints them — which it does
 # ONCE, early in boot, BEFORE this script first runs, and never again: the

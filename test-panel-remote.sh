@@ -244,6 +244,7 @@ for row in "${states[@]}"; do
     [ "$racn" = - ] && touch "$d/no-toml"
     out=$(panel "$d")
     has   "$name, paired: the VM's command"            "$out" "${lead}${VMLINE}  smd remote $word"
+    lacks "$name, paired: RAC block carries no escape"  "$out" "$(printf '\033')"
     lacks "$name, paired: not the host's own switch"   "$out" "sigmond-setup --rac-"
 done
 # A healthy ON station offers NO off-switch, whatever its pairing state --
