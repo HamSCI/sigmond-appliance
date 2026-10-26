@@ -254,54 +254,76 @@ check "restore: sigmond.toml removed" 1 "$(sp2_tok "$T/rs.f" RS_RMTOML)"
 check "restore: no failure"      "0 0" "$(sp2_tok "$T/rs.f" RS_MOVEFAIL) $(sp2_tok "$T/rs.f" RS_RMFAIL)"
 check "restore: sentinel"        1 "$(sp2_tok "$T/rs.f" RESTFACTS)"
 tree "$T/g" 0 part1 "$RP/sinks-restored" "$ASIDE"; probe "$T/g" "$T/g.st"
-sp2u_gbis_verdict "$T/e.st" "$T/rs.f" "$T/g.st" 1 > "$T/v"; clean "G-bis: the captured restore passes" "$T/v"
+sp2u_gbis_verdict "$T/e.st" "$T/rs.f" "$T/g.st" 1 0 > "$T/v"; clean "G-bis: the captured restore passes" "$T/v"
 has   "G-bis: says the files stayed" "$T/v" "OK: G-bis: the restore left every switch file as it stood"
 tree "$T/g1" 0 part1 "$RP/sinks-restored"; probe "$T/g1" "$T/g1.st"
-sp2u_gbis_verdict "$T/e.st" "$T/rs.f" "$T/g1.st" 1 > "$T/v"
+sp2u_gbis_verdict "$T/e.st" "$T/rs.f" "$T/g1.st" 1 0 > "$T/v"
 has   "G-bis: the named aside missing fails" "$T/v" "but no such file stands"
 has   "G-bis: ... and no new aside" "$T/v" "no new rolled-back marker"
 tree "$T/g2" 1 part1 "$RP/sinks-restored" "$ASIDE"; probe "$T/g2" "$T/g2.st"
-sp2u_gbis_verdict "$T/e.st" "$T/rs.f" "$T/g2.st" 1 > "$T/v"
+sp2u_gbis_verdict "$T/e.st" "$T/rs.f" "$T/g2.st" 1 0 > "$T/v"
 has   "G-bis: a marker still standing fails" "$T/v" "the carry-over marker still stands"
 tree "$T/g3" 0 gate "$RP/sinks-restored" "$ASIDE"; probe "$T/g3" "$T/g3.st"
-sp2u_gbis_verdict "$T/e.st" "$T/rs.f" "$T/g3.st" 1 > "$T/v"
+sp2u_gbis_verdict "$T/e.st" "$T/rs.f" "$T/g3.st" 1 0 > "$T/v"
 has   "G-bis: sigmond.toml left fails" "$T/v" "pipelines.d/sigmond.toml still stands"
 has   "G-bis: ... no heartbeat in the legacy manifest" "$T/v" "the legacy manifest carries no heartbeat"
 # Derived: one history entry appended to a client file at G-bis.
 tree "$T/g4" 0 part1 "$RP/sinks-restored" "$ASIDE"
 printf '\n[[history]]\nat = "2026-10-23T12:00:00Z"\nfrom = "upload"\nto = "upload"\nby = "x"\nreason = ""\n' >> "$T/g4/etc/hs-uploader/sinks/wspr-recorder.toml"
 probe "$T/g4" "$T/g4.st"
-sp2u_gbis_verdict "$T/e.st" "$T/rs.f" "$T/g4.st" 1 > "$T/v"
+sp2u_gbis_verdict "$T/e.st" "$T/rs.f" "$T/g4.st" 1 0 > "$T/v"
 has   "G-bis: a switch file changed by the restore fails" "$T/v" "the restore changed switch files: changed wspr-recorder.toml"
 tree "$T/g5" 0 part1 "$RP/sinks-restored" "$ASIDE"; rm "$T/g5/etc/hs-uploader/sinks/site.toml"; probe "$T/g5" "$T/g5.st"
-sp2u_gbis_verdict "$T/e.st" "$T/rs.f" "$T/g5.st" 1 > "$T/v"
+sp2u_gbis_verdict "$T/e.st" "$T/rs.f" "$T/g5.st" 1 0 > "$T/v"
 has   "G-bis: site.toml gone fails" "$T/v" "gone site.toml"
-sp2u_gbis_verdict "$T/e.st" "$T/rs.f" "$T/g.st" 0 > "$T/v"
+sp2u_gbis_verdict "$T/e.st" "$T/rs.f" "$T/g.st" 0 0 > "$T/v"
 clean "G-bis: restore that kept sigmond is no failure" "$T/v"
 has   "G-bis: ... but is said unchecked" "$T/v" "UNCHECKED: the restore's marker move"
 sed "s/$ASIDE;/$ASIDE.1;/" "$RP/restore.txt" > "$T/r1.txt"; restore "$T/r1.txt" "$T/r1.f"
 tree "$T/g6" 0 part1 "$RP/sinks-restored" "$ASIDE" "$ASIDE.1"; probe "$T/g6" "$T/g6.st"
-sp2u_gbis_verdict "$T/e.st" "$T/r1.f" "$T/g6.st" 1 > "$T/v"
+sp2u_gbis_verdict "$T/e.st" "$T/r1.f" "$T/g6.st" 1 0 > "$T/v"
 clean "G-bis: a .1 name (the first taken) passes" "$T/v"
 grep -v 'moved the carry-over marker aside' "$RP/restore.txt" > "$T/r2.txt"; restore "$T/r2.txt" "$T/r2.f"
-sp2u_gbis_verdict "$T/e.st" "$T/r2.f" "$T/g.st" 1 > "$T/v"
+sp2u_gbis_verdict "$T/e.st" "$T/r2.f" "$T/g.st" 1 0 > "$T/v"
 has   "G-bis: no move line fails" "$T/v" "printed no 'moved the carry-over marker aside to' line"
 grep -v 'pipelines.d/sigmond.toml: the restored' "$RP/restore.txt" > "$T/r3.txt"; restore "$T/r3.txt" "$T/r3.f"
-sp2u_gbis_verdict "$T/e.st" "$T/r3.f" "$T/g.st" 1 > "$T/v"
+sp2u_gbis_verdict "$T/e.st" "$T/r3.f" "$T/g.st" 1 0 > "$T/v"
 has   "G-bis: no removal line fails" "$T/v" "printed no 'removed .../pipelines.d/sigmond.toml' line"
 # E-bis already had that aside: the count did not rise.
 tree "$T/e2" 1 gate "$RP/sinks-v1" "$ASIDE"; probe "$T/e2" "$T/e2.st"
-sp2u_gbis_verdict "$T/e2.st" "$T/rs.f" "$T/g.st" 1 > "$T/v"
+sp2u_gbis_verdict "$T/e2.st" "$T/rs.f" "$T/g.st" 1 0 > "$T/v"
 has   "G-bis: no new aside fails" "$T/v" "no new rolled-back marker (E-bis 1, G-bis 1)"
-sp2u_gbis_verdict "$T/e.st" "$T/rs.f" "$T/h.st" 1 > "$T/v"
+sp2u_gbis_verdict "$T/e.st" "$T/rs.f" "$T/h.st" 1 0 > "$T/v"
 has   "G-bis: [uploads] no longer matching fails" "$T/v" "site.toml reads 'upload', but [uploads] mode = hold gives 'fill'"
 for c in crash.st empty.st; do
-    sp2u_gbis_verdict "$T/e.st" "$T/rs.f" "$T/$c" 1 > "$T/v"
+    sp2u_gbis_verdict "$T/e.st" "$T/rs.f" "$T/$c" 1 0 > "$T/v"
     has "G-bis: $c as the probe is no verdict" "$T/v" "gave no answer (not a verdict)"
     check "G-bis: $c ... and nothing else" 1 "$(nlines "$T/v" '^FAIL:')"
 done
-sp2u_gbis_verdict "$T/e.st" "$T/none.f" "$T/g.st" 1 > "$T/v"
+sp2u_gbis_verdict "$T/e.st" "$T/none.f" "$T/g.st" 1 0 > "$T/v"
 has   "G-bis: no restore facts is no verdict" "$T/v" "the restore's facts gave no answer"
+# A restore to a release that carries part 2 (a v3.81 base): the restored
+# sigmond keeps the marker and sigmond.toml, and the restore prints neither
+# the move nor the removal line (bin/smd _restore_below_part2 returns early).
+# Derived: the captured restore output without its two below-part-2 lines;
+# the state after it is the E-bis state.
+grep -v -e 'moved the carry-over marker aside' -e 'pipelines.d/sigmond.toml: the restored' "$RP/restore.txt" > "$T/rp2.txt"
+restore "$T/rp2.txt" "$T/rp2.f"
+check "restore at part 2: no aside, no removal" "- 0" "$(sp2_tok "$T/rp2.f" RS_ASIDE) $(sp2_tok "$T/rp2.f" RS_RMTOML)"
+sp2u_gbis_verdict "$T/e.st" "$T/rp2.f" "$T/e.st" 1 1 > "$T/v"
+clean "G-bis part 2: marker and sigmond.toml kept passes" "$T/v"
+has   "G-bis part 2: says so" "$T/v" "OK: G-bis: the restored sigmond carries part 2, and the restore left the marker and pipelines.d/sigmond.toml standing"
+sp2u_gbis_verdict "$T/e.st" "$T/rs.f" "$T/e.st" 1 1 > "$T/v"
+has   "G-bis part 2: a move line fails" "$T/v" "so the restore should print no 'moved the carry-over marker aside' line"
+has   "G-bis part 2: ... a removal line fails" "$T/v" "so the restore should print no 'removed .../pipelines.d/sigmond.toml' line"
+sp2u_gbis_verdict "$T/e.st" "$T/rp2.f" "$T/g.st" 1 1 > "$T/v"
+has   "G-bis part 2: the marker gone fails" "$T/v" "so the carry-over marker should still stand as a regular file"
+has   "G-bis part 2: ... sigmond.toml gone fails" "$T/v" "so pipelines.d/sigmond.toml should still stand; it is gone"
+has   "G-bis part 2: ... a new aside fails" "$T/v" "so the rolled-back marker count should stay as at E-bis (0); it reads 1"
+sp2u_gbis_verdict "$T/e.st" "$T/rp2.f" "$T/e.st" 1 0 > "$T/v"
+has   "G-bis: the probe flipped to below part 2 fails on the same state" "$T/v" "the carry-over marker still stands after the restore to a release below part 2"
+sp2u_gbis_verdict "$T/e.st" "$T/rp2.f" "$T/e.st" 1 "" > "$T/v"
+has   "G-bis: no probe answer is no verdict" "$T/v" "the part 2 probe of the restored sigmond gave no answer"
 
 
 # ── the restore's moved checkouts ─────────────────────────────────────────
@@ -447,7 +469,7 @@ has   "re-attach: ... but is said unchecked" "$T/v" "UNCHECKED: the re-attach be
 
 # ── G-ter ──────────────────────────────────────────────────────────────────
 tree "$T/t" 1 gate "$RP/sinks-rerun" "$ASIDE"; probe "$T/t" "$T/t.st"
-sp2u_gter_verdict "$T/g.st" "$T/rr.f" "$T/t.st" "$T/up2.f" > "$T/v"; clean "G-ter: the captured rerun passes" "$T/v"
+sp2u_gter_verdict "$T/g.st" "$T/rr.f" "$T/t.st" "$T/up2.f" 0 > "$T/v"; clean "G-ter: the captured rerun passes" "$T/v"
 has   "G-ter: says the client files stood" "$T/v" "OK: G-ter: all 2 client switch file(s) stand byte for byte as at G-bis"
 has   "G-ter: says the carry-over ran again" "$T/v" "OK: G-ter: the carry-over ran (lines 4-7) and wrote its marker before the render (line 8)"
 # The mutation's target: a client file whose [[history]] gained an entry
@@ -456,16 +478,16 @@ tree "$T/t1" 1 gate "$RP/sinks-rerun" "$ASIDE"
 printf '\n[[history]]\nat = "2026-10-23T12:00:00Z"\nfrom = "upload"\nto = "upload"\nby = "carry-over"\nreason = "carried over from [uploads] mode = upload"\n' \
     >> "$T/t1/etc/hs-uploader/sinks/psk-recorder.toml"
 probe "$T/t1" "$T/t1.st"
-sp2u_gter_verdict "$T/g.st" "$T/rr.f" "$T/t1.st" "$T/up2.f" > "$T/v"
+sp2u_gter_verdict "$T/g.st" "$T/rr.f" "$T/t1.st" "$T/up2.f" 0 > "$T/v"
 has   "G-ter: a changed client file fails" "$T/v" "FAIL: G-ter: client switch files changed across the second update: changed psk-recorder.toml"
 tree "$T/t2" 1 gate "$RP/sinks-rerun" "$ASIDE"; rm "$T/t2/etc/hs-uploader/sinks/wspr-recorder.toml"; probe "$T/t2" "$T/t2.st"
-sp2u_gter_verdict "$T/g.st" "$T/rr.f" "$T/t2.st" "$T/up2.f" > "$T/v"
+sp2u_gter_verdict "$T/g.st" "$T/rr.f" "$T/t2.st" "$T/up2.f" 0 > "$T/v"
 has   "G-ter: a client file gone fails" "$T/v" "changed across the second update: gone wspr-recorder.toml"
 hasnt "G-ter: ... with no word of an added file" "$T/v" "an added file means"
 tree "$T/t3" 1 gate "$RP/sinks-rerun" "$ASIDE"
 sed 's/^client = "wspr-recorder"$/client = "meteor-scatter"/' "$RP/sinks-rerun/wspr-recorder.toml" > "$T/t3/etc/hs-uploader/sinks/meteor-scatter.toml"
 probe "$T/t3" "$T/t3.st"
-sp2u_gter_verdict "$T/g.st" "$T/rr.f" "$T/t3.st" "$T/up2.f" > "$T/v"
+sp2u_gter_verdict "$T/g.st" "$T/rr.f" "$T/t3.st" "$T/up2.f" 0 > "$T/v"
 has   "G-ter: a client file added fails" "$T/v" "changed across the second update: added meteor-scatter.toml"
 has   "G-ter: ... naming the likely cause" "$T/v" "an added file means the second step wrote a switch file for a client that had none at G-bis"
 # A switch file that is a symlink: a change of target is a change.
@@ -474,7 +496,7 @@ mv "$T/gl/etc/hs-uploader/sinks/psk-recorder.toml" "$T/gl/psk-a.toml"; cp "$T/gl
 ln -s "$T/gl/psk-a.toml" "$T/gl/etc/hs-uploader/sinks/psk-recorder.toml"; probe "$T/gl" "$T/gl.st"
 check "probe: a symlink records its target" "CLIENT|psk-recorder.toml|link:$T/gl/psk-a.toml" "$(grep '^CLIENT|psk-recorder' "$T/gl.st")"
 ln -sfn "$T/gl/psk-b.toml" "$T/gl/etc/hs-uploader/sinks/psk-recorder.toml"; probe "$T/gl" "$T/gl2.st"
-sp2u_gter_verdict "$T/gl.st" "$T/rr.f" "$T/gl2.st" "$T/up2.f" > "$T/v"
+sp2u_gter_verdict "$T/gl.st" "$T/rr.f" "$T/gl2.st" "$T/up2.f" 0 > "$T/v"
 has   "G-ter: a symlink pointed elsewhere fails" "$T/v" "changed psk-recorder.toml"
 # The CARRY-OVER GATE: a client file present at G-bis that E-bis never had
 # (mag-recorder's, derived from the captured wspr-recorder file) is covered:
@@ -488,59 +510,95 @@ tree "$T/tm" 1 gate "$RP/sinks-rerun" "$ASIDE"
     > "$T/tm/etc/hs-uploader/sinks/mag-recorder.toml"
 probe "$T/tm" "$T/tm.st"
 check "G-ter: E-bis lacked mag-recorder's file" 0 "$(grep -c '^CLIENT|mag-recorder' "$T/e.st")"
-sp2u_gter_verdict "$T/gm.st" "$T/rr.f" "$T/tm.st" "$T/up2.f" > "$T/v"
+sp2u_gter_verdict "$T/gm.st" "$T/rr.f" "$T/tm.st" "$T/up2.f" 0 > "$T/v"
 has   "G-ter: a file new since E-bis that changed fails" "$T/v" "changed mag-recorder.toml"
 tree "$T/tm2" 1 gate "$RP/sinks-rerun" "$ASIDE"
 sed 's/^client = "wspr-recorder"$/client = "mag-recorder"/' "$RP/sinks-rerun/wspr-recorder.toml" > "$T/tm2/etc/hs-uploader/sinks/mag-recorder.toml"
 probe "$T/tm2" "$T/tm2.st"
-sp2u_gter_verdict "$T/gm.st" "$T/rr.f" "$T/tm2.st" "$T/up2.f" > "$T/v"
+sp2u_gter_verdict "$T/gm.st" "$T/rr.f" "$T/tm2.st" "$T/up2.f" 0 > "$T/v"
 clean "G-ter: ... and passes unchanged" "$T/v"
 has   "G-ter: ... counting all three" "$T/v" "all 3 client switch file(s)"
 tree "$T/t4" 0 gate "$RP/sinks-rerun" "$ASIDE"; probe "$T/t4" "$T/t4.st"
-sp2u_gter_verdict "$T/g.st" "$T/rr.f" "$T/t4.st" "$T/up2.f" > "$T/v"
+sp2u_gter_verdict "$T/g.st" "$T/rr.f" "$T/t4.st" "$T/up2.f" 0 > "$T/v"
 has   "G-ter: no marker after the rerun fails" "$T/v" "no carry-over marker"
 grep -v 'carry-over:' "$RP/rerun.txt" > "$T/rr-noco.txt"; step "$T/rr-noco.txt" "$T/rr-noco.f"
-sp2u_gter_verdict "$T/g.st" "$T/rr-noco.f" "$T/t.st" "$T/up2.f" > "$T/v"
+sp2u_gter_verdict "$T/g.st" "$T/rr-noco.f" "$T/t.st" "$T/up2.f" 0 > "$T/v"
 has   "G-ter: gate but no carry-over fails" "$T/v" "printed no 'uploader: carry-over:' line"
 # The restored release's own step: part 1's manifest step, captured
 # (manifest_step_part1.txt): a features line without gate, no carry-over.
 step "$FX/manifest_step_part1.txt" "$T/old.f"
 check "part 1's step: a features line" "1 0 0" "$(sp2_tok "$T/old.f" F_LINE) $(sp2_tok "$T/old.f" F_GATE) $(sp2_tok "$T/old.f" CO_N)"
 tree "$T/t5" 0 part1 "$RP/sinks-rerun" "$ASIDE"; probe "$T/t5" "$T/t5.st"
-sp2u_gter_verdict "$T/g.st" "$T/old.f" "$T/t5.st" "$T/upns.f" > "$T/v"
+sp2u_gter_verdict "$T/g.st" "$T/old.f" "$T/t5.st" "$T/upns.f" 0 > "$T/v"
 has   "G-ter: the restored sigmond left in place fails" "$T/v" "FAIL: G-ter: the second update planned no '[pull] sigmond': the restored sigmond stayed in place"
 has   "G-ter: ... and the files still compared" "$T/v" "OK: G-ter: all 2 client switch file(s)"
-sp2u_gter_verdict "$T/g.st" "$T/old.f" "$T/t5.st" "$T/up2.f" > "$T/v"
+sp2u_gter_verdict "$T/g.st" "$T/old.f" "$T/t5.st" "$T/up2.f" 0 > "$T/v"
 has   "G-ter: pulled, yet the old step ran, fails" "$T/v" "the second manifest step's hs-uploader offers no gate"
-sp2u_gter_verdict "$T/g.st" "$T/rr.f" "$T/t.st" "$T/upnh.f" > "$T/v"
+sp2u_gter_verdict "$T/g.st" "$T/rr.f" "$T/t.st" "$T/upnh.f" 0 > "$T/v"
 has   "G-ter: hs-uploader moved but not pulled fails" "$T/v" "planned no '[pull] hs-uploader'"
-sp2u_gter_verdict "$T/g.st" "$T/rr.f" "$T/t.st" "$T/up1.f" > "$T/v"
+sp2u_gter_verdict "$T/g.st" "$T/rr.f" "$T/t.st" "$T/up1.f" 0 > "$T/v"
 clean "G-ter: hs-uploader not moved needs no pull" "$T/v"
 sed 's/features: gate /features: /' "$RP/rerun.txt" > "$T/rr-ng.txt"; step "$T/rr-ng.txt" "$T/rr-ng.f"
-sp2u_gter_verdict "$T/g.st" "$T/rr-ng.f" "$T/t5.st" "$T/up2.f" > "$T/v"
+sp2u_gter_verdict "$T/g.st" "$T/rr-ng.f" "$T/t5.st" "$T/up2.f" 0 > "$T/v"
 has   "G-ter: no gate after the pulls fails" "$T/v" "FAIL: G-ter: the second manifest step's hs-uploader offers no gate"
-sp2u_gter_verdict "$T/g.st" "$T/old.f" "$T/t5.st" "$T/up0.f" > "$T/v"
+sp2u_gter_verdict "$T/g.st" "$T/old.f" "$T/t5.st" "$T/up0.f" 0 > "$T/v"
 clean "G-ter: a restore that moved nothing is no failure" "$T/v"
 has   "G-ter: ... but is said unchecked" "$T/v" "UNCHECKED: the carry-over's second run (the restore moved no sigmond"
-sp2u_gter_verdict "$T/p1.st" "$T/old.f" "$T/p1.st" "$T/up0.f" > "$T/v"
+sp2u_gter_verdict "$T/p1.st" "$T/old.f" "$T/p1.st" "$T/up0.f" 0 > "$T/v"
 has   "G-ter: no client file anywhere is said unchecked" "$T/v" "UNCHECKED: every client switch file kept"
 for c in crash.st empty.st; do
-    sp2u_gter_verdict "$T/g.st" "$T/rr.f" "$T/$c" "$T/up2.f" > "$T/v"
+    sp2u_gter_verdict "$T/g.st" "$T/rr.f" "$T/$c" "$T/up2.f" 0 > "$T/v"
     has "G-ter: $c as the probe is no verdict" "$T/v" "gave no answer (not a verdict)"
     hasnt "G-ter: $c ... and no OK line" "$T/v" "OK:"
-    sp2u_gter_verdict "$T/$c" "$T/rr.f" "$T/t.st" "$T/up2.f" > "$T/v"
+    sp2u_gter_verdict "$T/$c" "$T/rr.f" "$T/t.st" "$T/up2.f" 0 > "$T/v"
     has "G-ter: $c as the G-bis probe is no verdict" "$T/v" "gave no answer (not a verdict)"
 done
-sp2u_gter_verdict "$T/g.st" "$T/rr.f" "$T/t.st" "$T/upx.f" > "$T/v"
+sp2u_gter_verdict "$T/g.st" "$T/rr.f" "$T/t.st" "$T/upx.f" 0 > "$T/v"
 has   "G-ter: no update facts is no verdict" "$T/v" "the second update's facts gave no answer"
 check "the comparison ends with its sentinel" "DIFFDONE:1" "$(sp2u_sum_diff "$T/g.st" "$T/t.st" CLIENT | tail -1)"
+
+# G-ter after a restore to part 2: the marker stood through the rollback, so
+# the second manifest step takes the marker-standing pass and writes no
+# marker.  Derived: the captured rerun without its marker line.
+grep -v 'carry-over: marker written' "$RP/rerun.txt" > "$T/rr-late.txt"; step "$T/rr-late.txt" "$T/rr-late.f"
+check "rerun without the marker line: no marker line" 0 "$(sp2_tok "$T/rr-late.f" CO_MARKER)"
+sp2u_gter_verdict "$T/e.st" "$T/rr-late.f" "$T/e.st" "$T/up2.f" 1 > "$T/v"
+clean "G-ter part 2: no second carry-over passes" "$T/v"
+has   "G-ter part 2: says so" "$T/v" "OK: G-ter: the marker stood through the rollback (part 2 restored), and the second update ran no second carry-over"
+sp2u_gter_verdict "$T/e.st" "$T/rr.f" "$T/e.st" "$T/up2.f" 1 > "$T/v"
+has   "G-ter part 2: a second marker write fails" "$T/v" "so the carry-over should not run again"
+sp2u_gter_verdict "$T/g.st" "$T/rr-late.f" "$T/e.st" "$T/up2.f" 1 > "$T/v"
+has   "G-ter part 2: no marker at G-bis fails" "$T/v" "so the marker should have stood at G-bis; it did not"
+sp2u_gter_verdict "$T/e.st" "$T/rr-late.f" "$T/e.st" "$T/up2.f" 0 > "$T/v"
+has   "G-ter: the probe flipped to below part 2 wants the carry-over again" "$T/v" "printed no 'carry-over: marker written' line"
+sp2u_gter_verdict "$T/e.st" "$T/rr-late.f" "$T/e.st" "$T/up2.f" "" > "$T/v"
+has   "G-ter: no probe answer is no verdict" "$T/v" "the part 2 probe of the restored sigmond gave no answer"
+
+# ── UPL_P2, the part 2 probe, on trees (its fixed root rewritten) ─────────
+[ -n "${UPL_P2:-}" ] || { echo "  FAIL  UPL_P2 not found between the sink2b_update markers"; fail=1; }
+check "UPL_P2 is ASCII" 0 "$(printf '%s' "${UPL_P2:-}" | LC_ALL=C grep -c '[^ -~	]')"
+p2run(){ # <root>: the probe's RESTP2 against that tree
+    printf '%s\n' "$UPL_P2" | sed "s|^r=/opt/git/sigmond/sigmond\$|r=$1|" > "$T/p2.sh"
+    bash "$T/p2.sh" > "$T/p2.out" 2>&1
+    grep -qx 'P2DONE:1' "$T/p2.out" || echo "nosentinel"
+    sp2_tok "$T/p2.out" RESTP2
+}
+mkdir -p "$T/p2a/lib/sigmond"; : > "$T/p2a/lib/sigmond/sink_carryover.py"
+check "probe: part 2 tree reads 1" 1 "$(p2run "$T/p2a")"
+mkdir -p "$T/p2b/lib/sigmond"
+check "probe: no sink_carryover.py reads 0" 0 "$(p2run "$T/p2b")"
+mkdir -p "$T/p2c/lib/sigmond"; ln -s "$T/p2a/lib/sigmond/sink_carryover.py" "$T/p2c/lib/sigmond/sink_carryover.py"
+check "probe: a symlinked sink_carryover.py reads 0" 0 "$(p2run "$T/p2c")"
+mkdir -p "$T/p2d/lib"; ln -s "$T/p2a/lib/sigmond" "$T/p2d/lib/sigmond"
+check "probe: a symlinked lib/sigmond reads 0" 0 "$(p2run "$T/p2d")"
+check "probe: a missing tree reads 0" 0 "$(p2run "$T/p2-none")"
 
 # ── a verdict with no finding is no verdict ───────────────────────────────
 _sp2u_finish true > "$T/v"
 check "finish: a body that printed nothing gets no sentinel" "" "$(cat "$T/v")"
 _sp2u_finish _sp2u_no_such_body > "$T/v"
 hasnt "finish: a missing body gets no sentinel" "$T/v" "VERDICT:done"
-( unset -f _sp2u_gter; sp2u_gter_verdict "$T/g.st" "$T/rr.f" "$T/t.st" "$T/up2.f" ) > "$T/v"
+( unset -f _sp2u_gter; sp2u_gter_verdict "$T/g.st" "$T/rr.f" "$T/t.st" "$T/up2.f" 0 ) > "$T/v"
 hasnt "finish: G-ter with its body unset gets no sentinel" "$T/v" "VERDICT:done"
 
 # ── sp2u_report ────────────────────────────────────────────────────────────
@@ -568,7 +626,9 @@ for w in 'sp2u_ebis_verdict "$WORK/eb0-sinks-pre.out" "$WORK/eb1-sink.facts" "$W
          'sp2u_report "$WORK/eb1-sink.verdict" "$WORK/eb1-manifest.out" "E-bis"' \
          'sp2u_moved "$WORK/g3-restore-apply.out" > "$WORK/g3-moved.facts"' \
          'grep -q '\''^MOVED|sigmond|'\'' "$WORK/g3-moved.facts" && GB_SIGMOVED=1' \
-         'sp2u_gbis_verdict "$WORK/eb1-sinks.out" "$WORK/gb0-restore.facts" "$WORK/gb0-sinks.out" "$GB_SIGMOVED" > "$WORK/gb0-sink.verdict"' \
+         'sp2u_gbis_verdict "$WORK/eb1-sinks.out" "$WORK/gb0-restore.facts" "$WORK/gb0-sinks.out" "$GB_SIGMOVED" "$GB_P2" > "$WORK/gb0-sink.verdict"' \
+         'gx_ok 60 gb0-p2 "$UPL_P2" "G-bis: does the restored sigmond carry part 2?"' \
+         'GB_P2="$(gx_tok "$GX_OUT" RESTP2)"' \
          'sp2u_report "$WORK/gb0-sink.verdict" "$WORK/g3-restore-apply.out" "G-bis"' \
          'gx_ok 120 e9-branches "$UPL_BRANCHES" "the branch each checkout sits on"' \
          'sp2u_reattach_plan "$WORK/g3-moved.facts" "$WORK/branches-at-e.txt" > "$WORK/gt0-reattach.plan"' \
@@ -576,7 +636,7 @@ for w in 'sp2u_ebis_verdict "$WORK/eb0-sinks-pre.out" "$WORK/eb1-sink.facts" "$W
          'sp2u_reattach_verdict "$WORK/gt0-reattach.plan" "$WORK/gt0-reattach.out" > "$WORK/gt0-reattach.verdict"' \
          'sp2u_report "$WORK/gt0-reattach.verdict" "$WORK/gt0-reattach.out" "G-ter re-attach"' \
          'sp2u_update_facts "$WORK/gt1-update-apply.out" "$WORK/g3-moved.facts" > "$WORK/gt1-update.facts"' \
-         'sp2u_gter_verdict "$WORK/gb0-sinks.out" "$WORK/gt2-sink.facts" "$WORK/gt2-sinks.out" "$WORK/gt1-update.facts" > "$WORK/gt2-sink.verdict"' \
+         'sp2u_gter_verdict "$WORK/gb0-sinks.out" "$WORK/gt2-sink.facts" "$WORK/gt2-sinks.out" "$WORK/gt1-update.facts" "${GB_P2:-}" > "$WORK/gt2-sink.verdict"' \
          'sp2u_report "$WORK/gt2-sink.verdict" "$WORK/gt2-manifest.out" "G-ter"'; do
     check "the rig runs: ${w:0:60}" 1 "$(grep -cxF -- "$w" "$SRC")"
 done
@@ -588,6 +648,8 @@ ln(){ grep -nF -- "$1" "$SRC" | head -1 | cut -d: -f1; }
     && echo "  ok    E-bis probes before and after the step" || { echo "  FAIL  E-bis probe order"; fail=1; }
 [ "$(ln 'gx_ok 1800 g3-restore-apply')" -lt "$(ln 'gx_ok 120 gb0-sinks')" ] \
     && echo "  ok    G-bis probes after the restore" || { echo "  FAIL  G-bis probe order"; fail=1; }
+[ "$(ln 'gx_ok 1800 g3-restore-apply')" -lt "$(ln 'gx_ok 60 gb0-p2')" ] && [ "$(ln 'gx_ok 60 gb0-p2')" -lt "$(ln 'sp2u_gbis_verdict "$WORK')" ] \
+    && echo "  ok    the part 2 probe runs after the restore, before the G-bis verdict" || { echo "  FAIL  part 2 probe order"; fail=1; }
 [ "$(ln 'gx_ok 1800 g3-restore-apply')" -lt "$(ln 'gx_ok 300 gt0-reattach')" ] && [ "$(ln 'gx_ok 300 gt0-reattach')" -lt "$(ln 'gx_ok 3600 gt1-update-apply')" ] \
     && echo "  ok    the re-attach runs after the restore and before the second update" || { echo "  FAIL  re-attach order"; fail=1; }
 [ "$(ln 'gx_ok 120 e9-branches')" -lt "$(ln 'gx_ok 1800 g3-restore-apply')" ] \

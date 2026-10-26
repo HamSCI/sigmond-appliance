@@ -1433,6 +1433,23 @@ UPLEOF
 # carry-over maps it (sink_carryover.SITE_FROM_MODE, coordination.Uploads):
 # a mode outside upload/hold/discard derives from `enabled`; no file or no
 # [uploads] reads upload.  SP2U_ROOT exists for the hermetic test.
+# UPL_P2: whether the restored sigmond carries sink part 2, by the product's
+# own probe (bin/smd _restored_sigmond_is_part2): lib and lib/sigmond stand
+# as real directories and lib/sigmond/sink_carryover.py as a regular file,
+# none of them a symlink.  RESTP2:1 or RESTP2:0, then P2DONE:1.
+UPL_P2=$(cat <<'P2EOF'
+r=/opt/git/sigmond/sigmond
+p=1
+for d in "$r/lib" "$r/lib/sigmond"; do
+    if [ ! -d "$d" ] || [ -L "$d" ]; then p=0; fi
+done
+f="$r/lib/sigmond/sink_carryover.py"
+if [ ! -f "$f" ] || [ -L "$f" ]; then p=0; fi
+echo "RESTP2:$p"
+echo "P2DONE:1"
+P2EOF
+)
+
 UPL_SINKS=$(cat <<'SP2UEOF'
 python3 -I - "${SP2U_ROOT:-}" <<'PY'
 import hashlib, os, stat, sys, tomllib
@@ -1699,19 +1716,55 @@ _sp2u_ebis() {
         return
     fi
     if [ "$(sp2_tok "$pre" MARKER)" = 1 ]; then
-        echo "UNCHECKED: the carry-over's first run at E-bis (the marker stood before the manifest step: a resumed run)"
+        if [ "${RESUME:-0}" = 1 ]; then
+            echo "UNCHECKED: the carry-over's first run at E-bis (the marker stood before the manifest step: a resumed run)"
+        else
+            echo "UNCHECKED: the carry-over's first run at E-bis (the marker stood before the manifest step: the base release already carries sink part 2, and its own bring-up ran the carry-over)"
+        fi
         _sp2u_placed "$g" E-bis 1
         return
     fi
     _sp2u_carried "$s" "$g" E-bis
 }
 
-# sp2u_gbis_verdict <state-at-E-bis> <restore-facts> <state-at-G-bis> <sigmond-moved 1|0>
+# sp2u_gbis_verdict <state-at-E-bis> <restore-facts> <state-at-G-bis> <sigmond-moved 1|0> <restored-part2 1|0>
+# The fifth argument comes from UPL_P2, the product's own probe
+# (bin/smd _restored_sigmond_is_part2): 1 when the restored sigmond carries
+# lib/sigmond/sink_carryover.py.  A restore to such a release leaves the
+# marker and pipelines.d/sigmond.toml in place (spec §6.7); only a restore
+# below part 2 moves the one aside and removes the other.  "The restore moved
+# sigmond" alone no longer says which: a v3.81 base moves sigmond and stays
+# at part 2.
 sp2u_gbis_verdict() {
     _sp2u_finish _sp2u_gbis "$@"
 }
+_sp2u_gbis_part2() {
+    local e="$1" r="$2" g="$3" v d
+    v="$(sp2_tok "$r" RS_ASIDE)"
+    [ "$v" = - ] \
+        || echo "FAIL: G-bis: the restored sigmond carries part 2, so the restore should print no 'moved the carry-over marker aside' line; it moved the marker to ${v:-?}"
+    v="$(sp2_tok "$r" RS_RMTOML)"
+    [ "$v" = 0 ] \
+        || echo "FAIL: G-bis: the restored sigmond carries part 2, so the restore should print no 'removed .../pipelines.d/sigmond.toml' line; it printed one"
+    v="$(sp2_tok "$r" RS_MOVEFAIL)"; d="$(sp2_tok "$r" RS_RMFAIL)"
+    [ "$v" = 0 ] && [ "$d" = 0 ] \
+        || echo "FAIL: G-bis: the restored sigmond carries part 2, so the restore should try neither the marker move nor the sigmond.toml removal; it printed ${v:-?} move and ${d:-?} removal failure line(s)"
+    [ "$(sp2_tok "$g" MARKER)" = 1 ] && [ "$(sp2_tok "$g" MARKERREG)" = 1 ] \
+        || echo "FAIL: G-bis: the restored sigmond carries part 2, so the carry-over marker should still stand as a regular file; it does not (MARKER $(sp2_tok "$g" MARKER), regular $(sp2_tok "$g" MARKERREG))"
+    v="$(sp2u_num "$(sp2_tok "$g" ASIDEN)")"; d="$(sp2u_num "$(sp2_tok "$e" ASIDEN)")"
+    [ -n "$v" ] && [ -n "$d" ] && [ "$v" = "$d" ] \
+        || echo "FAIL: G-bis: the restored sigmond carries part 2, so the rolled-back marker count should stay as at E-bis (${d:-?}); it reads ${v:-?}"
+    if [ "$(sp2_tok "$e" SIGFILE)" = 1 ]; then
+        [ "$(sp2_tok "$g" SIGFILE)" = 1 ] \
+            || echo "FAIL: G-bis: the restored sigmond carries part 2, so pipelines.d/sigmond.toml should still stand; it is gone"
+    fi
+    if [ "$(sp2_tok "$g" MARKER)" = 1 ] && [ "$(sp2_tok "$g" SIGFILE)" = 1 ]; then
+        echo "OK: G-bis: the restored sigmond carries part 2, and the restore left the marker and pipelines.d/sigmond.toml standing"
+    fi
+    _sp2u_placed "$g" G-bis 1
+}
 _sp2u_gbis() {
-    local e="$1" r="$2" g="$3" moved="$4" v a d
+    local e="$1" r="$2" g="$3" moved="$4" p2="${5:-}" v a d
     _sp2u_inputs "G-bis: the switch probe after E-bis" "$e" SINKSDONE \
                  "G-bis: the restore's facts" "$r" RESTFACTS \
                  "G-bis: the switch probe after the restore" "$g" SINKSDONE || return
@@ -1727,6 +1780,13 @@ _sp2u_gbis() {
         echo "UNCHECKED: the restore's marker move and sigmond.toml removal (restore did not move sigmond, so the restored release still carries part 2)"
         return
     fi
+    case "$p2" in
+        1) _sp2u_gbis_part2 "$e" "$r" "$g"; return ;;
+        0) ;;
+        *) echo "FAIL: G-bis: the part 2 probe of the restored sigmond gave no answer ('${p2}'), so the verdict cannot tell which outcome to expect (not a verdict)"
+           return ;;
+    esac
+    # Below part 2: the restore moves the marker aside and removes sigmond.toml.
     v="$(sp2_tok "$r" RS_MOVEFAIL)"; [ "$v" = 0 ] || echo "FAIL: G-bis: the restore could not move the marker aside (${v:-?} line(s))"
     v="$(sp2_tok "$r" RS_RMFAIL)";   [ "$v" = 0 ] || echo "FAIL: G-bis: the restore could not remove pipelines.d/sigmond.toml (${v:-?} line(s))"
     [ "$(sp2_tok "$g" MARKER)" = 0 ] \
@@ -1947,7 +2007,7 @@ sp2u_gter_verdict() {
     _sp2u_finish _sp2u_gter "$@"
 }
 _sp2u_gter() {
-    local b="$1" s="$2" g="$3" u="$4" v d
+    local b="$1" s="$2" g="$3" u="$4" p2="${5:-}" v d
     _sp2u_inputs "G-ter: the switch probe after the restore" "$b" SINKSDONE \
                  "G-ter: the second manifest step's facts" "$s" STEPFACTS \
                  "G-ter: the switch probe after the second update" "$g" SINKSDONE \
@@ -1982,6 +2042,25 @@ _sp2u_gter() {
     if [ "$(sp2_tok "$u" MOVED_HSU)" = 1 ] && [ "$(sp2_tok "$u" PULL_HSU)" != 1 ]; then
         echo "FAIL: G-ter: the second update planned no '[pull] hs-uploader': the restored hs-uploader, which offers no gate, stayed in place"; v=1
     fi
+    case "$p2" in
+        1)  # The restored sigmond carried part 2, so the marker stood
+            # through the rollback (G-bis), and the second manifest step
+            # takes the marker-standing pass: no second carry-over.
+            v="$(sp2_tok "$s" CO_FAILED)"
+            [ "$v" = 0 ] || echo "FAIL: G-ter: the second manifest step printed ${v:-?} carry-over failure line(s)"
+            v="$(sp2u_num "$(sp2_tok "$s" CO_MARKER)")"
+            [ "${v:-1}" = 0 ] \
+                || echo "FAIL: G-ter: the restored sigmond carried part 2 and the marker stood, so the carry-over should not run again; the second manifest step printed 'carry-over: marker written' (line ${v:-?})"
+            [ "$(sp2_tok "$b" MARKER)" = 1 ] \
+                || echo "FAIL: G-ter: the restored sigmond carried part 2, so the marker should have stood at G-bis; it did not"
+            [ "${v:-1}" = 0 ] && [ "$(sp2_tok "$b" MARKER)" = 1 ] \
+                && echo "OK: G-ter: the marker stood through the rollback (part 2 restored), and the second update ran no second carry-over"
+            _sp2u_placed "$g" G-ter 1
+            return ;;
+        0)  ;;
+        *)  echo "FAIL: G-ter: the part 2 probe of the restored sigmond gave no answer ('${p2}'), so the verdict cannot tell whether the carry-over should run again (not a verdict)"
+            return ;;
+    esac
     if [ "$(sp2_tok "$s" F_GATE)" = 1 ]; then
         _sp2u_carried "$s" "$g" G-ter
     elif [ "$v" = 0 ]; then
@@ -2303,9 +2382,14 @@ else
     ET_PK="$(gx_tok "$GX_OUT" PAIRKEY)"
     [ -n "$ET_PK" ] || fatal "$GX_OUT" "E-ter: the pairing-key probe returned no answer (not a verdict)"
     if [ "$ET_PK" = 1 ]; then
-        say "⚠ PHASE E-ter step 1 NOT EVALUATED — the guest already holds /etc/sigmond/rac-switch.key (a resumed run after an earlier pairing)"
+        if [ "$RESUME" = 1 ]; then
+            ET_PKWHY="a resumed run after an earlier pairing"
+        else
+            ET_PKWHY="the base release's wizard paired the remote-access switch at install (v3.71 and later)"
+        fi
+        say "⚠ PHASE E-ter step 1 NOT EVALUATED — the guest already holds /etc/sigmond/rac-switch.key ($ET_PKWHY)"
         say "  step 1 needs an unpaired guest; the pairing and the later steps go on"
-        ETER_UNCHECKED="step 1, the unpaired message (the guest already held /etc/sigmond/rac-switch.key: a resumed run)"
+        ETER_UNCHECKED="step 1, the unpaired message (the guest already held /etc/sigmond/rac-switch.key: $ET_PKWHY)"
     else
         gx_ok 120 et1-unpaired 'smd remote status' "E-ter: smd remote status, unpaired"
         sed 's/^/      /' "$GX_OUT"
@@ -2770,10 +2854,21 @@ fi
 # against the state E-bis left.
 GB_SIGMOVED=0
 grep -q '^MOVED|sigmond|' "$WORK/g3-moved.facts" && GB_SIGMOVED=1
+# Which outcome to expect hangs on the restored release, not on the move:
+# probe the restored checkout as the product does (UPL_P2).
+gx_ok 60 gb0-p2 "$UPL_P2" "G-bis: does the restored sigmond carry part 2?"
+GB_P2="$(gx_tok "$GX_OUT" RESTP2)"
+[ "$(gx_tok "$GX_OUT" P2DONE)" = 1 ] && [ -n "$GB_P2" ] \
+    || fatal "$GX_OUT" "G-bis: the part 2 probe of the restored sigmond returned no answer (not a verdict)"
+if [ "$GB_P2" = 1 ]; then
+    say "the restored sigmond carries part 2 (lib/sigmond/sink_carryover.py stands): expect the marker and pipelines.d/sigmond.toml to stay"
+else
+    say "the restored sigmond predates part 2: expect the marker moved aside and pipelines.d/sigmond.toml removed"
+fi
 sp2u_restore_facts "$WORK/g3-restore-apply.out" > "$WORK/gb0-restore.facts"
 gx_ok 120 gb0-sinks "$UPL_SINKS" "G-bis: the switch files after the restore"
 sed 's/^/      /' "$GX_OUT"
-sp2u_gbis_verdict "$WORK/eb1-sinks.out" "$WORK/gb0-restore.facts" "$WORK/gb0-sinks.out" "$GB_SIGMOVED" > "$WORK/gb0-sink.verdict"
+sp2u_gbis_verdict "$WORK/eb1-sinks.out" "$WORK/gb0-restore.facts" "$WORK/gb0-sinks.out" "$GB_SIGMOVED" "$GB_P2" > "$WORK/gb0-sink.verdict"
 sp2u_report "$WORK/gb0-sink.verdict" "$WORK/g3-restore-apply.out" "G-bis"
 
 # ── the restored smd reads the manifest as its own ─────────────────────
@@ -2913,7 +3008,7 @@ sp2u_step_facts "$WORK/gt2-manifest.out" > "$WORK/gt2-sink.facts"
 gx_ok 120 gt2-sinks "$UPL_SINKS" "G-ter: the switch files after the second update"
 sed 's/^/      /' "$GX_OUT"
 sp2u_update_facts "$WORK/gt1-update-apply.out" "$WORK/g3-moved.facts" > "$WORK/gt1-update.facts"
-sp2u_gter_verdict "$WORK/gb0-sinks.out" "$WORK/gt2-sink.facts" "$WORK/gt2-sinks.out" "$WORK/gt1-update.facts" > "$WORK/gt2-sink.verdict"
+sp2u_gter_verdict "$WORK/gb0-sinks.out" "$WORK/gt2-sink.facts" "$WORK/gt2-sinks.out" "$WORK/gt1-update.facts" "${GB_P2:-}" > "$WORK/gt2-sink.verdict"
 sp2u_report "$WORK/gt2-sink.verdict" "$WORK/gt2-manifest.out" "G-ter"
 gx_ok 120 gt3-split "$UPL_SPLIT" "G-ter: the key split after the second update"
 sed 's/^/      /' "$GX_OUT"
