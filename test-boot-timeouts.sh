@@ -71,6 +71,28 @@ else
         "$(grep -c 'dnsmasq.service.d' "$FB") dnsmasq drop-in references"
 fi
 
+echo "── a keyboard must not switch the station off ──"
+# AI6VN-PM 2026-10-28 19:48:17 "Power key pressed short" — a monitor and a USB
+# keyboard went in, the button got caught, and the station went down.  This
+# fix lived only in sigmond's host-setup.sh (the manual DASI2 path) at first;
+# nothing invokes that during an appliance install, so the image shipped
+# without it.  Assert it is HERE, in the path that builds the image.
+if grep -q 'logind.conf.d/10-sigmond-console-keys.conf' "$FB" \
+   && grep -A12 "logind.conf.d/10-sigmond-console-keys.conf <<'LOGINDEOF'" "$FB" \
+      | grep -q '^HandlePowerKey=ignore'; then
+    ok "firstboot disables the console power key on the host"
+else
+    bad "the image ships with HandlePowerKey=poweroff: plugging in a keyboard can switch a station off" \
+        "no logind drop-in in $FB"
+fi
+# The guest must NOT get this: Proxmox stops it with an ACPI power-key event.
+if grep -qiE 'NEVER THE DECODER VM|HOST ONLY' "$FB"; then
+    ok "the drop-in is marked host-only (the VM needs its power key for qm shutdown)"
+else
+    bad "nothing records that this must not go in the VM" \
+        "a VM ignoring its power key turns every host reboot into an unclean guest shutdown"
+fi
+
 echo
 echo "passed: $pass   failed: $fail"
 [ "$fail" -eq 0 ]

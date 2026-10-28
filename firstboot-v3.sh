@@ -1710,6 +1710,47 @@ RestartSec=5s
 DNSRSEOF
 echo "### dnsmasq given Restart=on-failure (stock unit is Restart=no)"
 
+# ── a keyboard plugged into this box must not switch the station off ──────
+# ⛔ systemd ships HandlePowerKey=poweroff.  On an appliance a power-key
+# press is almost never a decision: it is an operator connecting a monitor and
+# a USB keyboard to find out why the station is misbehaving, and catching the
+# button on the way past.  Measured on AI6VN-PM 2026-10-28:
+#     19:48:17  systemd-logind[792]: Power key pressed short.
+# a clean poweroff one second later, and the station was off the air until
+# somebody walked over to it.  On a unit at McMurdo that is a field visit to
+# undo a cable insertion.  Suspend and hibernate go too: a suspended station
+# is as dead as a powered-off one and does not even look off.
+#
+# ⛔ THE HOST ONLY, NEVER THE DECODER VM.  Proxmox stops a guest by sending
+# it an ACPI power-key event (`qm shutdown`, and pve-guests at host shutdown).
+# A VM that ignored its power key would sit out the full 180 s shutdown
+# timeout and then be killed, so every host reboot would become an unclean
+# guest shutdown.  In the guest the power key is how it is stopped CORRECTLY;
+# only here is it a hazard.  One setting, opposite meanings.
+#
+# Not a lockout: a firmware long-press still cuts power below anything systemd
+# sees, so the hardware escape hatch remains.
+mkdir -p /etc/systemd/logind.conf.d
+cat > /etc/systemd/logind.conf.d/10-sigmond-console-keys.conf <<'LOGINDEOF'
+# Written by sigmond firstboot — do not edit by hand.
+# HOST ONLY.  The decoder VM keeps systemd's defaults so `qm shutdown` can
+# stop it cleanly.
+[Login]
+HandlePowerKey=ignore
+HandlePowerKeyLongPress=ignore
+HandleSuspendKey=ignore
+HandleSuspendKeyLongPress=ignore
+HandleHibernateKey=ignore
+HandleHibernateKeyLongPress=ignore
+HandleLidSwitch=ignore
+HandleLidSwitchExternalPower=ignore
+HandleLidSwitchDocked=ignore
+LOGINDEOF
+# reload, never restart: restarting logind drops live sessions, and firstboot
+# is routinely watched over one.
+systemctl reload systemd-logind 2>/dev/null || true
+echo "### console power/suspend keys disabled on this host (the VM keeps its own)"
+
 # ── a FORWARDING host must be told to accept router advertisements ─────────
 # ⛔ THE SINGLE ROOT CAUSE OF AI6VN's UNREACHABLE INSTALL, 2026-10-21.
 # A Proxmox host forwards (it routes for the decoder VM), and Linux ignores
