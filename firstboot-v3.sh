@@ -3271,6 +3271,15 @@ _scrub_panel_file(){
     fi
     sed -i -e '/^  ==== Sigmond appliance .* ====$/d' \
            -e '/^  Decoder VM: [0-9]* (sigmond-decoder-.*Wizard: sigmond-setup$/d' "$f" 2>/dev/null
+    # ⛔ THE HYPERVISOR-LOGIN LINE LIVES BELOW THE FOOTER, SO THE RANGE
+    # DELETE CANNOT REACH IT.  The refresh removes the panel with
+    # /^════ Sigmond appliance /,/^════ end Sigmond panel/d — a range that ENDS
+    # at the footer.  A line placed after the footer survives every refresh and
+    # accumulates one copy per refresh, which is exactly the failure recorded
+    # at the refresh site: ~1000 lines in /etc/issue after 3 days (AI6VN
+    # 2026-09-09).  Moving one line re-arms it, so the line is deleted here by
+    # its own text, wherever it sits.
+    sed -i '/^ Press Enter here for a hypervisor login/d' "$f" 2>/dev/null
 }
 _paint_vt1(){
     # Never over the wizard/finalizer transcript, a live split-console session,
@@ -3647,7 +3656,81 @@ if [ -x "$RAC_SWITCH" ]; then
     case "$RSTATE" in on|off|down) ;; *) _rfresh=no ;; esac
     [ "$_rfresh" = yes ] || RSTATE=unread
 fi
+
+# ⛔ THE SWITCH CAN BE OLDER THAN THE STATION IT DESCRIBES, AND THE PANEL
+# CAN SEE THAT FOR ITSELF.
+#
+# /usr/local/sbin/sigmond-setup GENERATES the switch, and it is baked into the
+# image: `smd update` refreshes the decoder VM's components and never touches
+# the host's /usr/local/sbin.  So a host installed before the dual-gateway
+# change keeps a switch that looks for /etc/sigmond/frpc-host.toml and
+# sigmond-rac-host.service.  Once a station has per-gateway sessions NEITHER
+# EXISTS -- the configs are frpc-host-<gw>.toml and the units are
+# sigmond-rac-host@<gw>.service -- so the switch answers registered=no,
+# tunnel=stopped, and the panel prints "NOT REGISTERED YET".
+#
+# Measured on AI6VN-PM 2026-10-28: it printed exactly that while BOTH tunnels
+# were up and an administrator was logged in THROUGH one of them, refresh
+# after refresh.  rob: "the panel has been refreshed several times and it
+# still doesn't recognize that the racks are open."
+#
+# A panel that contradicts the operator's own ssh session teaches them to stop
+# believing the panel, which is worse than saying nothing.  So where the
+# switch's answer disagrees with what is plainly on disk and in systemd, the
+# panel believes the station.  It never invents a session: it only promotes
+# what it can see running.
+_rac_gw=""; _rac_live=""; _rac_srv=""
+for _t in "$(dirname "$RAC_TOML")"/frpc-host-*.toml; do
+    [ -e "$_t" ] || continue
+    _n=${_t##*/frpc-host-}; _n=${_n%.toml}
+    _rac_gw="${_rac_gw:+$_rac_gw }$_n"
+    # Read BOTH the word and the exit status.  `is-active` exits 0 only for
+    # "active", but "activating" -- a unit inside its restart delay -- is up
+    # as far as anyone trying to get in is concerned, and it prints that word
+    # while exiting non-zero.  Taking only the status would blink the panel
+    # between two restart attempts; taking only the word breaks wherever
+    # systemctl is stubbed to answer by status alone.
+    if _rst=$(systemctl is-active "sigmond-rac-host@$_n.service" 2>/dev/null)
+    then _rok=yes; else _rok=no; fi
+    case "${_rst:-}" in active|activating) _rok=yes ;; esac
+    [ "$_rok" = yes ] && _rac_live="${_rac_live:+$_rac_live }$_n"
+done
+if [ -n "$_rac_gw" ]; then
+    # Registered is a fact about configuration: a per-gateway config IS the
+    # registration, whatever the legacy single-file test concluded.
+    [ "$RREGD" = yes ] || RREGD=yes
+    if [ -n "$_rac_live" ]; then
+        RRUNS=running
+        # Only promote a state the switch got WRONG, never one the operator
+        # chose: `off` is a decision and must keep saying so (with its own
+        # "the tunnel still runs" note), and `unread` must keep reporting that
+        # it could not read, rather than being papered over.
+        case "$RSTATE" in down) RSTATE=on ;; esac
+    fi
+    # The gateway name comes from a config that exists, since RAC_TOML does
+    # not.  !! STASHED, not assigned: `RSRV=""` is initialised BELOW this
+    # block, so setting it here would be silently wiped a few lines on.  The
+    # test "it names the gateway from the per-gateway config" caught exactly
+    # that.
+    for _n in $_rac_gw; do
+        _rac_srv=$(awk -F\" '/^serverAddr/{print $2; exit}' \
+                   "$(dirname "$RAC_TOML")/frpc-host-$_n.toml" 2>/dev/null)
+        [ -n "$_rac_srv" ] && break
+    done
+    # Channel counts the stale switch could not collect.  Declared is read
+    # from the configs; up is left alone when the switch had no answer, so a
+    # count is never invented -- "? /N" says plainly that it is unknown.
+    if [ "${RDECL:-0}" = 0 ]; then
+        RDECL=0
+        for _n in $_rac_gw; do
+            _c=$(grep -c '^name *=' "$(dirname "$RAC_TOML")/frpc-host-$_n.toml" 2>/dev/null || echo 0)
+            [ "$_c" -gt "$RDECL" ] && RDECL=$_c
+        done
+    fi
+    [ -n "${RUP:-}" ] || RUP="?"
+fi
 RSRV=""; RTIER=""; RREG=""; RAC_ADMIN=""; RAC_USER=""
+[ -n "${_rac_srv:-}" ] && RSRV="$_rac_srv"
 if [ -r "$RAC_TOML" ]; then
     RSRV=$(awk -F'"' '/^serverAddr/{print $2; exit}' "$RAC_TOML")
     RTIER=$(cat "$RAC_MARKS/rac-tier" 2>/dev/null)
@@ -3967,7 +4050,6 @@ PANEL=$(cat <<PEOF
 ════ Sigmond appliance $VERSION ${CONF:+— station ${CONF%% *}} ════
  The station is the DECODER VIRTUAL MACHINE below — this screen is the
  computer that hosts it.
- Press Enter here for a hypervisor login; typing does not echo, which is normal.
 ${NETWARN}${BRINGUP}${RXWARN}
  Proxmox host   ssh ${_LROOT}@${_HIP}   ·   web UI  $(_hl addr "https://$(ipurl "${HOSTIP:-<no-ip-yet>}"):8006")
 
@@ -3984,6 +4066,8 @@ ${RACBLOCK}
  From the host:  sigmond-check (is it working?) · sigmond-vm (a shell in
                  the virtual machine) · qm terminal $VMID · sigmond-setup --reconfigure
 ════ end Sigmond panel ════  $VERSION ${CONF:+· station ${CONF%% *} }════
+
+ Press Enter here for a hypervisor login; typing does not echo, which is normal.
 PEOF
 )
 # /etc/issue and VT1 take the colour; /etc/motd takes the plain text.

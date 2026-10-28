@@ -439,5 +439,42 @@ grep -q '^# >>> rac_block' "$T/issue" && ok "the block ships inside sigmond-issu
     || bad "the block ships inside sigmond-issue" "the markers stand outside the ISSEOF heredoc"
 
 echo
+
+# ── a STALE SWITCH must not be able to deny a tunnel that is plainly up ──────
+# AI6VN-PM 2026-10-28.  /usr/local/sbin/sigmond-setup GENERATES the switch and
+# is baked into the image; `smd update` never refreshes the host's
+# /usr/local/sbin.  So a host installed before the dual-gateway change keeps a
+# switch testing `-s /etc/sigmond/frpc-host.toml` and
+# `sigmond-rac-host.service` -- neither of which exists once a station has
+# per-gateway sessions.  It answered registered=no tunnel=stopped while BOTH
+# tunnels were up and an administrator was logged in THROUGH one of them, and
+# the panel dutifully printed "NOT REGISTERED YET", refresh after refresh.
+# rob: "the panel has been refreshed several times and it still doesn't
+# recognize that the racks are open."
+echo "── a stale switch cannot deny a live tunnel ──"
+d=$(scene stale 229 state=down registered=no tunnel=stopped channels_up=0 channels_declared=0 "checked_at=$(at 0)")
+: > "$d/no-toml"                      # frpc-host.toml is gone, as on a dual-gateway host
+cp "$T/frpc-host.toml" "$d/frpc-host-vpn1.toml"
+: > "$d/unit-active"                  # sigmond-rac-host@vpn1 is running
+out=$(panel "$d")
+lacks "it does not claim the station never registered" "$out" "NOT REGISTERED YET"
+has   "it reports remote access ON"                   "$out" "Remote access   ON"
+has   "it names the gateway from the per-gateway config" "$out" "gw2.wsprdaemon.org"
+
+# ...and the converse: configs present but NOTHING running must stay a fault.
+# The panel may only promote what it can SEE; inventing a session would be a
+# worse lie than the one it replaces.
+d2=$(scene stale_down 229 state=down registered=no tunnel=stopped channels_up=0 channels_declared=0 "checked_at=$(at 0)")
+: > "$d2/no-toml"
+cp "$T/frpc-host.toml" "$d2/frpc-host-vpn1.toml"
+out2=$(panel "$d2")                   # no unit-active marker
+lacks "a dead tunnel is never promoted to ON" "$out2" "Remote access   ON"
+# ...but it is still REGISTERED, and that word changes what the operator does.
+# "no gateway has answered" sends them to look at a registration that already
+# happened; "the tunnel does not run" sends them to the unit, which is where
+# the fault actually is.
+lacks "a registered station is never told it never registered" "$out2" "NOT REGISTERED YET"
+has   "it names the real fault instead"                        "$out2" "WANTED ON, BUT NOT UP"
+
 echo "test-panel-remote.sh: $pass passed, $fail failed"
 [ "$fail" = 0 ]
