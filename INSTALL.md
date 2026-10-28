@@ -156,10 +156,13 @@ refuses the new install's uploads. Save the keys first, and check them at the en
 4. **Finish with** `smd psws verify`. It must report the key as verified. If it
    does not, the station records but cannot upload.
 
+The file holds the station's private keys. Once the new station verifies, delete
+it from every place you copied it, and keep the stick private until then.
+
 The old station runs v3.82 or older and has no `save-keys`? Make the file by hand. The key files belong to another user, so `sudo` runs the `tar`:
 
 ```
-sudo tar czf ~/site-keys.tar.gz -C / etc/hs-uploader/keys home/timestd/.ssh
+sudo sh -c 'umask 077; tar czf "$1" -C / etc/hs-uploader/keys home/timestd/.ssh' sh ~/site-keys.tar.gz
 sudo chown "$USER" ~/site-keys.tar.gz
 ```
 

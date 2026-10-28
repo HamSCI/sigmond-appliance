@@ -427,9 +427,11 @@ PSWS login for you.</li>
 <span class="mono">smd psws restore-keys site-keys.tar.gz</span>.</li>
 <li>Finish with <span class="mono">smd psws verify</span>. It must report the key as verified.</li>
 </ol>
+<p>The file holds the station's private keys. Once the new station verifies, delete it
+from every place you copied it, and keep the stick private until then.</p>
 <p>An old machine on v3.82 or older has no <span class="mono">save-keys</span>. On it, run these two
 commands. The key files belong to another user, so <span class="mono">sudo</span> runs the <span class="mono">tar</span>:</p>
-<pre>sudo tar czf ~/site-keys.tar.gz -C / etc/hs-uploader/keys home/timestd/.ssh
+<pre>sudo sh -c 'umask 077; tar czf "$1" -C / etc/hs-uploader/keys home/timestd/.ssh' sh ~/site-keys.tar.gz
 sudo chown "$USER" ~/site-keys.tar.gz</pre>
 
 <h2>8 &middot; Moving a station</h2>

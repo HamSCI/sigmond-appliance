@@ -32,7 +32,7 @@ check(){
   if [ -n "$s1" ] && [ -n "$s2" ] && [ -n "$s3" ] && [ "$s1" -lt "$s2" ] && [ "$s2" -lt "$s3" ]; then
     ok "$f: save, then restore, then verify"
   else bad "$f: order is not save < restore < verify"; fi
-  if grep -qF 'sudo tar czf ~/site-keys.tar.gz' <<<"$s"; then ok "$f: v3.82 tar fallback kept"
+  if grep -qF "umask 077; tar czf \"\$1\" -C / etc/hs-uploader/keys" <<<"$s"; then ok "$f: v3.82 tar fallback kept"
   else bad "$f: tar fallback missing"; fi
 }
 
