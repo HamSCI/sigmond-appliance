@@ -3727,15 +3727,37 @@ if [ -n "$_rac_gw" ]; then
             [ "$_c" -gt "$RDECL" ] && RDECL=$_c
         done
     fi
-    # ⛔ A COUNT FROM A SWITCH WE JUST OVERRULED IS NOT A COUNT.  The stale
-    # switch polls the frpc admin API of a session that, by its own reckoning,
-    # does not exist, so it reports 0 channels up.  Printing that next to "ON"
-    # gives the operator two contradictory facts on consecutive lines -- and
-    # "0/6 channels up" reads as a fault, which is how AI6VN looked at 22:46Z
-    # while all six were carrying traffic.  Where the panel had to correct the
-    # switch, its channel count is unknown, and "?" says so honestly.  A count
-    # the switch could legitimately take is left alone.
-    [ -n "$_rac_live" ] && [ "${RUP:-0}" = 0 ] && RUP="?"
+    # ⛔ A COUNT FROM A SWITCH WE JUST OVERRULED IS NOT A COUNT -- SO TAKE
+    # OUR OWN.  The stale switch polls frpc's admin API at the single-session
+    # port 7500, for a session that by its own reckoning does not exist, and
+    # reports 0 channels up.  Printed under "ON" that is two contradictory
+    # facts on consecutive lines, and "0/6" reads as a fault: AI6VN looked
+    # exactly like that at 22:46Z with all six channels carrying traffic.
+    #
+    # Each session publishes its own admin port in its own config, so the
+    # panel can simply ask.  Measured on AI6VN: vpn1 on 7500 and vpn2 on 7501,
+    # both answering 6 running of 6 declared.
+    #
+    # !! THE HIGHEST COUNT ACROSS SESSIONS, never the sum and never the
+    # lowest -- the same rule the switch itself documents.  The sum calls a
+    # station healthy when one gateway is dead and the other is double
+    # counted; the lowest reports a fault whenever one gateway is unreachable,
+    # which is redundancy causing the outage it exists to prevent.  The
+    # highest answers what the reader is really asking: can anyone get in.
+    if [ -n "$_rac_live" ] && [ "${RUP:-0}" = 0 ]; then
+        _rbest=""
+        for _n in $_rac_gw; do
+            _rp=$(awk -F'= *' '/^\[webServer\]/{w=1;next} w&&/^port/{print $2;exit}' \
+                  "$(dirname "$RAC_TOML")/frpc-host-$_n.toml" 2>/dev/null)
+            [ -n "$_rp" ] || continue
+            _rc=$(curl -s --max-time 3 "http://127.0.0.1:$_rp/api/status" 2>/dev/null \
+                  | grep -o '"status":"running"' | wc -l | tr -d ' ')
+            case "$_rc" in ''|*[!0-9]*) continue ;; esac
+            [ "$_rc" -gt "${_rbest:-0}" ] && _rbest=$_rc
+        done
+        # Still unknown if no session answered: "?" beats the overruled zero.
+        RUP="${_rbest:-?}"
+    fi
     [ -n "${RUP:-}" ] || RUP="?"
 fi
 RSRV=""; RTIER=""; RREG=""; RAC_ADMIN=""; RAC_USER=""
@@ -4060,7 +4082,8 @@ PANEL=$(cat <<PEOF
  The station is the DECODER VIRTUAL MACHINE below — this screen is the
  computer that hosts it.
 ${NETWARN}${BRINGUP}${RXWARN}
- Proxmox host   ssh ${_LROOT}@${_HIP}   ·   web UI  $(_hl addr "https://$(ipurl "${HOSTIP:-<no-ip-yet>}"):8006")
+ Proxmox host   ssh ${_LROOT}@${_HIP}
+                web UI  $(_hl addr "https://$(ipurl "${HOSTIP:-<no-ip-yet>}"):8006")
 
  Decoder virtual machine   ${_VIP:-<starting — this panel refreshes every 5 min>}${VMNOTE}${VMBEHIND}
    from here      ssh ${_LSIG}@${_VIP:-<starting>}   (or: sigmond-vm;  also ${_LHAM}@)

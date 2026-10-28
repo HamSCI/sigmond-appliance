@@ -465,6 +465,17 @@ has   "it names the gateway from the per-gateway config" "$out" "gw2.wsprdaemon.
 lacks "it does not print the overruled switch's zero" "$out" "0/6 channels up"
 has   "it says the count is unknown instead"         "$out" "?/6 channels up"
 
+# When the session DOES publish an admin port, the panel asks it rather than
+# settling for "?" — a real count beats an honest shrug.  AI6VN measured: vpn1
+# on 7500 and vpn2 on 7501, both answering 6 of 6.  (The stub curl answers 6.)
+d3=$(scene stale_api 229 state=down registered=no tunnel=stopped channels_up=0 channels_declared=0 "checked_at=$(at 0)")
+: > "$d3/no-toml"
+{ cat "$T/frpc-host.toml"; printf '\n[webServer]\nport = 7500\n'; } > "$d3/frpc-host-vpn1.toml"
+: > "$d3/unit-active"
+out3=$(panel "$d3")
+has   "it polls the session and prints a real count" "$out3" "6/6 channels up"
+lacks "...so it does not fall back to unknown"       "$out3" "?/6 channels up"
+
 # ...and the converse: configs present but NOTHING running must stay a fault.
 # The panel may only promote what it can SEE; inventing a session would be a
 # worse lie than the one it replaces.
