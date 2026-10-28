@@ -261,7 +261,8 @@ uploads.  Save the keys first, and check them at the end.
   1. BEFORE the flash, on the old station, run:
        smd psws save-keys
      It writes site-keys.tar.gz into your home directory.  Copy that
-     file off the station.
+     file off the station.  A station on v3.82 or older has no
+     save-keys; use the tar fallback at the end of this section.
   2. AFTER burning this stick, it shows one small FAT volume (the EFI
      partition) on any Mac/Windows/Linux machine.  Copy site-keys.tar.gz
      onto it and eject.
@@ -272,5 +273,7 @@ uploads.  Save the keys first, and check them at the end.
   5. Finish with:
        smd psws verify
      It must report the key as verified.
-An old station on v3.82 or older has no save-keys.  On it, run:
-       tar czf site-keys.tar.gz -C / etc/hs-uploader/keys home/timestd/.ssh
+An old station on v3.82 or older has no save-keys.  On it, run these two commands.  The key files belong to another
+user, so sudo runs the tar:
+       sudo tar czf ~/site-keys.tar.gz -C / etc/hs-uploader/keys home/timestd/.ssh
+       sudo chown "$USER" ~/site-keys.tar.gz

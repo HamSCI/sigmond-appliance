@@ -141,7 +141,8 @@ refuses the new install's uploads. Save the keys first, and check them at the en
    ```
 
    This writes `site-keys.tar.gz` into your home directory. Copy that file off
-   the station.
+   the station. A station on v3.82 or older has no `save-keys`; use the `tar`
+   fallback below instead.
 2. **After you write the stick,** copy `site-keys.tar.gz` onto the small "EFI"
    drive the stick shows. Then eject. The installer restores the keys and, if you
    give PSWS IDs, checks the PSWS login for you.
@@ -155,10 +156,11 @@ refuses the new install's uploads. Save the keys first, and check them at the en
 4. **Finish with** `smd psws verify`. It must report the key as verified. If it
    does not, the station records but cannot upload.
 
-The old station runs v3.82 or older and has no `save-keys`? Make the file by hand:
+The old station runs v3.82 or older and has no `save-keys`? Make the file by hand. The key files belong to another user, so `sudo` runs the `tar`:
 
 ```
-tar czf site-keys.tar.gz -C / etc/hs-uploader/keys home/timestd/.ssh
+sudo tar czf ~/site-keys.tar.gz -C / etc/hs-uploader/keys home/timestd/.ssh
+sudo chown "$USER" ~/site-keys.tar.gz
 ```
 
 ---

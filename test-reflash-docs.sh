@@ -28,19 +28,21 @@ check(){
   done
   s1=$(grep -nF 'smd psws save-keys' <<<"$s" | head -1 | cut -d: -f1)
   s2=$(grep -nF 'smd psws restore-keys' <<<"$s" | head -1 | cut -d: -f1)
-  s3=$(grep -nF 'smd psws verify' <<<"$s" | tail -1 | cut -d: -f1)
+  s3=$(grep -nF 'smd psws verify' <<<"$s" | head -1 | cut -d: -f1)
   if [ -n "$s1" ] && [ -n "$s2" ] && [ -n "$s3" ] && [ "$s1" -lt "$s2" ] && [ "$s2" -lt "$s3" ]; then
     ok "$f: save, then restore, then verify"
   else bad "$f: order is not save < restore < verify"; fi
-  if grep -qF 'tar czf site-keys.tar.gz' <<<"$s"; then ok "$f: v3.82 tar fallback kept"
+  if grep -qF 'sudo tar czf ~/site-keys.tar.gz' <<<"$s"; then ok "$f: v3.82 tar fallback kept"
   else bad "$f: tar fallback missing"; fi
 }
 
 check INSTALL.md '^## '
 check docs/install-page.html '<h2>'
 check QUICKSTART.txt '^[0-9]+\. +[A-Z]'
-if grep -rnE '§4|Returning station\?' INSTALL.md | grep -q 'Returning station'; then
-  bad "INSTALL.md: stale heading text"; else ok "INSTALL.md: no stale heading text"; fi
+for f in INSTALL.md docs/install-page.html QUICKSTART.txt; do
+  if grep -qiE 'Returning station\?|Replacing an existing station\?' "$f"; then
+    bad "$f: stale heading text"; else ok "$f: no stale heading text"; fi
+done
 
 echo "$pass passed, $fail failed"
 [ "$fail" -eq 0 ]

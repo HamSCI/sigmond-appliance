@@ -417,7 +417,8 @@ The keys can travel on the stick, so you need not register again.</p>
 <ol>
 <li>Before the flash, on the old machine: <span class="mono">smd psws save-keys</span>.
 It writes <span class="mono">site-keys.tar.gz</span> into your home directory. Copy that
-file off the machine.</li>
+file off the machine. A machine on v3.82 or older has no <span class="mono">save-keys</span>;
+use the <span class="mono">tar</span> command below instead.</li>
 <li>After writing the stick, your computer shows one small drive from it. Copy
 <span class="mono">site-keys.tar.gz</span> onto it and eject.</li>
 <li>Install as above. The installer restores the keys and, if you gave PSWS IDs, checks the
@@ -426,8 +427,10 @@ PSWS login for you.</li>
 <span class="mono">smd psws restore-keys site-keys.tar.gz</span>.</li>
 <li>Finish with <span class="mono">smd psws verify</span>. It must report the key as verified.</li>
 </ol>
-<p>An old machine on v3.82 or older has no <span class="mono">save-keys</span>. On it, run
-<span class="mono">tar czf site-keys.tar.gz -C / etc/hs-uploader/keys home/timestd/.ssh</span>.</p>
+<p>An old machine on v3.82 or older has no <span class="mono">save-keys</span>. On it, run these two
+commands. The key files belong to another user, so <span class="mono">sudo</span> runs the <span class="mono">tar</span>:</p>
+<pre>sudo tar czf ~/site-keys.tar.gz -C / etc/hs-uploader/keys home/timestd/.ssh
+sudo chown "$USER" ~/site-keys.tar.gz</pre>
 
 <h2>8 &middot; Moving a station</h2>
 <p>A station often gets built and tested in one place, with the wrong grid square, and
