@@ -460,6 +460,10 @@ out=$(panel "$d")
 lacks "it does not claim the station never registered" "$out" "NOT REGISTERED YET"
 has   "it reports remote access ON"                   "$out" "Remote access   ON"
 has   "it names the gateway from the per-gateway config" "$out" "gw2.wsprdaemon.org"
+# "ON" and "0 channels up" on consecutive lines is two contradictory facts, and
+# the zero comes from the very switch we just overruled.  Unknown is honest.
+lacks "it does not print the overruled switch's zero" "$out" "0/6 channels up"
+has   "it says the count is unknown instead"         "$out" "?/6 channels up"
 
 # ...and the converse: configs present but NOTHING running must stay a fault.
 # The panel may only promote what it can SEE; inventing a session would be a

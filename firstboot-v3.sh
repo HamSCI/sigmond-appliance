@@ -3727,6 +3727,15 @@ if [ -n "$_rac_gw" ]; then
             [ "$_c" -gt "$RDECL" ] && RDECL=$_c
         done
     fi
+    # ⛔ A COUNT FROM A SWITCH WE JUST OVERRULED IS NOT A COUNT.  The stale
+    # switch polls the frpc admin API of a session that, by its own reckoning,
+    # does not exist, so it reports 0 channels up.  Printing that next to "ON"
+    # gives the operator two contradictory facts on consecutive lines -- and
+    # "0/6 channels up" reads as a fault, which is how AI6VN looked at 22:46Z
+    # while all six were carrying traffic.  Where the panel had to correct the
+    # switch, its channel count is unknown, and "?" says so honestly.  A count
+    # the switch could legitimately take is left alone.
+    [ -n "$_rac_live" ] && [ "${RUP:-0}" = 0 ] && RUP="?"
     [ -n "${RUP:-}" ] || RUP="?"
 fi
 RSRV=""; RTIER=""; RREG=""; RAC_ADMIN=""; RAC_USER=""
