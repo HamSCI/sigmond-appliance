@@ -127,20 +127,39 @@ After writing, your computer may show one small drive from the stick (often
 
 ---
 
-## 4. Returning station? Put your old keys on the stick (optional)
+## 4. Reflashing or replacing a station (keep its keys)
 
 Skip this for a brand-new station.
 
-If this machine **replaces** an existing Sigmond station, save its keys on the
-old station:
+A reflash or a replacement wipes the station's upload keys. Without them, PSWS
+refuses the new install's uploads. Save the keys first, and check them at the end.
+
+1. **Before the flash, on the old station,** run:
+
+   ```
+   smd psws save-keys
+   ```
+
+   This writes `site-keys.tar.gz` into your home directory. Copy that file off
+   the station.
+2. **After you write the stick,** copy `site-keys.tar.gz` onto the small "EFI"
+   drive the stick shows. Then eject. The installer restores the keys and, if you
+   give PSWS IDs, checks the PSWS login for you.
+3. **If the file missed the stick,** copy it to the new station and run:
+
+   ```
+   smd psws restore-keys site-keys.tar.gz
+   ```
+
+   This puts the keys back with the right owners and then runs the check.
+4. **Finish with** `smd psws verify`. It must report the key as verified. If it
+   does not, the station records but cannot upload.
+
+The old station runs v3.82 or older and has no `save-keys`? Make the file by hand:
 
 ```
 tar czf site-keys.tar.gz -C / etc/hs-uploader/keys home/timestd/.ssh
 ```
-
-Copy `site-keys.tar.gz` onto that small "EFI" drive the stick shows, then eject.
-The wizard restores the keys and, if you give PSWS IDs, checks the PSWS login
-for you — your portal registration carries over.
 
 ---
 

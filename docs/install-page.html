@@ -411,15 +411,23 @@ packages built before that command stay in a held folder on the station and neve
 <b>One key serves the whole machine:</b> if it uploads for more than one station, register
 the same key on each of them.</p>
 
-<h2>7 &middot; Replacing an existing station?</h2>
-<p>Its upload keys can travel on the stick, so you need not register again.</p>
+<h2>7 &middot; Reflashing or replacing a station</h2>
+<p>A reflash wipes the station's upload keys, and PSWS refuses uploads without them.
+The keys can travel on the stick, so you need not register again.</p>
 <ol>
-<li>On the old machine: <span class="mono">tar czf site-keys.tar.gz -C / etc/hs-uploader/keys home/timestd/.ssh</span></li>
+<li>Before the flash, on the old machine: <span class="mono">smd psws save-keys</span>.
+It writes <span class="mono">site-keys.tar.gz</span> into your home directory. Copy that
+file off the machine.</li>
 <li>After writing the stick, your computer shows one small drive from it. Copy
 <span class="mono">site-keys.tar.gz</span> onto it and eject.</li>
-<li>Install as above. The wizard restores the keys and, if you gave PSWS IDs, checks the
+<li>Install as above. The installer restores the keys and, if you gave PSWS IDs, checks the
 PSWS login for you.</li>
+<li>If the file missed the stick, copy it to the new machine and run
+<span class="mono">smd psws restore-keys site-keys.tar.gz</span>.</li>
+<li>Finish with <span class="mono">smd psws verify</span>. It must report the key as verified.</li>
 </ol>
+<p>An old machine on v3.82 or older has no <span class="mono">save-keys</span>. On it, run
+<span class="mono">tar czf site-keys.tar.gz -C / etc/hs-uploader/keys home/timestd/.ssh</span>.</p>
 
 <h2>8 &middot; Moving a station</h2>
 <p>A station often gets built and tested in one place, with the wrong grid square, and
