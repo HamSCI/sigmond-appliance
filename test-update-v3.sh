@@ -18,6 +18,10 @@
 #             scripted): pre-state, `smd update --apply`, idempotence,
 #             SHA-level assertion against --target, no NEW doctor findings,
 #             and the awareness heartbeat contract survives the update.
+#             From v3.83: an image smd that stamps no deploy.toml build
+#             leaves station-web and hamsci-physics unbuilt, so the updated
+#             smd's first run builds them before the idempotence check; and
+#             station-web, restarted, must come up and answer on :8000.
 #   PHASE E-bis — what `smd align` does once the code has moved: bring-up's
 #             manifest step, which from v3.70 runs `hs-uploader migrate`
 #             first, then a restart of hs-uploader.  watermarks.db must sit
@@ -1052,6 +1056,15 @@ UNITS_PRE_SEEN="$(sed -n 's/^UNITS_SEEN:\([0-9][0-9]*\)$/\1/p' "$GX_OUT" | head 
 udiffs "$GX_OUT" "$WORK/units-pre.txt"
 say "pre-state: $UNITS_PRE_SEEN sigmond unit files, installed copies differing: $(tr '\n' ' ' < "$WORK/units-pre.txt")"
 
+# Whether the image's own smd records deploy.toml builds (sigmond
+# build_stamp, v3.83).  An smd without it pulls station-web and
+# hamsci-physics without building them; the updated smd then plans those
+# builds on its first run.  Read before the update moves sigmond.
+gx_ok 60 e2-stamp-pre '[ -f /opt/git/sigmond/sigmond/lib/sigmond/build_stamp.py ] && echo STAMP:1 || echo STAMP:0' "pre-state: does the image's smd stamp its builds"
+IMG_STAMPS="$(sed -n 's/^STAMP:\([01]\)$/\1/p' "$GX_OUT" | head -1)"
+[ -n "$IMG_STAMPS" ] || fatal "$GX_OUT" "the build-stamp probe gave no answer (not a verdict)"
+say "pre-state: the image's smd $([ "$IMG_STAMPS" = 1 ] && echo records || echo does not record) the commit each deploy.toml build built"
+
 # ── the update itself, through the production channel ───────────────────
 say "── smd update --apply (this is the channel that crashed on runuser/PATH)"
 # ⛔ NOT INSIDE THE GUEST AGENT'S OWN CGROUP.  sigmond caps
@@ -1091,6 +1104,42 @@ case "$UPD_RC" in
        ;;
     *) fatal "$WORK/e3-update-apply.out" "smd update --apply exited $UPD_RC through the production root channel" ;;
 esac
+
+# ── the hop from an smd that never stamped a build ──────────────────────
+# An image smd older than build_stamp (v3.82 and before) pulled station-web
+# and hamsci-physics and built neither, and recorded no build for either.
+# The updated smd, on its first run, plans exactly those builds and nothing
+# else (v3.83 final review, finding 1).  That run is part of the hop, so the
+# rig runs it, then holds the result to the idempotence check below.  Any
+# other planned step, or an image smd that does stamp, gets no second run.
+if [ "$IMG_STAMPS" = 0 ]; then
+    gx_ok 900 e3-hop-dry 'smd update' "smd update (dry, the updated smd's first plan)"
+    HOP_KINDS="$(sed -n 's/^  \[\([a-z-]*\)\] .*$/\1/p' "$WORK/e3-hop-dry.out" | sort -u | tr '\n' ' ')"
+    HOP_BUILDS="$(sed -n 's/^  \[build\] \(.*\)$/\1/p' "$WORK/e3-hop-dry.out" | tr '\n' ' ')"
+    case " $HOP_KINDS" in
+        " build restart "|" build ")
+            say "the updated smd plans the builds the image's smd skipped: $HOP_BUILDS-- running smd update --apply once more"
+            gx_ok 3600 e3-hop-apply "systemd-run --quiet --wait --pipe --collect --unit=rig-update-hop /bin/bash -lc 'smd update --apply'" "smd update --apply (the updated smd builds)"
+            HOP_RC="$GX_RC"
+            say "── full output of the hop's smd update --apply ──"
+            cat "$WORK/e3-hop-apply.out"
+            say "── end (rc=$HOP_RC) ──"
+            grep -q 'Traceback (most recent call last)' "$WORK/e3-hop-apply.out" \
+                && fatal "$WORK/e3-hop-apply.out" "the hop's smd update --apply printed a Python traceback"
+            case "$HOP_RC" in
+                0|3) : ;;
+                *) fatal "$WORK/e3-hop-apply.out" "the hop's smd update --apply exited $HOP_RC: a deploy.toml build failed (its full output sits in /var/log/sigmond/update-*-<component>.log on the guest)" ;;
+            esac
+            for n in $HOP_BUILDS; do
+                grep -q "^.*$n: build exit 0" "$WORK/e3-hop-apply.out" \
+                    || fatal "$WORK/e3-hop-apply.out" "the hop planned a build of $n, but its smd update --apply never reported '$n: build exit 0'"
+            done
+            say "the updated smd built: $HOP_BUILDS✓"
+            ;;
+        " ") say "the updated smd plans nothing after the image's smd ran the update" ;;
+        *)  : ;;   # the idempotence check below names what remains
+    esac
+fi
 
 # ── idempotence ─────────────────────────────────────────────────────────
 say "── smd update (dry) must now be a no-op"
@@ -1209,6 +1258,44 @@ if grep -qi 'not enabled' "$WORK/e8-heartbeat.out"; then
     fatal "$WORK/e8-heartbeat.out" "heartbeat emit --dry-run exited 0 but its output says 'not enabled' — the update unwired the heartbeat, or the CLI contract changed under it"
 fi
 say "heartbeat still wired after the update: exit 0, no not-enabled ✓"
+
+# ── station-web starts on the venv the update left ──────────────────────
+# `smd update` restarts nothing, so station-web still runs the code it
+# started with.  A venv the update failed to rebuild shows only at the next
+# restart: station-web then crash-loops on a missing dependency (v3.83 final
+# review, finding 1).  So restart it here, then require the unit active and
+# its port answering.  Port 8000 is firstboot-v3.sh's station-web.
+gx_ok 180 e9-station-web '
+u=station-web@default.service
+systemctl cat "$u" >/dev/null 2>&1 || u=station-web.service
+echo "UNIT:$u"
+systemctl restart "$u" || echo "RESTART_FAILED"
+for i in $(seq 1 30); do
+    sleep 3
+    st=$(systemctl is-active "$u" 2>/dev/null)
+    code=$(python3 -c "
+import urllib.request, urllib.error
+try:
+    print(urllib.request.urlopen(\"http://127.0.0.1:8000/\", timeout=5).status)
+except urllib.error.HTTPError as e:
+    print(e.code)
+except Exception:
+    print(0)
+" 2>/dev/null)
+    if [ "$st" = active ] && [ "${code:-0}" -ge 200 ] && [ "${code:-0}" -lt 500 ]; then
+        echo "ACTIVE:1"; echo "HTTP:$code"; exit 0
+    fi
+done
+echo "ACTIVE:$([ "$st" = active ] && echo 1 || echo 0)"; echo "HTTP:${code:-0}"
+journalctl -u "$u" -n 30 --no-pager 2>/dev/null
+exit 1' "station-web after the update"
+SW_UNIT="$(sed -n 's/^UNIT://p' "$GX_OUT" | head -1)"
+SW_ACTIVE="$(sed -n 's/^ACTIVE:\([01]\)$/\1/p' "$GX_OUT" | head -1)"
+SW_HTTP="$(sed -n 's/^HTTP:\([0-9]*\)$/\1/p' "$GX_OUT" | head -1)"
+[ -n "$SW_UNIT" ] && [ -n "$SW_ACTIVE" ] || fatal "$GX_OUT" "the station-web probe gave no answer (not a verdict)"
+grep -q '^RESTART_FAILED$' "$GX_OUT" && fatal "$GX_OUT" "systemctl restart $SW_UNIT failed after the update"
+[ "$GX_RC" -eq 0 ] || fatal "$GX_OUT" "$SW_UNIT after a restart: active=$SW_ACTIVE, http://127.0.0.1:8000/ answered ${SW_HTTP:-nothing} -- the update left station-web unable to start (a venv the update did not rebuild?)"
+say "station-web restarted on the updated venv: $SW_UNIT active, http://127.0.0.1:8000/ answered $SW_HTTP ✓"
 
 say "PHASE E PASS — rolled forward to $TARGET_SHA, idempotent, level, no new findings"
 
