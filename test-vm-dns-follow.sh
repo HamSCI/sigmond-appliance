@@ -71,6 +71,14 @@ for w in imp v6; do
         || bad "the resolver was frozen into sigmond-vm.conf" "$(grep -E '^(no-resolv|server=)' "$conf" | tr '\n' ' ')"
     grep -q '^listen-address=10.99.0.1' "$conf" && grep -q '^filter-AAAA' "$conf" \
         && ok "the rest of the config is unchanged" || bad "config lost its other lines" "$(cat "$conf")"
+    # AI6VN-PM 2026-10-28: bind-interfaces needs the address to exist when
+    # dnsmasq starts.  It lost the race with vmbr1 at boot, exited 2, never
+    # retried, and the VM had no DNS for the rest of the boot.  bind-dynamic
+    # confines dnsmasq to the same interface but binds as addresses appear.
+    grep -q '^bind-dynamic$' "$conf" && ! grep -q '^bind-interfaces$' "$conf" \
+        && ok "binds dynamically, so a late vmbr1 is merely late" \
+        || bad "bind-interfaces is back: a late bridge means NO DNS until someone restarts dnsmasq" \
+                "$(grep -E '^bind-' "$conf")"
     run $w.sh 'nameserver 127.0.0.53\n'
     grep -q '^no-resolv' "$conf" && grep -q '^server=' "$conf" \
         && ok "loopback in resolv.conf: still pinned (the fallback case)" \

@@ -1112,9 +1112,19 @@ server=${up}" ;;
     mkdir -p /etc/dnsmasq.d
     cat > /etc/dnsmasq.d/sigmond-vm.conf <<CONF
 # Managed by sigmond-v6-gateway. Serves the decoder VM only.
+# ⛔ bind-dynamic, NEVER bind-interfaces.  Both confine dnsmasq to the
+# interface named above -- it must never answer on the site LAN -- but
+# bind-interfaces requires the address to EXIST when dnsmasq starts and exits
+# 2 if it does not.  Measured on AI6VN-PM 2026-10-28: dnsmasq lost the race
+# with vmbr1 at boot, logged "failed to create listening socket for
+# 10.99.0.1: Cannot assign requested address", and NEVER RETRIED.  The decoder
+# VM then had no name resolution at all -- every service up, every ping fine,
+# git fetches and uploads failing, and nothing in its own status saying why.
+# bind-dynamic watches netlink and binds each address as it appears, so a
+# bridge that is late is merely late.
 interface=vmbr1
 listen-address=${MGMT_PM_IP}
-bind-interfaces
+bind-dynamic
 no-dhcp-interface=vmbr1
 ${dns_upstream}
 # The guest is IPv4-only with no IPv6 route; synthesised AAAA are unusable.
@@ -2497,10 +2507,19 @@ server=${PM_DNS}"
     mkdir -p /etc/dnsmasq.d
     cat > /etc/dnsmasq.d/sigmond-vm.conf <<DNSEOF
 # Managed by sigmond firstboot. Serves the decoder VM and nothing else.
-# bind-interfaces + listen-address: never answer on the site LAN.
+# ⛔ bind-dynamic, NEVER bind-interfaces.  Both confine dnsmasq to the
+# interface named above -- it must never answer on the site LAN -- but
+# bind-interfaces requires the address to EXIST when dnsmasq starts and exits
+# 2 if it does not.  Measured on AI6VN-PM 2026-10-28: dnsmasq lost the race
+# with vmbr1 at boot, logged "failed to create listening socket for
+# 10.99.0.1: Cannot assign requested address", and NEVER RETRIED.  The decoder
+# VM then had no name resolution at all -- every service up, every ping fine,
+# git fetches and uploads failing, and nothing in its own status saying why.
+# bind-dynamic watches netlink and binds each address as it appears, so a
+# bridge that is late is merely late.
 interface=vmbr1
 listen-address=${MGMT_PM}
-bind-interfaces
+bind-dynamic
 no-dhcp-interface=vmbr1
 ${DNS_UPSTREAM}
 # The guest is IPv4-only with no IPv6 route of any kind.  On a NAT64 site the
