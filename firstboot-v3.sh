@@ -1648,6 +1648,68 @@ TimeoutStartSec=45
 NETTOEOF
 echo "### networking.service start timeout capped at 45s (was 5min)"
 
+# ── and dhclient must give up BEFORE that cap, or the cap truncates ifup ───
+# ⛔ THE 45 s ABOVE IS A LAST RESORT, NOT A SCHEDULE.  dhclient's own
+# default timeout is 60 s -- LONGER than the cap -- so on a site with no
+# DHCPv4 server dhclient can never give up first, and systemd kills ifup
+# every single boot.  That is not a race; it is arithmetic.
+#
+# And the cost is not confined to the interface being leased.  ifup walks
+# /etc/network/interfaces in order, so the kill lands wherever it has got to
+# and EVERY LATER STANZA IS NEVER CONFIGURED.  Measured on AI6VN-PM
+# 2026-10-28:
+#     19:53:22  executing /sbin/dhclient ... vmbr0      (no DHCPv4 at this site)
+#     19:54:01  networking.service: start operation timed out. Terminating.
+#     19:54:31  ... State 'final-sigterm' timed out. Killing.
+#     19:54:31  Failed to start networking.service
+#     19:54:31  Reached target network-online.target    <-- reached ANYWAY
+#     19:54:32  vmbr1 finally appears
+# vmbr1 is below vmbr0 in the file, so 10.99.0.1 did not exist yet; dnsmasq
+# bound it at 19:54:31, one second early, failed, and -- Restart=no -- stayed
+# dead.  The decoder VM had no DNS for the rest of the boot while looking
+# perfectly healthy.  networking.service was still 'failed' an hour later and
+# nothing said so.
+#
+# 20 s is many times a healthy lease and well clear of the 45 s cap, leaving
+# ifup the rest of its budget to finish the file.  netfix already bounds its
+# own probes at 25-30 s for the same reason.
+if ! grep -q "^# sigmond: bounded dhclient" /etc/dhcp/dhclient.conf 2>/dev/null; then
+    mkdir -p /etc/dhcp
+    cat >> /etc/dhcp/dhclient.conf <<'DHCPTOEOF'
+
+# sigmond: bounded dhclient — must stay BELOW networking.service's
+# TimeoutStartSec (45s), or a site with no DHCPv4 server truncates ifup and
+# the stanzas below the leased one are never configured.
+timeout 20;
+retry 60;
+DHCPTOEOF
+    echo "### dhclient timeout bounded at 20s (default 60s exceeded the 45s cap)"
+else
+    echo "### dhclient timeout already bounded"
+fi
+
+# ── dnsmasq is the decoder VM's ONLY resolver: it must come back ───────────
+# ⛔ Restart=no is the stock Debian unit, and it is the wrong default for a
+# service nothing else can stand in for.  On the boot above, dnsmasq and
+# sigmond-console-relay failed in the SAME SECOND on the SAME address:
+#     dnsmasq[1152]:  failed to create listening socket for 10.99.0.1:
+#                     Cannot assign requested address
+#     socat[1134]:    E bind(5, {AF=2 10.99.0.1:7790}, 16):
+#                     Cannot assign requested address
+# The relay carries Restart=always and was back in three seconds.  dnsmasq
+# carried Restart=no and was dead until a human restarted it 40 minutes later.
+# Same fault, same address, same second; only the policy differed.
+#
+# bind-dynamic (sigmond-vm.conf) removes this particular bind failure.  This
+# is the second line, for every other reason a resolver can die at boot.
+mkdir -p /etc/systemd/system/dnsmasq.service.d
+cat > /etc/systemd/system/dnsmasq.service.d/10-sigmond-restart.conf <<'DNSRSEOF'
+[Service]
+Restart=on-failure
+RestartSec=5s
+DNSRSEOF
+echo "### dnsmasq given Restart=on-failure (stock unit is Restart=no)"
+
 # ── a FORWARDING host must be told to accept router advertisements ─────────
 # ⛔ THE SINGLE ROOT CAUSE OF AI6VN's UNREACHABLE INSTALL, 2026-10-21.
 # A Proxmox host forwards (it routes for the decoder VM), and Linux ignores
