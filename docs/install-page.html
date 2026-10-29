@@ -84,7 +84,7 @@ ol li, ul li{margin:.25rem 0;}
 </style>
 <div class="wrap">
 <header class="col">
-  <p class="kicker">Sigmond appliance v3.82 &middot; new station</p>
+  <p class="kicker">Sigmond appliance v3.83 &middot; new station</p>
   <h1>Setting up a new station</h1>
   <p class="lede">You have a USB stick and a small computer with a radio receiver attached.
   About an hour from now the machine will record and decode HF signals on its own. It
@@ -159,20 +159,20 @@ Wi-Fi network you join during setup. Sites with only IPv6 work too.</li>
 <div class="step">
   <span class="num">step 1</span>
   <p>Your fleet admin sends you two files, or download links for them: the image,
-  <span class="mono">sigmond-appliance-v3.82-20261025-release.img</span> (about 5.8 GB), and its
+  <span class="mono">sigmond-appliance-v3.83-20261029-release.img</span> (about 5.7 GB), and its
   checksum, <span class="mono">…release.sha256</span>. A later release carries its own version and
   date in the name; use the names you were given. Keep both in one folder and check the
   image:</p>
-  <pre>sha256sum -c sigmond-appliance-v3.82-20261025-release.sha256</pre>
+  <pre>sha256sum -c sigmond-appliance-v3.83-20261029-release.sha256</pre>
   <p>The image is <b>not compressed</b>: there is nothing to unzip.</p>
   <p>With the project's tools, this is the safe way to write it. It finds the stick by
   looking for something removable, <em>refuses</em> the disk your own computer runs from,
   and reads the stick back afterwards to check every byte:</p>
-  <pre>./flash-usb.sh sigmond-appliance-v3.82-20261025-release.img</pre>
+  <pre>./flash-usb.sh sigmond-appliance-v3.83-20261029-release.img</pre>
   <p>balenaEtcher or Raspberry Pi Imager ("Use custom") work too, and both verify the write.
   By hand, with only the image file:</p>
   <pre>lsblk -dno NAME,SIZE,TRAN,RM,MODEL        # find the stick, check its size
-sudo dd if=sigmond-appliance-v3.82-20261025-release.img of=/dev/sdX bs=4M \
+sudo dd if=sigmond-appliance-v3.83-20261029-release.img of=/dev/sdX bs=4M \
         oflag=direct conv=fsync status=progress
 sync</pre>
   <div class="note warn">
@@ -459,10 +459,10 @@ fifteen minutes later.</li>
 </ol>
 
 <hr>
-<p class="foot">For sigmond-appliance v3.82, blessed 2026-10-26. The steps, screen messages and
+<p class="foot">For sigmond-appliance v3.83, blessed 2026-10-29. The steps, screen messages and
 logins here follow the release's installation guide. The image builder's nested test
-installed v3.82 from scratch, and its update test carried a v3.81 station forward and back.
-No station has installed v3.82 from scratch on hardware yet, and no IPv6-only site has
+installed v3.83 from scratch, and its update test carried a v3.82 station forward and back.
+No station has installed v3.83 from scratch on hardware yet, and no IPv6-only site has
 installed it from scratch. Day-2 operation, health checks and
 troubleshooting live in the operator guide:
 <span class="mono">github.com/HamSCI/sigmond/blob/main/docs/operator/README.md</span></p>
