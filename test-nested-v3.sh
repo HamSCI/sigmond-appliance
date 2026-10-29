@@ -2876,8 +2876,16 @@ STANDINEOF
     # per-gateway session; GWN counts them, GWON the enabled ones, GWOFF the
     # disabled and stopped ones.
     rac_units(){ $SSHN "echo WISH:\$(cat /etc/sigmond-appliance/rac-desired 2>/dev/null); echo BY:\$(awk '{print \$3}' /etc/sigmond-appliance/rac-changed 2>/dev/null); echo UNIT:\$(systemctl is-enabled sigmond-rac-host 2>&1)/\$(systemctl is-active sigmond-rac-host 2>&1); n=0; on=0; off=0; for t in /etc/sigmond/frpc-host-*.toml; do [ -e \"\$t\" ] || continue; g=\${t##*/frpc-host-}; g=\${g%.toml}; e=\$(systemctl is-enabled sigmond-rac-host@\$g.service 2>&1); a=\$(systemctl is-active sigmond-rac-host@\$g.service 2>&1); echo GW_\$g:\$e/\$a; n=\$((n+1)); [ \"\$e\" = enabled ] && on=\$((on+1)); [ \"\$e/\$a\" = disabled/inactive ] && off=\$((off+1)); done; echo GWN:\$n; echo GWON:\$on; echo GWOFF:\$off; for s in ssh web station gmag; do echo SOCK_\$s:\$(systemctl is-enabled sigmond-vm-\$s-relay.socket 2>&1)/\$(systemctl is-active sigmond-vm-\$s-relay.socket 2>&1); done; test -s /etc/sigmond/frpc-host.toml && echo TOMLKEPT:1 || echo TOMLKEPT:0; echo END:1" 2>&1; }
-    # Every per-gateway session in one state, and at least one session.
-    gw_all(){ local n; n=$(rr_tok GWN "$1"); [ "${n:-0}" -ge 1 ] 2>/dev/null && [ "$(rr_tok "$2" "$1")" = "$n" ]; }
+    # rac_on_ok / rac_off_ok <probe>: the units after on, and after off.  A
+    # station from before the two-gateway wizard (v3.82 and older, which the
+    # update test installs first) holds no per-gateway config, and its legacy
+    # unit IS its tunnel.  Once per-gateway configs exist, every one of them
+    # carries the state and the legacy unit stays disabled.
+    rac_on_ok(){ local n; n=$(rr_tok GWN "$1")
+        if [ "${n:-0}" = 0 ]; then echo "$1" | grep -q '^UNIT:enabled/'
+        else [ "$(rr_tok GWON "$1")" = "$n" ] && echo "$1" | grep -q '^UNIT:disabled/'; fi; }
+    rac_off_ok(){ local n; n=$(rr_tok GWN "$1")
+        echo "$1" | grep -qx 'UNIT:disabled/inactive' && { [ "${n:-0}" = 0 ] || [ "$(rr_tok GWOFF "$1")" = "$n" ]; }; }
     remote on rr3-on
     [ "$RR" = down ] && [ "$GQ_RC" = 3 ] || rr_fatal "smd remote on against the stand-in: want 'wanted on, not up' exit 3 (registered, no channel), got '${RR:-nothing}' exit $GQ_RC"
     R3=$($SSHN "echo RACN:\$(cat /etc/sigmond-appliance/rac-number 2>/dev/null); grep -c '^user = \"0123456789abcdef\"' /etc/sigmond/frpc-host.toml 2>/dev/null | sed 's/^/TOML:/'; grep -c '^name = ' /etc/sigmond/frpc-host.toml 2>/dev/null | sed 's/^/PROXIES:/'; echo UNIT:\$(systemctl is-enabled sigmond-rac-host 2>&1); echo TIMER:\$(systemctl is-enabled sigmond-rac-register.timer 2>&1); echo END:1" 2>&1)
@@ -2888,8 +2896,7 @@ STANDINEOF
     echo "$R3" | grep -qx 'PROXIES:6'     || { say "FATAL: frpc-host.toml does not declare six channels"; exit 1; }
     R3U=$(rac_units); echo "$R3U" | grep -E '^(UNIT|GW)' | sed 's/^/      /'
     nh_ok "$R3U" || { say "FATAL: the nested host gave no answer to the unit probe after smd remote on (ssh failed; not a verdict)"; exit 1; }
-    gw_all "$R3U" GWON || { say "FATAL: not every per-gateway tunnel unit is enabled after smd remote on"; exit 1; }
-    echo "$R3U" | grep -q '^UNIT:disabled/' || { say "FATAL: the legacy sigmond-rac-host.service is still enabled beside the per-gateway units after smd remote on"; exit 1; }
+    rac_on_ok "$R3U" || { say "FATAL: after smd remote on, the tunnel units are not as they should be (every per-gateway unit enabled and the legacy unit disabled; or, with no per-gateway config, the legacy unit enabled)"; exit 1; }
     echo "$R3" | grep -qx 'TIMER:disabled' || { say "FATAL: the retry timer is still armed after the station registered"; exit 1; }
     # What the registration carried, by value.  The wizard posts {"site", "pubkey"}
     # (sigmond-wizard.sh, rac_ladder): the station's name, which is the reporter
@@ -2931,8 +2938,7 @@ RR3BEOF
     nh_ok "$R4" || { say "FATAL: the nested host gave no answer to the unit probe after smd remote off (ssh failed; not a verdict)"; exit 1; }
     echo "$R4" | grep -qx 'WISH:off' && echo "$R4" | grep -qx 'BY:vm' \
         || { say "FATAL: the host did not record the wish off, asked from the VM"; exit 1; }
-    echo "$R4" | grep -qx 'UNIT:disabled/inactive' || { say "FATAL: the legacy sigmond-rac-host.service still enabled or running after smd remote off"; exit 1; }
-    gw_all "$R4" GWOFF || { say "FATAL: a per-gateway tunnel unit is still enabled or running after smd remote off"; exit 1; }
+    rac_off_ok "$R4" || { say "FATAL: a tunnel unit (legacy or per-gateway) is still enabled or running after smd remote off"; exit 1; }
     for s in ssh web station gmag; do
         echo "$R4" | grep -qx "SOCK_$s:disabled/inactive" || { say "FATAL: the $s relay socket is still enabled or listening after smd remote off"; exit 1; }
     done
@@ -2956,7 +2962,7 @@ RR3BEOF
     [ "$AOK" -ge 2 ] || { say "FATAL: guest agent never answered after the reboot"; exit 1; }
     R4=$(rac_units); echo "$R4" | sed 's/^/      /'
     nh_ok "$R4" || { say "FATAL: the nested host gave no answer to the unit probe after the reboot (ssh failed; not a verdict)"; exit 1; }
-    echo "$R4" | grep -qx 'UNIT:disabled/inactive' && echo "$R4" | grep -qx 'WISH:off' && gw_all "$R4" GWOFF \
+    rac_off_ok "$R4" && echo "$R4" | grep -qx 'WISH:off' \
         || { say "FATAL: remote access did not stay off across a reboot"; exit 1; }
     # A ping is not a ready agent (see the password-hash check earlier in this
     # phase): the first guest-exec after a boot can time out.  So a missing
@@ -2996,7 +3002,7 @@ RR3BEOF
     [ "$RR" = down ] && [ "$GQ_RC" = 3 ] || rr_fatal "smd remote on after the reboot: want 'wanted on, not up' exit 3, got '${RR:-nothing}' exit $GQ_RC"
     R4=$(rac_units)
     nh_ok "$R4" || { say "FATAL: the nested host gave no answer to the unit probe after smd remote on (ssh failed; not a verdict)"; exit 1; }
-    echo "$R4" | grep -qx 'WISH:on' && gw_all "$R4" GWON && echo "$R4" | grep -q '^UNIT:disabled/' \
+    echo "$R4" | grep -qx 'WISH:on' && rac_on_ok "$R4" \
         || { say "FATAL: smd remote on did not enable the host's units again"; echo "$R4" | sed 's/^/      /'; exit 1; }
     for s in ssh web station gmag; do
         echo "$R4" | grep -q "^SOCK_$s:enabled/" || { say "FATAL: smd remote on did not enable the $s relay socket again"; echo "$R4" | sed 's/^/      /'; exit 1; }
