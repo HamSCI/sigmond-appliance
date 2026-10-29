@@ -2530,7 +2530,7 @@ else
             timeout 300 /usr/local/sbin/sigmond-setup --rac-off; echo OFFRC:\$?
             echo WISH:\$(head -1 /etc/sigmond-appliance/rac-desired 2>/dev/null)
             test -e /etc/sigmond/frpc-host.toml && echo HASTOML:1 || echo HASTOML:0
-            systemctl is-active --quiet sigmond-rac-host && echo TUNNEL:1 || echo TUNNEL:0
+            systemctl list-units --state=active --no-legend --plain 'sigmond-rac-host*' | grep -q . && echo TUNNEL:1 || echo TUNNEL:0
             echo ET1B:end" > "$WORK/et1b-off.out" 2>&1
         sed 's/^/      /' "$WORK/et1b-off.out" | tail -12
         { grep -qx 'ET1B:begin' "$WORK/et1b-off.out" && grep -qx 'ET1B:end' "$WORK/et1b-off.out"; } \
@@ -2624,7 +2624,7 @@ else
         test ! -e /etc/sigmond/frpc-host.toml && echo NOTOML:1 || echo NOTOML:0
         test ! -e /etc/sigmond-appliance/rac-desired && echo NOWISH:1 || echo NOWISH:0
         echo WISH:\$(head -1 /etc/sigmond-appliance/rac-desired 2>/dev/null)
-        systemctl is-active --quiet sigmond-rac-host && echo NOTUNNEL:0 || echo NOTUNNEL:1
+        systemctl list-units --state=active --no-legend --plain 'sigmond-rac-host*' | grep -q . && echo NOTUNNEL:0 || echo NOTUNNEL:1
         systemctl is-enabled --quiet sigmond-rac-register.timer 2>/dev/null && echo NOTIMER:0 || echo NOTIMER:1
         echo ET3:end" > "$WORK/et3-state.out" 2>&1
     sed 's/^/      /' "$WORK/et3-state.out"
@@ -2638,7 +2638,7 @@ else
         grep -qx 'NOTOML:1' "$WORK/et3-state.out" || fatal "$WORK/et3-state.out" "pairing changed the station: it registered (/etc/sigmond/frpc-host.toml exists)"
         grep -qx 'NOWISH:1' "$WORK/et3-state.out" || fatal "$WORK/et3-state.out" "pairing changed the station: it recorded a wish (/etc/sigmond-appliance/rac-desired exists)"
     fi
-    grep -qx 'NOTUNNEL:1' "$WORK/et3-state.out" || fatal "$WORK/et3-state.out" "pairing changed the station: it started the tunnel (sigmond-rac-host is active)"
+    grep -qx 'NOTUNNEL:1' "$WORK/et3-state.out" || fatal "$WORK/et3-state.out" "pairing changed the station: it started the tunnel (a sigmond-rac-host unit is active)"
     grep -qx 'NOTIMER:1' "$WORK/et3-state.out"  || fatal "$WORK/et3-state.out" "pairing changed the station: it armed the retry timer (sigmond-rac-register.timer is enabled)"
     say "paired, and still off ($([ "$ET_FORCED_OFF" = 1 ] && echo 'turned off first, registration kept' || echo 'never registered')): no tunnel, no timer, wish unchanged ✓"
     say "PHASE E-ter PASS — a host from $IMGBASE pairs with one command, and the pairing leaves remote access as it stood"
