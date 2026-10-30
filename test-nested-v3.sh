@@ -1641,7 +1641,10 @@ esac
 # The same for the heartbeat questions (gone from v3.84) and the NTP question
 # (new in v3.84).  A wizard that asks both, or neither, is one this rig does
 # not know, and guessing its answers would shift them.
-case "$($SSHN "grep -q 'Send status heartbeats?' /usr/local/sbin/sigmond-setup && echo HBQ:YES || echo HBQ:NO; grep -q 'Local NTP server' /usr/local/sbin/sigmond-setup && echo NTPQ:YES || echo NTPQ:NO" 2>&1 | tr '\n' ' ')" in
+# ⛔ Read the wizard's CODE, not its comments: the v3.84 wizard's comment on
+# the removal quotes the old prompt word for word, and a bare grep took that
+# comment for a live question (2026-10-30).
+case "$($SSHN "W=\$(grep -v '^[[:space:]]*#' /usr/local/sbin/sigmond-setup); printf '%s\n' \"\$W\" | grep -q 'Send status heartbeats?' && echo HBQ:YES || echo HBQ:NO; printf '%s\n' \"\$W\" | grep -q 'Local NTP server' && echo NTPQ:YES || echo NTPQ:NO" 2>&1 | tr '\n' ' ')" in
     *HBQ:YES*NTPQ:NO*) HBQ=1; NTPQ=0 ;;
     *HBQ:NO*NTPQ:YES*) HBQ=0; NTPQ=1 ;;
     *) say "FATAL: the host's wizard asks both the heartbeat and the NTP questions, or neither; this rig does not know its answers"; exit 1 ;;
