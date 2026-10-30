@@ -147,6 +147,18 @@ has "part 1's banner"              "$T/part1.verdict" "SITE SINK OFF banner"
 has "heartbeat in the legacy file" "$T/part1.verdict" "the heartbeat still sits in the legacy manifest"
 has "no sigmond.toml"              "$T/part1.verdict" "no pipelines.d/sigmond.toml"
 
+# A station that enables no heartbeat (a v3.84 wizard): sigmond writes no
+# sigmond.toml, and the verdict must expect none.
+SP2_NO_HEARTBEAT=1 guest nohb "$FX/pipelines_gate.toml" - 1 "$FX/manifest_step_part2.txt" "$FX/sink_status_site-off.json"
+check "no heartbeat: no sigmond.toml read"  0 "$(tk nohb SIGTOML)"
+check "no heartbeat: the verdict finds nothing" "VERDICT:done" "$(cat "$T/nohb.verdict")"
+# Its positive control: the same expectation fails when the file is there.
+SP2_NO_HEARTBEAT=1 guest nohbsig "$FX/pipelines_gate.toml" "$FX/sigmond_gate.toml" 1 "$FX/manifest_step_part2.txt" "$FX/sink_status_site-off.json"
+has "no heartbeat, yet a sigmond.toml: fails" "$T/nohbsig.verdict" "sigmond.toml exists on a station that enables no heartbeat"
+# And without the flag, the same station without the file still fails.
+guest hbmiss "$FX/pipelines_gate.toml" - 1 "$FX/manifest_step_part2.txt" "$FX/sink_status_site-off.json"
+has "a heartbeat station without sigmond.toml: fails" "$T/hbmiss.verdict" "no pipelines.d/sigmond.toml; the heartbeat has no home"
+
 # The discard counter's positive control: the captured gate render with one
 # discard line added to a pipelines.d file.
 cp "$FX/sigmond_gate.toml" "$T/sig-disc.toml"; printf 'discard = true\n' >> "$T/sig-disc.toml"

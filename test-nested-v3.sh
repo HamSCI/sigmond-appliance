@@ -507,7 +507,14 @@ _sp2_verdict_body() {
     [ "$v" = 0 ] || echo "FAIL: pipelines.toml still carries the SITE SINK OFF banner (part 1's form)"
     v="$(_sp2t HBLEG)"
     [ "$v" = 0 ] || echo "FAIL: the heartbeat still sits in the legacy manifest"
-    if [ "$(_sp2t SIGTOML)" != 1 ]; then
+    # SP2_NO_HEARTBEAT=1: the station enables no heartbeat (a v3.84 wizard asks
+    # nothing about it).  sigmond then writes no sigmond.toml, since the file
+    # holds the heartbeat and nothing else (uploader_manifest.py,
+    # sigmond_pipeline_file).
+    if [ "${SP2_NO_HEARTBEAT:-0}" = 1 ]; then
+        [ "$(_sp2t SIGTOML)" = 1 ] \
+            && echo "FAIL: pipelines.d/sigmond.toml exists on a station that enables no heartbeat (heartbeat x$(_sp2t HBSIG))"
+    elif [ "$(_sp2t SIGTOML)" != 1 ]; then
         echo "FAIL: no pipelines.d/sigmond.toml; the heartbeat has no home"
     else
         [ "$(_sp2t HBSIG)" = 1 ] || echo "FAIL: pipelines.d/sigmond.toml carries no heartbeat pipeline"
@@ -2224,9 +2231,10 @@ else
         say "  hs-uploader features: $(sp2_tok "$SP2D/probe.facts" F_WORDS)"
         if [ "$(sp2_tok "$SP2D/probe.facts" F_GATE)" = 1 ] || [ "${SINK_BASE_IMAGE:-0}" != 1 ]; then
             SP2=1
-            sp2_verdict "$SP2D/probe.facts" > "$SP2D/probe.verdict"
+            SP2_NO_HEARTBEAT=$([ "${HBQ:-1}" = 0 ] && echo 1 || echo 0) \
+                sp2_verdict "$SP2D/probe.facts" > "$SP2D/probe.verdict"
             sp2_report "$SP2D/probe.verdict" "$SP2D/probe.txt"
-            say "site switch off, the marker, gate, no discard, the heartbeat in sigmond.toml, each client's own file at upload (unless NOT EVALUATED above) ✓"
+            say "site switch off, the marker, gate, no discard, $([ "${HBQ:-1}" = 0 ] && echo 'no heartbeat and no sigmond.toml' || echo 'the heartbeat in sigmond.toml'), each client's own file at upload (unless NOT EVALUATED above) ✓"
         else
             SP2=0
             say "this base image's hs-uploader offers no gate: part 1's manifest checks follow"
