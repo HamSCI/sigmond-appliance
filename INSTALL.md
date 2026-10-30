@@ -2,7 +2,7 @@
 
 > **Audience:** operator
 > **Status:** current
-> **Verified against:** sigmond-appliance v3.83: v3.82 plus three fixes and Rob's boot fixes.  `smd update` and `smd align` now run a component's deploy.toml build when it has no `install.sh`, so station-web and hamsci-physics get their new dependencies; each v3.82 station rebuilds those two once on its first update.  Install probes the magnetometer's I2C addresses every time and writes what answers, and the recorder refuses all-zero samples.  `smd psws save-keys` and `smd psws restore-keys` carry a station's upload keys across a reflash (§4).  Turning remote access off now also stops the old single-gateway tunnel service on a two-gateway station, so off survives a reboot.  Rob's fixes cover DNS and dhclient at boot, the power key, the console panel, wspr-recorder and psk-recorder.  The rig's nested test installed v3.83 from scratch, and its update test carried a v3.82 station forward to this code and back; station-web rebuilt and answered after the update.  ⚠ **No station has yet installed v3.83 from scratch on hardware**, and no station has yet run `smd update` then `smd align` from v3.82 on hardware.  The v3.82 note follows.  sigmond-appliance v3.82: v3.81 plus a menu at the console, colour on the console panel, and five fixes.  A root login at the station's own screen and keyboard now opens a menu (§8).  The panel shows addresses in cyan, logins in green and the starting password in yellow.  Bring-up no longer pulls any repository, so a station installs the commits its image carries.  `smd update` now passes `--yes` to each installer, so hf-timestd's setup wizard waits instead of stopping the update.  A rollback puts back any `uv.lock` an installer rewrote.  psk-recorder gets a private, writable `/tmp`.  The wspr-uploader warning about a stale links record now names the one file to delete.  The rig's nested test installed v3.82 from scratch, and its update test carried a v3.81 station forward to this code and back with no exception.  ⚠ **No station has yet installed v3.82 from scratch on hardware**, and no one has yet seen the menu or the colours on a real monitor.  The v3.81 note follows.  sigmond-appliance v3.81: v3.78 plus sink-control step 2b part 2 (sigmond writes each client's upload switch into `pipelines.d/` and `site.toml` together, and `smd sink off` stops a linked wspr-uploader rather than disabling it), Rob's UberSDR builds of wsprd and jt9 as the default decoders, `smd watch usb`, and two install fixes: hf-timestd's chrony script now carries its execute bit, and superdarn-sounder's install no longer rewrites its own `uv.lock`.  The rig's nested test installed v3.81 from scratch, and its update test carried a v3.78 station forward to this code and back.  ⚠ **No station has yet installed v3.81 from scratch on hardware.**  ⚠ Rolling a station back to v3.78 leaves superdarn-sounder's `uv.lock` modified; v3.82 fixes this.  The v3.78 note follows.  sigmond-appliance v3.78: v3.77 plus sink-control step 2b part 1 (hs-uploader reads `pipelines.d/`, its store moves to version 3, and nothing a station sends changes), the pairing fix for sudo-rs hosts, and Rob's RX888 recovery changes.  v3.77 added the `smd restart <client>` fix to v3.76.  Michael installed v3.78 from scratch on AC0G-B4 on 2026-10-22: bring-up finished `ok` with every service running (one RX888 replug behind a new hub).  ⚠ **No IPv6-only site has yet installed v3.78 from scratch**; the IPv6 fix it carries was proven by hand on a live IPv6-only station.  The v3.76 note follows.  sigmond-appliance v3.76 (built from 4b7ce17): v3.75 was installed on hardware by AI6VN (2026-10-21) at a WIRED IPv6-ONLY site and came up **unreachable** — a forwarding Proxmox host drops every router advertisement unless `accept_ra` is 2, so the station lost its IPv6 default route and never learned the RA's DNS64 resolver, and remote access could not resolve its own server name.  v3.76 is v3.75 plus that fix, which was proven on the live station by hand (the default route and the RDNSS server returned within seconds).  ⚠ **v3.76 has not yet been installed from scratch**; the nested rig test does not exercise this path, because it runs dual-stack with working DNS.  ⛔ Do not install v3.74 or v3.75 at a site with no IPv4.
+> **Verified against:** sigmond-appliance v3.84: v3.83 plus an update fix, a command reference, a new time-source question, and no heartbeat.  `smd align` now builds the UberSDR decoders when a station lacks their source, which stopped AC0G-ND's update on 10-28.  `smd admin cli-reference` records every station command, and the station pages show it under Commands, next to Documentation in the top bar.  hs-uploader finds its store by one rule, and its installer names the store in `/etc/hs-uploader/sink.toml`; the clients take their sink writer from hs-uploader.  The client installers keep any Python that uv downloads in `/opt/uv/python`.  Rob's wizard changes: the wizard no longer asks about status heartbeats and turns both heartbeat timers off, so no station opens a connection to wd30; it asks for a local NTP server, and without one it uses a public pool capped at four servers; it takes the grid from the GPS clock's position, the LBE-Mini's included.  Rob's remote-access fixes clear a gateway the station no longer uses.  The rig's nested test installed v3.84 from scratch, and its update test carried a v3.83 station forward to this code and back.  ⚠ **No station has yet installed v3.84 from scratch on hardware**, and no station has yet updated to it in place.  The v3.83 note follows.  sigmond-appliance v3.83: v3.82 plus three fixes and Rob's boot fixes.  `smd update` and `smd align` now run a component's deploy.toml build when it has no `install.sh`, so station-web and hamsci-physics get their new dependencies; each v3.82 station rebuilds those two once on its first update.  Install probes the magnetometer's I2C addresses every time and writes what answers, and the recorder refuses all-zero samples.  `smd psws save-keys` and `smd psws restore-keys` carry a station's upload keys across a reflash (§4).  Turning remote access off now also stops the old single-gateway tunnel service on a two-gateway station, so off survives a reboot.  Rob's fixes cover DNS and dhclient at boot, the power key, the console panel, wspr-recorder and psk-recorder.  The rig's nested test installed v3.83 from scratch, and its update test carried a v3.82 station forward to this code and back; station-web rebuilt and answered after the update.  ⚠ **No station has yet installed v3.83 from scratch on hardware**, and no station has yet run `smd update` then `smd align` from v3.82 on hardware.  The v3.82 note follows.  sigmond-appliance v3.82: v3.81 plus a menu at the console, colour on the console panel, and five fixes.  A root login at the station's own screen and keyboard now opens a menu (§8).  The panel shows addresses in cyan, logins in green and the starting password in yellow.  Bring-up no longer pulls any repository, so a station installs the commits its image carries.  `smd update` now passes `--yes` to each installer, so hf-timestd's setup wizard waits instead of stopping the update.  A rollback puts back any `uv.lock` an installer rewrote.  psk-recorder gets a private, writable `/tmp`.  The wspr-uploader warning about a stale links record now names the one file to delete.  The rig's nested test installed v3.82 from scratch, and its update test carried a v3.81 station forward to this code and back with no exception.  ⚠ **No station has yet installed v3.82 from scratch on hardware**, and no one has yet seen the menu or the colours on a real monitor.  The v3.81 note follows.  sigmond-appliance v3.81: v3.78 plus sink-control step 2b part 2 (sigmond writes each client's upload switch into `pipelines.d/` and `site.toml` together, and `smd sink off` stops a linked wspr-uploader rather than disabling it), Rob's UberSDR builds of wsprd and jt9 as the default decoders, `smd watch usb`, and two install fixes: hf-timestd's chrony script now carries its execute bit, and superdarn-sounder's install no longer rewrites its own `uv.lock`.  The rig's nested test installed v3.81 from scratch, and its update test carried a v3.78 station forward to this code and back.  ⚠ **No station has yet installed v3.81 from scratch on hardware.**  ⚠ Rolling a station back to v3.78 leaves superdarn-sounder's `uv.lock` modified; v3.82 fixes this.  The v3.78 note follows.  sigmond-appliance v3.78: v3.77 plus sink-control step 2b part 1 (hs-uploader reads `pipelines.d/`, its store moves to version 3, and nothing a station sends changes), the pairing fix for sudo-rs hosts, and Rob's RX888 recovery changes.  v3.77 added the `smd restart <client>` fix to v3.76.  Michael installed v3.78 from scratch on AC0G-B4 on 2026-10-22: bring-up finished `ok` with every service running (one RX888 replug behind a new hub).  ⚠ **No IPv6-only site has yet installed v3.78 from scratch**; the IPv6 fix it carries was proven by hand on a live IPv6-only station.  The v3.76 note follows.  sigmond-appliance v3.76 (built from 4b7ce17): v3.75 was installed on hardware by AI6VN (2026-10-21) at a WIRED IPv6-ONLY site and came up **unreachable** — a forwarding Proxmox host drops every router advertisement unless `accept_ra` is 2, so the station lost its IPv6 default route and never learned the RA's DNS64 resolver, and remote access could not resolve its own server name.  v3.76 is v3.75 plus that fix, which was proven on the live station by hand (the default route and the RDNSS server returned within seconds).  ⚠ **v3.76 has not yet been installed from scratch**; the nested rig test does not exercise this path, because it runs dual-stack with working DNS.  ⛔ Do not install v3.74 or v3.75 at a site with no IPv4.
 > **Canonical for:** burning, booting and first-boot wizard of the appliance image
 
 Day-2 operation, troubleshooting beyond §11, remote access and what-not-to-touch live in the [Operator guide](https://github.com/HamSCI/sigmond/blob/main/docs/operator/README.md).
@@ -52,7 +52,7 @@ missing does not stop the install; you add it later (§7).
 | PSWS station ID (optional, Enter to skip) | `S000170` |
 | — its GRAPE instrument ID | `171` |
 | — magnetometer instrument number (if any; same station ID) | `84` |
-| Send status heartbeats? | `Y` (default) |
+| Local NTP server (Enter: the one your network offers, or none) | `ntp.example.edu` |
 | Station designator (Enter accepts the suggestion) | `AC0G-B4` |
 
 ⚠ **Names beginning `DASI` followed by three digits are reserved** for the
@@ -69,8 +69,8 @@ fleet admin. Any other name is an ordinary station and nothing here applies.
 
 Ask your fleet admin for the current release — or download links for it:
 
-- `sigmond-appliance-v3.83-20261029-release.img`  (about 5.7 GB)
-- `sigmond-appliance-v3.83-20261029-release.sha256`  (its checksum)
+- `sigmond-appliance-v3.84-20261030-release.img`  (about 5.7 GB)
+- `sigmond-appliance-v3.84-20261030-release.sha256`  (its checksum)
 
 Each release carries its own version and date in the filename; use the names
 you were given wherever this guide shows one.
@@ -79,7 +79,7 @@ The image is published **uncompressed** (`.img`) — there is nothing to
 decompress. With both files in one folder, check it:
 
 ```
-sha256sum -c sigmond-appliance-v3.83-20261029-release.sha256
+sha256sum -c sigmond-appliance-v3.84-20261030-release.sha256
 ```
 
 ---
@@ -91,7 +91,7 @@ USB attributes instead of a letter you type, refuses the disk your computer
 runs from, and reads the stick back to compare every byte:
 
 ```
-./flash-usb.sh sigmond-appliance-v3.83-20261029-release.img
+./flash-usb.sh sigmond-appliance-v3.84-20261030-release.img
 ```
 
 **Any OS, graphical:** balenaEtcher (balena.io/etcher) or Raspberry Pi Imager
@@ -100,7 +100,7 @@ runs from, and reads the stick back to compare every byte:
 **Command line (Linux):**
 ```
 lsblk -dno NAME,SIZE,TRAN,RM,MODEL     # find the stick: check size, removable
-sudo dd if=sigmond-appliance-v3.83-20261029-release.img of=/dev/sdX bs=4M \
+sudo dd if=sigmond-appliance-v3.84-20261030-release.img of=/dev/sdX bs=4M \
         oflag=direct conv=fsync status=progress
 sync
 ```
@@ -110,12 +110,12 @@ sync
 ```
 diskutil list                      # find your stick, e.g. /dev/disk4
 diskutil unmountDisk /dev/disk4
-sudo dd if=sigmond-appliance-v3.83-20261029-release.img of=/dev/rdisk4 bs=4m
+sudo dd if=sigmond-appliance-v3.84-20261030-release.img of=/dev/rdisk4 bs=4m
 ```
 
 **Verify a hand-written stick** by reading back exactly the image's size:
 ```
-IMG=sigmond-appliance-v3.83-20261029-release.img
+IMG=sigmond-appliance-v3.84-20261030-release.img
 sudo head -c "$(stat -c %s $IMG)" /dev/sdX | sha256sum
 sha256sum $IMG                     # the two hashes must match
 ```
@@ -366,8 +366,7 @@ stopped, the line says so instead and asks you to tell your fleet admin.
 
 A new station sends nothing yet.  It starts with its site sink switch at `off`: it
 records and decodes, but sends no spots or data to wsprnet, pskreporter.info,
-wsprdaemon.org or PSWS.  Only its heartbeat goes out, a five-minute health report for
-the fleet board.  So the uploads line shows `wait` and says `new station`.
+wsprdaemon.org or PSWS.  So the uploads line shows `wait` and says `new station`.
 
 When every other line shows `ok` or `--`, turn the uploads on:
 
@@ -501,8 +500,7 @@ until the station knows where it stands:
 
 1. At the staging site, leave the site sink switch at `off`; a new station
    starts that way. Check reception there with `sigmond-check` (§9): every
-   line but uploads should show `ok` or `--`. No data leaves the station; only
-   its heartbeat goes out.
+   line but uploads should show `ok` or `--`. No data leaves the station.
 2. At the destination, log into the **Proxmox host** (`ssh root@<host address>`,
    or the console before the USB controllers were handed to the VM) and run
    `sigmond-setup --reconfigure`.
@@ -511,7 +509,8 @@ until the station knows where it stands:
    them at hand. Type the **new grid square**. A station whose GPSDO has a fix
    fills in the grid by itself, and may already have moved the grid; check it
    on the review screen. The wizard keeps your remote-access number, the
-   remote-access switch and the site sink switch as they were.
+   remote-access switch and the site sink switch as they were.  On a station
+   installed before v3.84 it also turns the old status heartbeat off.
 4. Log in to the decoder VM and check the identity:
    `grep -E 'reporter_id|callsign|grid' /etc/sigmond/site-profile.toml`.
    (The station pages keep the grid from the first install.) Then run

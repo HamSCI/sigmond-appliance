@@ -84,7 +84,7 @@ ol li, ul li{margin:.25rem 0;}
 </style>
 <div class="wrap">
 <header class="col">
-  <p class="kicker">Sigmond appliance v3.83 &middot; new station</p>
+  <p class="kicker">Sigmond appliance v3.84 &middot; new station</p>
   <h1>Setting up a new station</h1>
   <p class="lede">You have a USB stick and a small computer with a radio receiver attached.
   About an hour from now the machine will record and decode HF signals on its own. It
@@ -123,8 +123,8 @@ in advance, they take two minutes to type. Only the first two are required.</p>
     <td>171<br><small>the receiver, as numbered on the PSWS portal</small></td><td><span class="fill"></span></td></tr>
 <tr class="hi"><td><b>Magnetometer instrument number</b></td>
     <td>84<br><small>only if you have a magnetometer; it reports under the same station ID</small></td><td><span class="fill"></span></td></tr>
-<tr><td>Status heartbeats</td>
-    <td>Y<br><small>press Enter to accept the collector it offers</small></td><td><span class="fill"></span></td></tr>
+<tr><td>Local NTP server</td>
+    <td>ntp.example.edu<br><small>a time server at your site; Enter takes the one your network offers, or none</small></td><td><span class="fill"></span></td></tr>
 <tr><td>Station designator</td>
     <td>AC0G-B4<br><small>offered from your reporter ID; press Enter to accept</small></td><td><span class="fill"></span></td></tr>
 </tbody>
@@ -159,20 +159,20 @@ Wi-Fi network you join during setup. Sites with only IPv6 work too.</li>
 <div class="step">
   <span class="num">step 1</span>
   <p>Your fleet admin sends you two files, or download links for them: the image,
-  <span class="mono">sigmond-appliance-v3.83-20261029-release.img</span> (about 5.7 GB), and its
+  <span class="mono">sigmond-appliance-v3.84-20261030-release.img</span> (about 5.7 GB), and its
   checksum, <span class="mono">…release.sha256</span>. A later release carries its own version and
   date in the name; use the names you were given. Keep both in one folder and check the
   image:</p>
-  <pre>sha256sum -c sigmond-appliance-v3.83-20261029-release.sha256</pre>
+  <pre>sha256sum -c sigmond-appliance-v3.84-20261030-release.sha256</pre>
   <p>The image is <b>not compressed</b>: there is nothing to unzip.</p>
   <p>With the project's tools, this is the safe way to write it. It finds the stick by
   looking for something removable, <em>refuses</em> the disk your own computer runs from,
   and reads the stick back afterwards to check every byte:</p>
-  <pre>./flash-usb.sh sigmond-appliance-v3.83-20261029-release.img</pre>
+  <pre>./flash-usb.sh sigmond-appliance-v3.84-20261030-release.img</pre>
   <p>balenaEtcher or Raspberry Pi Imager ("Use custom") work too, and both verify the write.
   By hand, with only the image file:</p>
   <pre>lsblk -dno NAME,SIZE,TRAN,RM,MODEL        # find the stick, check its size
-sudo dd if=sigmond-appliance-v3.83-20261029-release.img of=/dev/sdX bs=4M \
+sudo dd if=sigmond-appliance-v3.84-20261030-release.img of=/dev/sdX bs=4M \
         oflag=direct conv=fsync status=progress
 sync</pre>
   <div class="note warn">
@@ -228,9 +228,9 @@ The decoder VM then installs itself automatically.</div>
     <li>A <b>review screen</b> shows every answer. Type a line number to change one, or
     <b>Y</b> to apply.</li>
   </ol>
-  <p>Saying yes to heartbeats lets a dashboard show that your station is alive and
-  healthy. It sends a small report every five minutes, outbound only, and opens nothing
-  on your machine.</p>
+  <p>Give the wizard a local NTP server if your site has one. The station then sets its
+  clock from that server alone and asks no public server. Without one it uses a public
+  pool, capped at four servers, until its own timing comes up.</p>
   <p><b>Remote access comes up by itself.</b> The wizard asks nothing about it: every
   station registers with the fleet gateway and opens a tunnel, so that your fleet admin
   can support it. Registering sends two things: the station's name and the host's public
@@ -260,7 +260,7 @@ The decoder VM then installs itself automatically.</div>
 <div class="note key">
   <p><b>A new station starts with its site sink switch at <span class="switch off">off</span>.</b>
   It records and decodes, but sends no spots or data to wsprnet, pskreporter.info,
-  wsprdaemon.org or PSWS. Only its heartbeat, the five-minute health report, goes out. That
+  wsprdaemon.org or PSWS. That
   way nothing leaves until you know the station hears well and reports the right
   callsign and grid.</p>
 </div>
@@ -441,7 +441,7 @@ then shipped to its permanent home. Keep the site sink switch at
 <ol>
 <li>At the staging site, leave the switch at <span class="mono">off</span>; a new station
 starts that way. Check reception with the waterfall and <span class="mono">smd watch wspr</span>.
-Only the heartbeat goes out.</li>
+No data leaves the station.</li>
 <li>At the destination, log in to the host and run <span class="mono">sigmond-setup --reconfigure</span>.</li>
 <li>Answer the questions again. The wizard asks for your reporter ID and PSWS IDs afresh,
 and Enter at the PSWS station ID skips PSWS, so have them at hand. Type the <b>new grid
@@ -459,10 +459,10 @@ fifteen minutes later.</li>
 </ol>
 
 <hr>
-<p class="foot">For sigmond-appliance v3.83, blessed 2026-10-29. The steps, screen messages and
+<p class="foot">For sigmond-appliance v3.84, blessed 2026-10-30. The steps, screen messages and
 logins here follow the release's installation guide. The image builder's nested test
-installed v3.83 from scratch, and its update test carried a v3.82 station forward and back.
-No station has installed v3.83 from scratch on hardware yet, and no IPv6-only site has
+installed v3.84 from scratch, and its update test carried a v3.83 station forward and back.
+No station has installed v3.84 from scratch on hardware yet, and no IPv6-only site has
 installed it from scratch. Day-2 operation, health checks and
 troubleshooting live in the operator guide:
 <span class="mono">github.com/HamSCI/sigmond/blob/main/docs/operator/README.md</span></p>
