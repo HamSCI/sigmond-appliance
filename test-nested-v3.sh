@@ -69,11 +69,15 @@ phase_d_verdict() {
 # The readers for the remote-access checks of Phase D (sigmond
 # tasks/plan-remote-access.md).
 #
-# wizard_answers <racq>: the wizard's answers, one per line, in the order it
-# asks.  racq=1 for a wizard that still asks "Enable remote access? [Y/n]"
-# (v3.70 and earlier: the update rig's base image); racq=0 for one that asks
-# nothing about it.  One answer too many or too few shifts every answer after
-# it, and the wizard then reads a PSWS id as a heartbeat host.
+# wizard_answers <racq> <hbq> <ntpq>: the wizard's answers, one per line, in
+# the order it asks.  racq=1 for a wizard that still asks "Enable remote
+# access? [Y/n]" (v3.70 and earlier); racq=0 for one that asks nothing about
+# it.  hbq=1 for a wizard that asks the three heartbeat questions (v3.52 to
+# v3.83: the update rig's base image); hbq=0 for one that asks none (v3.84 on,
+# rob 2026-10-29).  ntpq=1 for a wizard that asks for a local NTP server
+# (v3.84 on); ntpq=0 for one that does not.  One answer too many or too few
+# shifts every answer after it, and the wizard then reads a PSWS id as a
+# heartbeat host.
 wizard_answers() {
     local a=(
         'N0CALL/T1'          # reporter id
@@ -87,9 +91,18 @@ wizard_answers() {
         'S000999'            # PSWS station id
         '172'                # GRAPE instrument id
         '84'                 # magnetometer instrument id
+    )
+    # v3.52 to v3.83 asked three heartbeat questions here.
+    [ "$2" = 1 ] && a+=(
         ''                   # heartbeat: send them? (blank = Y, the default)
         ''                   # heartbeat: collector host (blank = wd30.wsprdaemon.org)
         ''                   # heartbeat: collector port (blank = 38222)
+    )
+    # v3.84 on asks for a local NTP server here instead.
+    [ "$3" = 1 ] && a+=(
+        ''                   # local NTP server (blank = what DHCP offers, or none)
+    )
+    a+=(
         ''                   # station designator (blank = default from reporter)
         'Y'                  # apply
     )
@@ -1625,6 +1638,19 @@ case "$($SSHN "test -r /usr/local/sbin/sigmond-setup || { echo RACQ:MISSING; exi
     *RACQ:NO*)  RACQ=0 ;;
     *) say "FATAL: could not read the host's wizard to decide its answers"; exit 1 ;;
 esac
+# The same for the heartbeat questions (gone from v3.84) and the NTP question
+# (new in v3.84).  A wizard that asks both, or neither, is one this rig does
+# not know, and guessing its answers would shift them.
+case "$($SSHN "grep -q 'Send status heartbeats?' /usr/local/sbin/sigmond-setup && echo HBQ:YES || echo HBQ:NO; grep -q 'Local NTP server' /usr/local/sbin/sigmond-setup && echo NTPQ:YES || echo NTPQ:NO" 2>&1 | tr '\n' ' ')" in
+    *HBQ:YES*NTPQ:NO*) HBQ=1; NTPQ=0 ;;
+    *HBQ:NO*NTPQ:YES*) HBQ=0; NTPQ=1 ;;
+    *) say "FATAL: the host's wizard asks both the heartbeat and the NTP questions, or neither; this rig does not know its answers"; exit 1 ;;
+esac
+if [ "$HBQ" = 1 ] && [ "${SINK_BASE_IMAGE:-0}" != 1 ]; then
+    say "FATAL: the image under test still asks the heartbeat questions"
+    say "  only the update rig's base image may; test-update-v3.sh sets SINK_BASE_IMAGE=1 for that run"
+    exit 1
+fi
 if [ "$RACQ" = 1 ] && [ "${SINK_BASE_IMAGE:-0}" != 1 ]; then
     say "FATAL: the image under test still asks 'Enable remote access?'"
     say "  only the update rig's base image may; test-update-v3.sh sets SINK_BASE_IMAGE=1 for that run"
@@ -1656,8 +1682,8 @@ case "$($SSHN "mkdir -p /etc/sigmond-appliance && printf '%s\n' SIGMOND_RAC_SERV
     *PIN:OK*) ;;
     *) say "FATAL: could not pin the gateway on the nested host (the pin did not read back)"; exit 1 ;;
 esac
-mapfile -t WIZARD_ANSWERS < <(wizard_answers "$RACQ")
-say "wizard answers: ${#WIZARD_ANSWERS[@]} (remote-access question: $([ "$RACQ" = 1 ] && echo asked || echo not asked))"
+mapfile -t WIZARD_ANSWERS < <(wizard_answers "$RACQ" "$HBQ" "$NTPQ")
+say "wizard answers: ${#WIZARD_ANSWERS[@]} (remote-access question: $([ "$RACQ" = 1 ] && echo asked || echo not asked); heartbeat questions: $([ "$HBQ" = 1 ] && echo asked || echo not asked); NTP question: $([ "$NTPQ" = 1 ] && echo asked || echo not asked))"
 # The same four variables go into the wizard's own environment as well.  A
 # wizard from before v3.71 honours the environment and ignores the file, and
 # against such a wizard the answer `n` would be the only other guard.
@@ -1749,21 +1775,37 @@ echo "$PSWS_OUT" | grep -q 'MOTD-HOOK-OK'   || { say "FATAL: PSWS motd hook not 
 echo "$PSWS_OUT" | grep -q 'STATION-KEY-OK' || { say "FATAL: station key not generated"; exit 1; }
 echo "$PSWS_OUT" | grep -qi 'not finished\|NOT YET\|verify' || { say "FATAL: pending-enrollment banner missing"; exit 1; }
 
-# The heartbeat prompt shipped in v3.52 and nothing tested it.  Assert what
-# the wizard was asked for actually reached the profile -- above all the
-# PORT: site_profile.py defaults [heartbeat].port to 22 and the collector
-# answers only on 38222, so a profile carrying the host WITHOUT a port
-# produces a station that reports nowhere and looks configured.
-say "verifying the fleet heartbeat the wizard was asked to enable"
-HB_OUT=$($SSHN "qm guest exec $VMID --timeout 60 -- bash -lc 'grep -A4 \"\\[heartbeat\\]\" /etc/sigmond/site-profile.toml'" 2>&1)
-echo "$HB_OUT" | tail -6
-echo "$HB_OUT" | grep -qE 'enabled[[:space:]]*=[[:space:]]*true' \
-    || { say "FATAL: heartbeat not enabled in site profile"; exit 1; }
-echo "$HB_OUT" | grep -q 'wd30.wsprdaemon.org' \
-    || { say "FATAL: heartbeat collector host missing from site profile"; exit 1; }
-echo "$HB_OUT" | grep -qE 'port[[:space:]]*=[[:space:]]*38222' \
-    || { say "FATAL: heartbeat port not 38222 — the code default of 22 never delivers"; exit 1; }
-say "heartbeat enabled, host and port 38222 written ✓"
+# From v3.84 the wizard asks nothing about the heartbeat and disarms both
+# heartbeat timers, in the VM and on the PM (rob 2026-10-29): no station opens
+# a direct connection to wd30, and status moves onto the upload path.  Assert
+# that a v3.84 wizard pointed nothing at wd30.  The older checks stay for the
+# update rig's base image, whose wizard still asks (HBQ=1).
+if [ "$HBQ" = 0 ]; then
+    say "verifying the wizard enabled no fleet heartbeat (v3.84 on)"
+    HB_OUT=$($SSHN "qm guest exec $VMID --timeout 60 -- bash -lc 'grep -A4 \"^[[:space:]]*\\[heartbeat\\]\" /etc/sigmond/site-profile.toml; echo HBEND'" 2>&1)
+    echo "$HB_OUT" | tail -6
+    echo "$HB_OUT" | grep -q HBEND \
+        || { say "FATAL: no answer from the guest about the heartbeat in the site profile"; exit 1; }
+    echo "$HB_OUT" | grep -qE 'enabled[[:space:]]*=[[:space:]]*true' \
+        && { say "FATAL: the site profile enables a heartbeat the wizard no longer asks for"; exit 1; }
+    say "no heartbeat enabled in the site profile ✓"
+else
+    # The heartbeat prompt shipped in v3.52 and nothing tested it.  Assert what
+    # the wizard was asked for actually reached the profile -- above all the
+    # PORT: site_profile.py defaults [heartbeat].port to 22 and the collector
+    # answers only on 38222, so a profile carrying the host WITHOUT a port
+    # produces a station that reports nowhere and looks configured.
+    say "verifying the fleet heartbeat the wizard was asked to enable"
+    HB_OUT=$($SSHN "qm guest exec $VMID --timeout 60 -- bash -lc 'grep -A4 \"\\[heartbeat\\]\" /etc/sigmond/site-profile.toml'" 2>&1)
+    echo "$HB_OUT" | tail -6
+    echo "$HB_OUT" | grep -qE 'enabled[[:space:]]*=[[:space:]]*true' \
+        || { say "FATAL: heartbeat not enabled in site profile"; exit 1; }
+    echo "$HB_OUT" | grep -q 'wd30.wsprdaemon.org' \
+        || { say "FATAL: heartbeat collector host missing from site profile"; exit 1; }
+    echo "$HB_OUT" | grep -qE 'port[[:space:]]*=[[:space:]]*38222' \
+        || { say "FATAL: heartbeat port not 38222 — the code default of 22 never delivers"; exit 1; }
+    say "heartbeat enabled, host and port 38222 written ✓"
+fi
 
 # Every site sink check that does not run, or does not conclude, adds a phrase
 # here.  One line before PHASE D PASS repeats them, so a reader of the verdict
@@ -1898,32 +1940,50 @@ say "── fleet awareness: heartbeat CLI contract on a CONFIGURED station"
 # verdict off the end.  Redirect the payload to a file in the guest and
 # return only the two facts: the exit code, and whether it said "not
 # enabled".
-HB=$($SSHN "qm guest exec $VMID --timeout 30 -- bash -lc 'o=\$(smd admin heartbeat emit --dry-run 2>&1); echo rc=\$?; echo notenabled=\$(printf %s \"\$o\" | grep -ci \"not enabled\")'" 2>&1)
-echo "$HB" | grep -q "rc=0" \
-    && say "heartbeat emit --dry-run: exit 0 on the configured station ✓" \
-    || { say "FATAL: heartbeat not emitting after the wizard enabled it"; echo "$HB" | head -6; exit 1; }
-echo "$HB" | grep -q "notenabled=0" \
-    || { say "FATAL: heartbeat reports NOT ENABLED after the wizard enabled it"; echo "$HB" | head -6; exit 1; }
-$SSHN "qm guest exec $VMID --timeout 30 -- bash -lc 'systemctl list-unit-files sigmond-heartbeat.timer sigmond-gap-hourly.timer'" 2>&1 | grep -q "sigmond-heartbeat.timer" \
-    && say "heartbeat + gap-hourly units present in image ✓" \
-    || { say "FATAL: awareness units missing from image"; exit 1; }
-$SSHN "qm guest exec $VMID --timeout 30 -- bash -lc 'echo HBT-\$(systemctl is-enabled sigmond-heartbeat.timer 2>&1)'" 2>&1 | grep -q "HBT-enabled" \
-    && say "sigmond-heartbeat.timer enabled by the wizard ✓" \
-    || { say "FATAL: the wizard enabled the heartbeat but not its timer — the station will never report (sigmond#94)"; exit 1; }
-HBN=$($SSHN "qm guest exec $VMID --timeout 30 -- bash -lc 'smd admin heartbeat emit >/dev/null 2>&1; echo count=\$(ls /var/lib/sigmond/heartbeat/*.json 2>/dev/null | wc -l)'" 2>&1)
-echo "$HBN" | grep -qE "count=[1-9][0-9]*" \
-    && say "heartbeat emit wrote a spool file in /var/lib/sigmond/heartbeat ✓" \
-    || { say "FATAL: heartbeat emit did not write a spool file under /var/lib/sigmond/heartbeat"; echo "$HBN" | head -6; exit 1; }
-# The PM (this nested PVE host, not the VM) ships its own heartbeat emitter
-# too, but nothing ever ran it, so every PM row on the fleet board stayed
-# silent after a fresh install (sigmond-appliance#9).  Checked directly on
-# the PM with $SSHN, not qm guest exec — pm-heartbeat.timer runs on the host.
-$SSHN "systemctl is-enabled pm-heartbeat.timer 2>&1" | grep -q "^enabled$" \
-    && say "pm-heartbeat.timer enabled on the PM ✓" \
-    || { say "FATAL: pm-heartbeat.timer not enabled on the PM — the host heartbeat never got wired up (sigmond-appliance#9)"; exit 1; }
-$SSHN "test -f /etc/pm-heartbeat/config.toml" \
-    && say "pm-heartbeat config.toml present on the PM ✓" \
-    || { say "FATAL: /etc/pm-heartbeat/config.toml missing on the PM (sigmond-appliance#9)"; exit 1; }
+if [ "$HBQ" = 0 ]; then
+    # v3.84 on: the units ship, and the wizard leaves both timers disarmed.
+    # smd says "not enabled" and exits 2 when [heartbeat] is off or absent.
+    HB=$($SSHN "qm guest exec $VMID --timeout 30 -- bash -lc 'o=\$(smd admin heartbeat emit --dry-run 2>&1); echo rc=\$?; echo notenabled=\$(printf %s \"\$o\" | grep -ci \"not enabled\"); echo HBT-\$(systemctl is-enabled sigmond-heartbeat.timer 2>&1)'" 2>&1)
+    echo "$HB" | grep -q "rc=2" && echo "$HB" | grep -qE "notenabled=[1-9]" \
+        && say "heartbeat emit --dry-run: exit 2, not enabled, as the wizard left it ✓" \
+        || { say "FATAL: heartbeat emit does not say 'not enabled' (exit 2) on a station whose wizard asked nothing about it"; echo "$HB" | head -6; exit 1; }
+    $SSHN "qm guest exec $VMID --timeout 30 -- bash -lc 'systemctl list-unit-files sigmond-heartbeat.timer sigmond-gap-hourly.timer'" 2>&1 | grep -q "sigmond-heartbeat.timer" \
+        && say "heartbeat + gap-hourly units present in image ✓" \
+        || { say "FATAL: awareness units missing from image"; exit 1; }
+    echo "$HB" | grep -q "HBT-enabled" \
+        && { say "FATAL: sigmond-heartbeat.timer is enabled; the wizard should have disarmed it"; exit 1; }
+    say "sigmond-heartbeat.timer not enabled ✓"
+    $SSHN "systemctl is-enabled pm-heartbeat.timer 2>&1" | grep -q "^enabled$" \
+        && { say "FATAL: pm-heartbeat.timer is enabled on the PM; the wizard should have disarmed it"; exit 1; }
+    say "pm-heartbeat.timer not enabled on the PM ✓"
+else
+    HB=$($SSHN "qm guest exec $VMID --timeout 30 -- bash -lc 'o=\$(smd admin heartbeat emit --dry-run 2>&1); echo rc=\$?; echo notenabled=\$(printf %s \"\$o\" | grep -ci \"not enabled\")'" 2>&1)
+    echo "$HB" | grep -q "rc=0" \
+        && say "heartbeat emit --dry-run: exit 0 on the configured station ✓" \
+        || { say "FATAL: heartbeat not emitting after the wizard enabled it"; echo "$HB" | head -6; exit 1; }
+    echo "$HB" | grep -q "notenabled=0" \
+        || { say "FATAL: heartbeat reports NOT ENABLED after the wizard enabled it"; echo "$HB" | head -6; exit 1; }
+    $SSHN "qm guest exec $VMID --timeout 30 -- bash -lc 'systemctl list-unit-files sigmond-heartbeat.timer sigmond-gap-hourly.timer'" 2>&1 | grep -q "sigmond-heartbeat.timer" \
+        && say "heartbeat + gap-hourly units present in image ✓" \
+        || { say "FATAL: awareness units missing from image"; exit 1; }
+    $SSHN "qm guest exec $VMID --timeout 30 -- bash -lc 'echo HBT-\$(systemctl is-enabled sigmond-heartbeat.timer 2>&1)'" 2>&1 | grep -q "HBT-enabled" \
+        && say "sigmond-heartbeat.timer enabled by the wizard ✓" \
+        || { say "FATAL: the wizard enabled the heartbeat but not its timer — the station will never report (sigmond#94)"; exit 1; }
+    HBN=$($SSHN "qm guest exec $VMID --timeout 30 -- bash -lc 'smd admin heartbeat emit >/dev/null 2>&1; echo count=\$(ls /var/lib/sigmond/heartbeat/*.json 2>/dev/null | wc -l)'" 2>&1)
+    echo "$HBN" | grep -qE "count=[1-9][0-9]*" \
+        && say "heartbeat emit wrote a spool file in /var/lib/sigmond/heartbeat ✓" \
+        || { say "FATAL: heartbeat emit did not write a spool file under /var/lib/sigmond/heartbeat"; echo "$HBN" | head -6; exit 1; }
+    # The PM (this nested PVE host, not the VM) ships its own heartbeat emitter
+    # too, but nothing ever ran it, so every PM row on the fleet board stayed
+    # silent after a fresh install (sigmond-appliance#9).  Checked directly on
+    # the PM with $SSHN, not qm guest exec — pm-heartbeat.timer runs on the host.
+    $SSHN "systemctl is-enabled pm-heartbeat.timer 2>&1" | grep -q "^enabled$" \
+        && say "pm-heartbeat.timer enabled on the PM ✓" \
+        || { say "FATAL: pm-heartbeat.timer not enabled on the PM — the host heartbeat never got wired up (sigmond-appliance#9)"; exit 1; }
+    $SSHN "test -f /etc/pm-heartbeat/config.toml" \
+        && say "pm-heartbeat config.toml present on the PM ✓" \
+        || { say "FATAL: /etc/pm-heartbeat/config.toml missing on the PM (sigmond-appliance#9)"; exit 1; }
+fi
 say "── gmag-webui (v3.34): pinned Deno + dashboard unit baked into the VM"
 # sigmond 9833c25 added gmag-webui (HamSCI magnetometer dashboard) as a dasi2
 # core client installed by the smd-native recipe: a pinned Deno under

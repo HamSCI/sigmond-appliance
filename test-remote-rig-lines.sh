@@ -40,18 +40,25 @@ fail=0
 chk(){ if [ "$2" = "$3" ]; then echo "  ok   $1"; else echo "  FAIL $1: got '$2', want '$3'"; fail=1; fi; }
 
 # ── wizard_answers ──────────────────────────────────────────────────────
-mapfile -t OLD < <(wizard_answers 1)
-mapfile -t NEW < <(wizard_answers 0)
-chk "a wizard that asks gets thirteen answers"      "${#OLD[@]}" 13
-chk "a wizard that does not ask gets twelve"        "${#NEW[@]}" 12
+mapfile -t OLD < <(wizard_answers 1 1 0)    # v3.70: asks remote access and the heartbeat
+mapfile -t MID < <(wizard_answers 0 1 0)    # v3.71 to v3.83: the heartbeat only
+mapfile -t NEW < <(wizard_answers 0 0 1)    # v3.84 on: the NTP server instead
+chk "a v3.70 wizard gets thirteen answers"          "${#OLD[@]}" 13
+chk "a v3.71-v3.83 wizard gets twelve"              "${#MID[@]}" 12
+chk "a v3.84 wizard gets ten"                       "${#NEW[@]}" 10
 chk "the old wizard's fifth answer declines"        "${OLD[4]}" n
 chk "the old wizard's PSWS id follows it"           "${OLD[5]}" S000999
 chk "the new wizard's PSWS id follows the class"    "${NEW[3]}/${NEW[4]}" n/S000999
-chk "both end with apply"                           "${OLD[12]}/${NEW[11]}" Y/Y
-chk "the four blank answers stay blank lines"       "$(wizard_answers 0 | grep -c '^$')" 4
-# Drop the fifth answer from the old list and the new list must result.
-chk "the two lists differ by that one answer alone" \
-    "$(printf '%s|' "${OLD[@]:0:4}" "${OLD[@]:5}")" "$(printf '%s|' "${NEW[@]}")"
+chk "the v3.84 mag id comes before the NTP blank"   "${NEW[6]}/${NEW[7]}" 84/
+chk "all end with apply"                            "${OLD[12]}/${MID[11]}/${NEW[9]}" Y/Y/Y
+chk "the mid wizard's four blank answers"           "$(wizard_answers 0 1 0 | grep -c '^$')" 4
+chk "the v3.84 wizard's two blank answers"          "$(wizard_answers 0 0 1 | grep -c '^$')" 2
+# Drop the fifth answer from the old list and the mid list must result.
+chk "old and mid differ by that one answer alone" \
+    "$(printf '%s|' "${OLD[@]:0:4}" "${OLD[@]:5}")" "$(printf '%s|' "${MID[@]}")"
+# Swap the three heartbeat blanks for one NTP blank and the new list results.
+chk "mid and new differ by the heartbeat/NTP swap alone" \
+    "$(printf '%s|' "${MID[@]:0:7}" '' "${MID[@]:10}")" "$(printf '%s|' "${NEW[@]}")"
 
 # ── rr_state ────────────────────────────────────────────────────────────
 ans(){ printf '%s\n' "$@" > "$T/a"; rr_state "$T/a"; }
