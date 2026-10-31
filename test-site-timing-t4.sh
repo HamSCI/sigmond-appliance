@@ -60,7 +60,8 @@ run_case "already declared -> no restart"                 '^*' 1 Normal PPS  "${
 # ── the wizard's answer (10-sigmond-ntp.conf, v3.84 ask_ntp) ──────────────
 # A server the operator named in the wizard reached chrony and never T4:
 # 2b read only the subnet scan's file.  Same vetting; the operator's own
-# string (an IP or a host name) becomes the peer.
+# address becomes the peer (a host name resolves first; the vetted address
+# is declared, never the name).
 rm -f "$T/lts.conf"
 printf '# Written by the Sigmond first-boot wizard\nserver 192.168.8.144 iburst\n' > "$T/wiz.conf"
 run_case "wizard-named IP, no scan file -> declared"      '^*' 1 Normal PPS  "$BASE" 192.168.8.144 yes
@@ -69,7 +70,9 @@ printf '# Written by the Sigmond first-boot wizard\npool pool.ntp.org iburst max
 run_case "wizard chose the public pool -> nothing"        '^*' 1 Normal PPS  "$BASE" -             no
 printf 'server timeserver.pole iburst\n' > "$T/wiz.conf"
 printf '#!/bin/bash\n[ "$1 $2" = "ahostsv4 timeserver.pole" ] && echo "192.168.8.144   STREAM timeserver.pole"\n' > "$T/bin/getent"; chmod +x "$T/bin/getent"
-run_case "wizard-named host name -> declared by name"     '^*' 1 Normal PPS  "$BASE" timeserver.pole yes
+run_case "wizard-named host name -> its vetted address"  '^*' 1 Normal PPS  "$BASE" 192.168.8.144 yes
+printf 'server nowhere.pole iburst\n' > "$T/wiz.conf"
+run_case "host name that does not resolve -> nothing"     '^*' 1 Normal PPS  "$BASE" -             no
 printf 'server 192.168.8.144 iburst minpoll 4 maxpoll 6\n' > "$T/lts.conf"
 printf 'server 192.168.8.144 iburst\n' > "$T/wiz.conf"
 run_case "same server in both files -> declared once"     '^*' 1 Normal PPS  "$BASE" 192.168.8.144 yes
