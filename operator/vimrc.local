@@ -1,0 +1,2 @@
+" Sigmond: the stock scheme is unreadable on the console (rob, 2026-10-31)
+silent! colorscheme industry

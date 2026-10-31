@@ -31,7 +31,7 @@ else
     echo "### FATAL: install.sh left no qemu-guest-agent drop-in at $QGA_DROPIN"
     exit 1
 fi
-sudo apt-get install -y -qq btop tmux >/dev/null 2>&1 && echo "### operator utils installed (btop tmux)"
+sudo apt-get install -y -qq btop tmux vim >/dev/null 2>&1 && echo "### operator utils installed (btop tmux vim)"
 # Health-check prerequisites.  sigmond's install.sh declares these too, but the
 # image states them explicitly so its contents do not depend on installer
 # ordering or on install.sh completing.  None of them announce their absence:

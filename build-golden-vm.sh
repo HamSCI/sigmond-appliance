@@ -143,6 +143,8 @@ $SCP wisdomf-ryzen5825u build@127.0.0.1:wisdomf
 # top(1) config showing P (last-used CPU) beside %CPU — baked into the
 # golden VM so every operator account has it without a per-station step.
 [ -f "$PWD/operator/toprc" ] && $SCP "$PWD/operator/toprc" build@127.0.0.1:toprc
+# system-wide vim config (selects the industry colour scheme)
+[ -f "$PWD/operator/vimrc.local" ] && $SCP "$PWD/operator/vimrc.local" build@127.0.0.1:vimrc.local
 # radiod's own channel-filter plans — a DIFFERENT file from wisdomf, which
 # is planned non-threaded and which radiod's threaded plans never match.
 # Without this, radiod silently runs FFTW_ESTIMATE plans (see

@@ -771,6 +771,11 @@ fi
 # The silence is what hid this for good: no success line AND no failure line.
 check "a missing toprc is reported, not skipped" firstboot-v3.sh \
       'WARNING toprc not on the media'
+check "the build puts vimrc.local on the media" build-usb-v3.sh '/tmp/sigpay.$$/vimrc.local'
+check "the importer stages vimrc.local"          "$IMPORTER2" \
+      'cp /mnt/sig-media/vimrc.local "$APP"/'
+check "firstboot installs it as /etc/vim/vimrc.local" firstboot-v3.sh \
+      'install -m 644 "$APP/vimrc.local" /etc/vim/vimrc.local'
 
 # ═══════════════════════════════════════════════════════════════════════════
 echo

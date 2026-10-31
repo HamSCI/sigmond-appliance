@@ -186,6 +186,15 @@ if [ -f "$HOME/toprc" ]; then
 else
     echo "### NOTE: no toprc staged — top keeps its stock columns"
 fi
+# vim: system-wide, so every account (root, hamsci, sigmond, ...) gets the
+# industry scheme; Debian's /etc/vim/vimrc sources vimrc.local.
+if [ -f "$HOME/vimrc.local" ]; then
+    sudo mkdir -p /etc/vim
+    sudo install -m 644 "$HOME/vimrc.local" /etc/vim/vimrc.local
+    echo "### vimrc.local installed (/etc/vim/vimrc.local)"
+else
+    echo "### NOTE: no vimrc.local staged — vim keeps its stock colours"
+fi
 sudo mkdir -p /home/hamsci/.ssh
 # Operator keys arrive as $HOME/operator-keys (merged from operators/*.pub by
 # build-golden-vm.sh).  $HOME/rob.pub is the legacy name from when the set was

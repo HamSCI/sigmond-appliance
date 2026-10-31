@@ -507,6 +507,15 @@ elif [ -f "$REPO/operator/toprc" ]; then
 else
     say "WARN: operator/toprc not found — top keeps its stock columns"
 fi
+# vim's stock colour scheme is unreadable on the console; this selects
+# `industry` system-wide (/etc/vim/vimrc.local, which Debian's vimrc sources).
+if [ -f "$RIG_ROOT/v3/operator/vimrc.local" ]; then
+    cp "$RIG_ROOT/v3/operator/vimrc.local" /tmp/sigpay.$$/vimrc.local
+elif [ -f "$REPO/operator/vimrc.local" ]; then
+    cp "$REPO/operator/vimrc.local" /tmp/sigpay.$$/vimrc.local
+else
+    say "WARN: operator/vimrc.local not found — vim keeps its stock colours"
+fi
 echo "$VERSION sigmond@$SIGREV built $(date -Iseconds)" > /tmp/sigpay.$$/VERSION
 # component pin manifest (host copy, no image_sha256 -- see above); named
 # without the versioned/timestamped prefix so firstboot never has to know

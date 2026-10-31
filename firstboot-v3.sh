@@ -2243,6 +2243,7 @@ cp /mnt/sig-media/sigmond-net-probe "$APP"/ 2>/dev/null
 # payload nor any user's config, and the firstboot log contains neither the
 # success line nor the failure line (2026-09-30).
 cp /mnt/sig-media/toprc "$APP"/ 2>/dev/null
+cp /mnt/sig-media/vimrc.local "$APP"/ 2>/dev/null
 if [ -f /mnt/sig-media/sigmond-wifi ]; then
     install -m 755 /mnt/sig-media/sigmond-wifi /usr/local/sbin/sigmond-wifi
 fi
@@ -2446,6 +2447,29 @@ else
   # "never shipped", and that silence is why this went unnoticed through
   # every build up to v3.63.
   say "host: WARNING toprc not on the media — top will keep its default columns"
+fi
+# vim: the host ships vim-tiny, which has no colour schemes.  Install the
+# system-wide vimrc.local (Debian's /etc/vim/vimrc sources it for every user,
+# vim.tiny included) and, if apt can reach a working repo, the full vim package
+# that carries `industry`.  The enterprise repo lines on an unsubscribed host can
+# make apt fail: that must never fail firstboot, so warn and carry on.  The
+# `silent!` in the file keeps vim.tiny quiet when the package is absent.
+if [ -f "$APP/vimrc.local" ]; then
+  mkdir -p /etc/vim
+  if install -m 644 "$APP/vimrc.local" /etc/vim/vimrc.local 2>/dev/null; then
+    say "host: vim opens with the industry scheme (/etc/vim/vimrc.local)"
+  else
+    say "host: WARNING could not write /etc/vim/vimrc.local — vim keeps stock colours"
+  fi
+  if ! dpkg -s vim >/dev/null 2>&1; then
+    if DEBIAN_FRONTEND=noninteractive timeout 120 apt-get install -y -qq vim >>"$LOG" 2>&1; then
+      say "host: vim installed (industry scheme available)"
+    else
+      say "host: WARNING could not apt-get install vim — vim-tiny stays; the scheme applies once vim is installed"
+    fi
+  fi
+else
+  say "host: WARNING vimrc.local not on the media — vim will keep its stock colours"
 fi
 # optional site-keys tarball: a returning station's registered upload/PSWS
 # keys, dropped by the operator onto the stick's FAT (EFI) volume after
