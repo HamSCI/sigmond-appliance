@@ -114,11 +114,23 @@ fi
 # and left for a later run -- chrony needs minutes to select a new source.
 # Opt-out: [timing.authority_manager.t4] auto_declare = false, or an
 # explicit peers = [] (both mean "the operator decides T4 here").
-if [ -f "$CFG" ] && [ -f /etc/chrony/conf.d/local-timeservers.conf ]; then
+# A server the operator NAMED counts too: the v3.84 wizard writes its answer
+# to 10-sigmond-ntp.conf, which chrony used and 2b never read, so a named LAN
+# timeserver (South Pole's, or one the subnet scan cannot reach) never became
+# T4.  Its `server`/`peer` lines only -- `pool` there is the public pool.  A
+# host name is matched to chrony's row through its address and declared as
+# the operator wrote it; the vetting below is the same for both files.
+LTS=/etc/chrony/conf.d/local-timeservers.conf
+WIZ=/etc/chrony/conf.d/10-sigmond-ntp.conf
+if [ -f "$CFG" ] && { [ -f "$LTS" ] || [ -f "$WIZ" ]; }; then
     T4OK=""
-    for ip in $(awk '$1 ~ /^(server|pool|peer)$/ {print $2}' /etc/chrony/conf.d/local-timeservers.conf); do
-        read -r st stratum <<<"$(chronyc -n sources 2>/dev/null | awk -v ip="$ip" '$2 == ip {print $1, $3; exit}')"
-        nd=$(chronyc -n ntpdata "$ip" 2>/dev/null)
+    T4CAND=$( { [ -f "$LTS" ] && awk '$1 ~ /^(server|pool|peer)$/ {print $2}' "$LTS"
+                [ -f "$WIZ" ] && awk '$1 ~ /^(server|peer)$/ {print $2}' "$WIZ"; } | awk '!seen[$0]++')
+    for ip in $T4CAND; do
+        addr=$ip
+        [[ "$ip" =~ ^[0-9.]+$|: ]] || addr=$(getent ahostsv4 "$ip" 2>/dev/null | awk 'NR==1 {print $1}')
+        read -r st stratum <<<"$(chronyc -n sources 2>/dev/null | awk -v ip="${addr:-$ip}" '$2 == ip {print $1, $3; exit}')"
+        nd=$(chronyc -n ntpdata "${addr:-$ip}" 2>/dev/null)
         leap=$(printf '%s\n' "$nd" | sed -n 's/^Leap status *: *//p' | head -1)
         refid=$(printf '%s\n' "$nd" | sed -n 's/^Reference ID *: *[0-9A-Fa-f]* *(\(.*\)).*/\1/p' | head -1)
         if [[ "${st:-}" == "^*" || "${st:-}" == "^+" ]] && [ "${stratum:-}" = 1 ] \

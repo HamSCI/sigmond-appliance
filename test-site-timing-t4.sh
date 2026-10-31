@@ -16,7 +16,8 @@ fail=0
 # The step, verbatim, with only the hardcoded chrony path redirected.
 awk '/^# ── 2b\. declare those LAN stratum-1/{f=1} /^# ── 2\.5 identity reconciliation/{f=0} f' \
     "$HERE/sigmond-site-timing" \
-    | sed "s#/etc/chrony/conf.d/local-timeservers.conf#$T/lts.conf#g" > "$T/step.sh"
+    | sed -e "s#/etc/chrony/conf.d/local-timeservers.conf#$T/lts.conf#g" \
+          -e "s#/etc/chrony/conf.d/10-sigmond-ntp.conf#$T/wiz.conf#g" > "$T/step.sh"
 grep -q 'T4OK' "$T/step.sh" || { echo "FAIL: step 2b not found in sigmond-site-timing"; exit 1; }
 mkdir -p "$T/bin"
 printf 'server 192.168.8.144 iburst minpoll 4 maxpoll 6\n' > "$T/lts.conf"
@@ -55,5 +56,22 @@ run_case "opt-out auto_declare = false -> untouched"      '^*' 1 Normal PPS  "${
 run_case "opt-out explicit peers = [] -> untouched"       '^*' 1 Normal PPS  "${BASE}\n[timing.authority_manager.t4]\npeers = []\n" - no
 run_case "operator peer kept, ours added"                 '^*' 1 Normal PPS  "${BASE}\n[timing.authority_manager.t4]\npeers = [\"timeserver.lan\"]\n" timeserver.lan,192.168.8.144 yes
 run_case "already declared -> no restart"                 '^*' 1 Normal PPS  "${BASE}\n[timing.authority_manager.t4]\npeers = [\"192.168.8.144\"]\n" 192.168.8.144 no
+
+# ── the wizard's answer (10-sigmond-ntp.conf, v3.84 ask_ntp) ──────────────
+# A server the operator named in the wizard reached chrony and never T4:
+# 2b read only the subnet scan's file.  Same vetting; the operator's own
+# string (an IP or a host name) becomes the peer.
+rm -f "$T/lts.conf"
+printf '# Written by the Sigmond first-boot wizard\nserver 192.168.8.144 iburst\n' > "$T/wiz.conf"
+run_case "wizard-named IP, no scan file -> declared"      '^*' 1 Normal PPS  "$BASE" 192.168.8.144 yes
+run_case "wizard-named IP, not vouched -> NOT declared"   '^?' 1 Normal PPS  "$BASE" -             no
+printf '# Written by the Sigmond first-boot wizard\npool pool.ntp.org iburst maxsources 4\n' > "$T/wiz.conf"
+run_case "wizard chose the public pool -> nothing"        '^*' 1 Normal PPS  "$BASE" -             no
+printf 'server timeserver.pole iburst\n' > "$T/wiz.conf"
+printf '#!/bin/bash\n[ "$1 $2" = "ahostsv4 timeserver.pole" ] && echo "192.168.8.144   STREAM timeserver.pole"\n' > "$T/bin/getent"; chmod +x "$T/bin/getent"
+run_case "wizard-named host name -> declared by name"     '^*' 1 Normal PPS  "$BASE" timeserver.pole yes
+printf 'server 192.168.8.144 iburst minpoll 4 maxpoll 6\n' > "$T/lts.conf"
+printf 'server 192.168.8.144 iburst\n' > "$T/wiz.conf"
+run_case "same server in both files -> declared once"     '^*' 1 Normal PPS  "$BASE" 192.168.8.144 yes
 
 [ "$fail" = 0 ] && echo "PASS: site-timing step 2b" || { echo "FAILED"; exit 1; }
