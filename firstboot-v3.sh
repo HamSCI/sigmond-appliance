@@ -136,6 +136,42 @@ v6_uplink_on(){
 NETLIBEOF
 chmod 0644 /usr/local/lib/sigmond-net.sh
 
+# ⛔ SOURCE THE LIBRARY INTO *THIS* SHELL TOO -- NOT ONLY INTO THE SCRIPTS
+# THIS FILE WRITES.  The block above is a QUOTED heredoc: it defines cur_ip()
+# and ipurl() inside /usr/local/lib/sigmond-net.sh, and nowhere else.  Every
+# consumer that sources the library gets them; firstboot-v3.sh itself never
+# did, so in its own shell both names were simply absent -- and its CLOSING
+# SUMMARY calls both:
+#
+#     HOSTIP=$(cur_ip vmbr0)                  # -> command not found -> empty
+#     ... web GUI: https://$(ipurl "$HOSTIP"):8006   # -> expands to nothing
+#
+# Two consequences, both shipped since v3.52 and both seen in the field:
+#
+#   1. The Proxmox URL lost its address entirely.  The operator was told
+#          ssh root@fd12:3456:7890:1::43    web GUI: https://:8006
+#      -- the ssh line correct, the web GUI line unusable.  Reported against
+#      v3.82 by Chris Callie at Jenny Jump (2026-10-28), who reasonably read
+#      it as a missing-brackets bug.  It is not: the bracketing call was
+#      always there, it just never resolved to anything.
+#   2. Quieter and worse: with cur_ip() absent, HOSTIP never came from vmbr0
+#      at all.  It always fell through to the two fallbacks below it, which
+#      try GLOBAL IPv6 FIRST.  That inverts this library's documented rule --
+#      "IPv4 still WINS when both exist" -- so a dual-stack station has been
+#      advertising its v6 address where the fleet expects v4.  The whole
+#      comment block guarding against 10.99.0.1 and the CLAT's 192.0.0.1 was
+#      guarding a call that never ran.
+#
+# This is the SAME defect the header at the top of this file describes for
+# v3.52's sigmond-issue, in a second place nobody thought to check.  If this
+# source line ever goes away, both failures come straight back.
+. /usr/local/lib/sigmond-net.sh 2>/dev/null || {
+    # The summary must never lose an address because the library moved.
+    # Keep this in step with the definitions inside NETLIBEOF above.
+    ipurl(){ case "${1:-}" in *:*) printf '[%s]\n' "$1";; *) printf '%s\n' "${1:-}";; esac; }
+    cur_ip(){ :; }
+}
+
 # Installed as a script + boot unit rather than done inline, because the
 # failure it fixes is not a one-time event: a cable moved to the other socket
 # must heal the machine on the next boot, with nobody at the console.
@@ -2211,7 +2247,41 @@ for t in $(seq 1 12); do
   done
   [ -n "$MEDIA" ] && break; sleep 5
 done
-[ -z "$MEDIA" ] && { say "import: no Sigmond USB present"; exit 0; }
+if [ -z "$MEDIA" ]; then
+  # One more try, after asking the kernel to look again.  A stick that is
+  # physically present but was enumerated before udev settled shows no
+  # ID_FS_LABEL to blkid, so the loop above walks right past it; re-reading
+  # the partition table and replaying udev picks it up without the operator
+  # touching anything (Chris Callie, Jenny Jump, v3.82, 2026-10-28: the stick
+  # was in, and only remove / wait / re-insert made it visible).
+  for d in $(lsblk -dnro PATH,TYPE | awk '$2=="disk"{print $1}'); do
+    blockdev --rereadpt "$d" 2>/dev/null
+  done
+  udevadm trigger --subsystem-match=block --action=add 2>/dev/null
+  udevadm settle --timeout=15 2>/dev/null
+  for d in $(lsblk -dnro PATH,TYPE | awk '$2=="disk"{print $1}'); do
+    [ "$(blkid -s LABEL -o value "$d" 2>/dev/null)" = "PVE" ] && [ "$(blkid -s TYPE -o value "$d" 2>/dev/null)" = "iso9660" ] && { MEDIA="$d"; break; }
+  done
+fi
+# ⛔ THIS IS NOT A FAILURE, AND MUST NOT READ LIKE ONE.  firstboot calls this
+# script the instant it prints "PLUG THE STICK BACK IN", so the common case is
+# simply that the operator has not got there yet -- sixty seconds is not long
+# enough to find a stick on a bench.  The udev rule starts us again the moment
+# one appears, so the honest message is what to do, not that something broke.
+[ -z "$MEDIA" ] && {
+  # Canonical marker, LOG ONLY -- never the console.  test-nested-v3.sh greps
+  # this exact phrase out of the log to prove firstboot ran with no media, so
+  # it must survive any rewording of what the operator actually reads below.
+  echo "[sigmond $(date '+%T')] import: no Sigmond USB present" >>"$LOG" 2>/dev/null
+  say "─────────────────────────────────────────────────────────"
+  say " Waiting for the Sigmond install USB. Nothing has gone wrong."
+  say "   Plug the stick in whenever you are ready -- the decoder VM"
+  say "   installs itself automatically as soon as it appears."
+  say "   Already plugged in? Pull it out, count to ten, push it back in;"
+  say "   that makes the kernel read it again."
+  say "─────────────────────────────────────────────────────────"
+  exit 0
+}
 say "─────────────────────────────────────────────────────────"
 say " Sigmond USB detected ($MEDIA)."
 say " Installing the decoder virtual machine (~3 min). LEAVE THE STICK IN."
