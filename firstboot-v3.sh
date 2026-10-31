@@ -2462,6 +2462,11 @@ if [ -f "$APP/vimrc.local" ]; then
     say "host: WARNING could not write /etc/vim/vimrc.local — vim keeps stock colours"
   fi
   if ! dpkg -s vim >/dev/null 2>&1; then
+    # A fresh Proxmox host has no package lists until the first update, and the
+    # enterprise repo lines make `apt-get update` exit non-zero on an
+    # unsubscribed host even when the Debian lists refreshed.  So ignore its
+    # exit status; the install below is the real test.
+    DEBIAN_FRONTEND=noninteractive timeout 120 apt-get update >>"$LOG" 2>&1 || true
     if DEBIAN_FRONTEND=noninteractive timeout 120 apt-get install -y -qq vim >>"$LOG" 2>&1; then
       say "host: vim installed (industry scheme available)"
     else
