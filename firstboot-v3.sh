@@ -3337,8 +3337,9 @@ fi
 # So the VM gets ONE link, a host-only /29 with a fixed address, and this
 # host routes and NATs for it.  A /29, not the /30 it was before 2026-11:
 # host .1, decoder VM .2, and room for a second VM (a radiod-only one) at .3.
-# Hosts installed earlier keep their /30; sigmond accepts either.  Same on every station, on a flat LAN or a
-# VLAN-split campus: 10.99.0.2, always, reachable from here, always.
+# Hosts installed earlier keep their /30; sigmond accepts either.
+# Same on every station, on a flat LAN or a VLAN-split campus: 10.99.0.2,
+# always, reachable from here, always.
 # rob, 2026-09-20: "this should behave the same way as the [VLAN]
 # environment in the penthouse."
 MGMT_PM=10.99.0.1
@@ -3376,6 +3377,14 @@ iface vmbr1 inet static
     bridge-ports none
     bridge-stp off
     bridge-fd 0
+    # ⛔ No IGMP snooping on this bridge.  A radiod-only VM at .3 publishes
+    # its channels as multicast to the decoder VM at .2 over this bridge, and
+    # nothing here sends IGMP queries: with snooping on, the bridge forwards
+    # them for one membership timeout (~260 s) and then drops them, and the
+    # decoder hears nothing with no error.  AI6VN-PM 2026-11-01: VM 100 heard
+    # VM 101 only after snooping was turned off on vmbr1.  Two or three ports
+    # and no physical one, so flooding costs nothing.
+    bridge-mcsnoop 0
     post-up sysctl -q -w net.ipv4.ip_forward=1
     post-up iptables -t nat -C POSTROUTING -s ${MGMT_NET} -o vmbr0 -j MASQUERADE 2>/dev/null || iptables -t nat -A POSTROUTING -s ${MGMT_NET} -o vmbr0 -j MASQUERADE
     # ⛔ AND out the CLAT.  On an IPv6-only site vmbr0 has NO IPv4 address, so
