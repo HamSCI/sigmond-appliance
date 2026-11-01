@@ -202,7 +202,7 @@ lacks "silence raises no ka9q-web alarm"               "$out" "ka9q-web IS NOT R
 
 echo "== an agent that ANSWERS, on a VM with only the private link"
 # ⛔ A SETTLED ANSWER IS NOT A FAILURE.  The address picker excludes
-# 10.99.0.0/30 on purpose -- it is the host-to-guest link and nothing off this
+# 10.99.0.0/29 on purpose -- it is the host-to-guest link and nothing off this
 # machine can reach it.  On a VM that has no other address the picker
 # therefore returns nothing, and the loop used to treat that exactly like
 # silence: six tries, six ten-second sleeps, ~72 s per refresh, then an ARP

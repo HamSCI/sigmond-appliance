@@ -202,7 +202,7 @@ check_not "does not declare a Wi-Fi station dead" "$OUT" "NO NETWORK CABLE DETEC
 check     "names the live radio"                  "$OUT" "Wi-Fi uplink is live: wlp3s0"
 check     "says the config is supported"          "$OUT" "supported configuration"
 [ "$rc" = 0 ] && ok "exits 0" || bad "exits 0 (got $rc)"
-check     "NATs the decoder VM out the radio"     "$STUBLOG" "POSTROUTING -s 10.99.0.0/30 -o wlp3s0 -j MASQUERADE"
+check     "NATs the decoder VM out the radio"     "$STUBLOG" "POSTROUTING -s 10.99.0.0/29 -o wlp3s0 -j MASQUERADE"
 check     "drops the installer's fallback address" "$STUBLOG" "addr del 192.168.100.2/24 dev vmbr0"
 
 # ── 2. the real dead install must STILL be reported ─────────────────────────

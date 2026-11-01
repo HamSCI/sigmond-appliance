@@ -18,7 +18,7 @@ The two halves of a usable console are on different machines:
     pixels      ->  the Proxmox host (VT1, where the access panel paints)
 
 Neither is usable alone. The bridge joins them over the private
-`10.99.0.0/30` host-only link — which has no physical port and is therefore up
+`10.99.0.0/29` host-only link — which has no physical port and is therefore up
 whether or not the station has any uplink. That is exactly the situation this
 exists for: the network is broken and there is no other way in.
 
@@ -50,7 +50,7 @@ Confirmed working 2026-10-01 04:00:53: `Accepted password for root from
 ## What it carries
 
 **Output and keystrokes, never authority.** The VM could already reach the
-host over the `/30`; what it could not do was show the result to the person at
+host over the host-only link; what it could not do was show the result to the person at
 the screen. The operator still authenticates with the host's own credentials.
 This is not a new privilege path and must not become one — in particular, do
 not "simplify" it by installing a VM→host ssh key, which would turn a

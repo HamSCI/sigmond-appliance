@@ -46,7 +46,7 @@ cat > /usr/local/lib/sigmond-net.sh <<'NETLIBEOF'
 # station bound for McMurdo (IPv6-only, 2026-09) would have read as bricked.
 #
 # IPv4 still WINS when both exist: it is what the fleet's reach, frp registry
-# and internal 10.99.0.0/30 management link all speak today.  v6 is the
+# and internal 10.99.0.0/29 management link all speak today.  v6 is the
 # fallback that keeps a v6-only site alive, not a new preference.
 #
 # Link-local (fe80::) is deliberately excluded: without a scope id it is not
@@ -937,11 +937,12 @@ if [ -z "$LIVE" ] && [ -z "$LIVE_ENSLAVED" ]; then
         # both correct for the sites they were written for, and neither one is
         # the uplink here.  Without this rule the VM is routed to a host that
         # drops it: the station looks fine and decodes nothing.
-        # 10.99.0.0/30 is the host-only management net (MGMT_NET in the
-        # importer); netfix is a standalone script and cannot see that variable.
+        # 10.99.0.0/29 is the host-only management net (MGMT_NET in the
+        # importer; it also covers a host installed with the older /30); netfix
+        # is a standalone script and cannot see that variable.
         _wdev="${WIFI_UP%% *}"
-        if ! iptables -t nat -C POSTROUTING -s 10.99.0.0/30 -o "$_wdev" -j MASQUERADE 2>/dev/null; then
-            iptables -t nat -A POSTROUTING -s 10.99.0.0/30 -o "$_wdev" -j MASQUERADE 2>/dev/null \
+        if ! iptables -t nat -C POSTROUTING -s 10.99.0.0/29 -o "$_wdev" -j MASQUERADE 2>/dev/null; then
+            iptables -t nat -A POSTROUTING -s 10.99.0.0/29 -o "$_wdev" -j MASQUERADE 2>/dev/null \
                 && say "  decoder VM is now NATed out $_wdev"
         fi
 
@@ -1087,7 +1088,7 @@ fi
 # path without the decision path leaves the dead-install behaviour intact.
 #
 # Order is deliberate: IPv4 first, because it is what the fleet's reach, the
-# frp registry and the 10.99.0.0/30 management link all speak.  v6 is the
+# frp registry and the 10.99.0.0/29 management link all speak.  v6 is the
 # fallback that keeps a v6-only site alive, not a new preference.
 #
 # v6 needs no DHCP at all on most networks: SLAAC hands out an address from
@@ -1226,7 +1227,7 @@ TAG=sigmond-v6-gateway
 say(){ printf '%s\n' "$*"; logger -t "$TAG" -- "$*" 2>/dev/null || true; }
 
 DEV="${SIGMOND_V6_DEV:-vmbr0}"
-MGMT_VM_NET="${SIGMOND_MGMT_NET:-10.99.0.0/30}"
+MGMT_VM_NET="${SIGMOND_MGMT_NET:-10.99.0.0/29}"
 MGMT_PM_IP="${SIGMOND_MGMT_PM:-10.99.0.1}"
 MGMT_VM_IP="${SIGMOND_MGMT_VM:-10.99.0.2}"
 
@@ -1348,7 +1349,7 @@ else
 fi
 
 # 3. A RESOLVER FOR THE VM.  The guest is IPv4-only and cannot reach the site's
-#    IPv6 resolver at all.  Serve DNS to it over IPv4 on the host-only /30 and
+#    IPv6 resolver at all.  Serve DNS to it over IPv4 on the host-only /29 and
 #    forward upstream over IPv6.  filter-AAAA because the site resolver is a
 #    DNS64: it synthesises AAAA for every name, and handing those to a guest
 #    with no IPv6 route buys only a happy-eyeballs stall before the fallback.
@@ -1410,6 +1411,10 @@ fi
 #    matches nothing and this is the only one that carries the guest.
 iptables -t nat -C POSTROUTING -s "$MGMT_VM_NET" -o clat -j MASQUERADE 2>/dev/null \
   || iptables -t nat -A POSTROUTING -s "$MGMT_VM_NET" -o clat -j MASQUERADE
+# And clamp the VM's TCP MSS out the CLAT (see the vmbr1 stanza): a host
+# whose vmbr1 stanza predates the clamp gets it here.
+iptables -t mangle -C FORWARD -o clat -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null \
+  || iptables -t mangle -A FORWARD -o clat -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
 
 # 5. INBOUND, which egress does not give us.  The host forwards the VM's
 #    operator-facing ports with `iptables -t nat ... DNAT --to 10.99.0.2:PORT`,
@@ -1420,7 +1425,7 @@ iptables -t nat -C POSTROUTING -s "$MGMT_VM_NET" -o clat -j MASQUERADE 2>/dev/nu
 #    rob hit exactly that on the v3.59 install, 2026-09-30: "vm web and station
 #    web are down on the dashboard", with station-web and ka9q-web both fine
 #    inside the VM and `ip6tables -t nat -S PREROUTING` empty.
-#    systemd-socket-proxyd relays v6 -> the host-only /30. Nothing to install.
+#    systemd-socket-proxyd relays v6 -> the host-only /29. Nothing to install.
 if [ -x /usr/local/sbin/sigmond-vm6proxy ]; then
     say "IPv6 -> VM relay (DNAT cannot cross address families):"
     SIGMOND_MGMT_VM="$MGMT_VM_IP" /usr/local/sbin/sigmond-vm6proxy install --no-status 2>&1 \
@@ -1696,7 +1701,7 @@ cat > /usr/local/sbin/sigmond-netsel <<'NETSELEOF'
 # that uplink is how you strand a machine, and this host has no keyboard — both
 # USB controllers belong to the decoder VM.  What makes this safe is the split
 # console: keystrokes land in the VM, the screen is here, and the two are
-# joined over 10.99.0.0/30, a host-only bridge with no physical port.  That
+# joined over 10.99.0.0/29, a host-only bridge with no physical port.  That
 # path does not care which uplink you pick, or whether you pick a broken one.
 #
 #   sigmond-netsel                 show the current uplink and the candidates
@@ -2557,7 +2562,7 @@ systemctl enable sigmond-prefer-wired.service 2>/dev/null
 # standing at the screen cannot type into this machine, so "check the
 # console" was never advice they could act on.  The two halves of a usable
 # console live on different machines: keystrokes land in the VM, pixels
-# land here.  The relay joins them over the private 10.99.0.0/30, which is
+# land here.  The relay joins them over the private 10.99.0.0/29, which is
 # up whether or not the station has any uplink -- the case that matters.
 # It carries OUTPUT ONLY; the operator still authenticates to this host
 # with this host's own credentials (rob, 2026-10-01).
@@ -2570,7 +2575,7 @@ cat > /usr/local/sbin/sigmond-console-paint <<'CPAINTEOF'
 # bound to vfio-pci for the decoder VM, and `lsusb` here returns nothing.  The
 # keyboard is in the VM; the MONITOR is on this host.  The two halves of a
 # console live on different machines, so neither one alone is usable.  This is
-# the display half: bytes arriving from the VM over the private 10.99.0.0/30
+# the display half: bytes arriving from the VM over the private 10.99.0.0/29
 # link get painted on VT1, which is what the operator is looking at.
 #
 # ⛔ IT CARRIES OUTPUT, NOT AUTHORITY.  Nothing here grants access.  The VM
@@ -2651,10 +2656,10 @@ cat > /usr/local/share/sigmond/vm-console/sigmond-console-bridge <<'VMBRIDGEEOF'
 # through to this VM, so the physical keyboard types into THIS machine; the
 # monitor is wired to the Proxmox host.  Neither half is usable alone.  This
 # runs where the keystrokes land (the VM's tty1), opens a session on the host
-# over the private 10.99.0.0/30 link, and sends every byte of output to the
+# over the private 10.99.0.0/29 link, and sends every byte of output to the
 # host's VT1 — the screen the operator is actually looking at.
 #
-# ⛔ THE /30 IS THE POINT.  It is a host-only bridge with no physical port, so
+# ⛔ THE HOST-ONLY LINK IS THE POINT.  It is a host-only bridge with no physical port, so
 # it is up whether or not the station has any uplink at all.  That is exactly
 # the case this exists for: the network is broken and there is no other way in.
 #
@@ -2685,7 +2690,7 @@ KBD=/dev/tty1
 #
 # /run is tmpfs: the file cannot survive a boot, so the bridge re-learns the
 # PM's key every time and a key change can never wedge it again.  That is the
-# right trust model here and not a weakening of one -- this is a host-only /30
+# right trust model here and not a weakening of one -- this is a host-only /29
 # with exactly two ends, the PM and its own guest, no router and no third
 # party.  The bridge carries pixels, not privilege: the operator still types
 # the host's real password into the host's own sshd.
@@ -2734,7 +2739,7 @@ read -rsn1 _ < "$KBD" 2>/dev/null || true
 {
     say ""
     say "  ── Proxmox host console ────────────────────────────────────────"
-    say "  Keyboard: decoder VM.   Screen: this host.   Link: 10.99.0.0/30"
+    say "  Keyboard: decoder VM.   Screen: this host.   Link: 10.99.0.0/29"
     say ""
     say "  Logging in as $USER_@$HOST"
     say "  TYPE THE PROXMOX HOST ROOT PASSWORD, then Enter."
@@ -2845,7 +2850,7 @@ Description=Paint a decoder-VM console session onto this host's VT1 (no keyboard
 After=network.target
 
 [Service]
-# bind=10.99.0.1 — the private host-only /30 ONLY. Never the LAN: this writes
+# bind=10.99.0.1 — the private host-only /29 ONLY. Never the LAN: this writes
 # straight to the physical console and must not be reachable from the site.
 # max-children=1 — one screen, one session; a second would interleave bytes.
 ExecStart=/usr/bin/socat TCP4-LISTEN:7790,bind=10.99.0.1,reuseaddr,fork,max-children=1 EXEC:/usr/local/sbin/sigmond-console-paint
@@ -3329,14 +3334,16 @@ fi
 # refusing TCP 22 from the hypervisor beside it, and every vm-* RAC channel
 # was dead (2026-09-19).
 #
-# So the VM gets ONE link, a host-only /30 with a fixed address, and this
-# host routes and NATs for it.  Same on every station, on a flat LAN or a
+# So the VM gets ONE link, a host-only /29 with a fixed address, and this
+# host routes and NATs for it.  A /29, not the /30 it was before 2026-11:
+# host .1, decoder VM .2, and room for a second VM (a radiod-only one) at .3.
+# Hosts installed earlier keep their /30; sigmond accepts either.  Same on every station, on a flat LAN or a
 # VLAN-split campus: 10.99.0.2, always, reachable from here, always.
 # rob, 2026-09-20: "this should behave the same way as the [VLAN]
 # environment in the penthouse."
 MGMT_PM=10.99.0.1
 MGMT_VM=10.99.0.2
-MGMT_NET=10.99.0.0/30
+MGMT_NET=10.99.0.0/29
 # The VM resolves through THIS host, so it must use a resolver THIS host can
 # reach.  Do not assume a public one: Scranton's PM sits on a VLAN where
 # UDP/53 to 1.1.1.1 and 8.8.8.8 is filtered outright and only its own
@@ -3365,7 +3372,7 @@ if ! grep -q "iface vmbr1" /etc/network/interfaces 2>/dev/null; then
 # network.  This host is its only route out -- see the post-up rules.
 auto vmbr1
 iface vmbr1 inet static
-    address ${MGMT_PM}/30
+    address ${MGMT_PM}/29
     bridge-ports none
     bridge-stp off
     bridge-fd 0
@@ -3379,10 +3386,17 @@ iface vmbr1 inet static
     # VM dead before, working immediately after.  Harmless where clat never
     # exists -- iptables accepts an interface name that is not present yet.
     post-up iptables -t nat -C POSTROUTING -s ${MGMT_NET} -o clat -j MASQUERADE 2>/dev/null || iptables -t nat -A POSTROUTING -s ${MGMT_NET} -o clat -j MASQUERADE
+    # ⛔ AND CLAMP TCP MSS out the CLAT.  The clat tun has a smaller MTU than
+    # the VM's link, and ICMP "too big" does not make it back through the
+    # translator, so the VM's TCP stalls on the first full-size segment: on
+    # AI6VN-PM 2026-11-01 apt in a new VM hung until its MTU was lowered by
+    # hand.  Clamping the SYN's MSS to the route's PMTU fixes it for every
+    # guest.  Harmless where clat never exists.
+    post-up iptables -t mangle -C FORWARD -o clat -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || iptables -t mangle -A FORWARD -o clat -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
     # No DNAT here: sigmond-vm4relay forwards the VM's ports, from the
     # station's own network only, and its boot oneshot puts them back (v3.72 #23).
 NETEOF
-  say "import: host-only bridge vmbr1 (${MGMT_PM}/30) added to /etc/network/interfaces"
+  say "import: host-only bridge vmbr1 (${MGMT_PM}/29) added to /etc/network/interfaces"
 fi
 # Bring it up now -- the VM is about to be created on it.
 ifup vmbr1 >>"$LOG" 2>&1 || ifreload -a >>"$LOG" 2>&1 || true
@@ -3393,6 +3407,8 @@ iptables -t nat -C POSTROUTING -s "$MGMT_NET" -o vmbr0 -j MASQUERADE 2>/dev/null
 # The CLAT path, for an IPv6-only site.  See the comment on the vmbr1 stanza.
 iptables -t nat -C POSTROUTING -s "$MGMT_NET" -o clat -j MASQUERADE 2>/dev/null \
   || iptables -t nat -A POSTROUTING -s "$MGMT_NET" -o clat -j MASQUERADE
+iptables -t mangle -C FORWARD -o clat -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null \
+  || iptables -t mangle -A FORWARD -o clat -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
 
 # ─── a resolver for the decoder VM, on EVERY site ────────────────────────────
 # The VM is IPv4-only and always will be, and it has exactly one link: this
@@ -3400,7 +3416,7 @@ iptables -t nat -C POSTROUTING -s "$MGMT_NET" -o clat -j MASQUERADE 2>/dev/null 
 # outright on an IPv6-only one, where the site resolver is an IPv6 address the
 # guest cannot reach -- routing fine, name resolution dead.
 #
-# So the host answers DNS for it, always, at the /30 address the VM already
+# So the host answers DNS for it, always, at the /29 address the VM already
 # calls its gateway.  One rule on every site in either family, instead of a
 # special case that only exists where someone remembered to add it.
 if command -v dnsmasq >/dev/null 2>&1; then
@@ -3608,7 +3624,7 @@ if qm start "$VMID" >"$_STARTLOG" 2>&1; then
   if [ -n "$_net0_mac" ]; then _mgmt_match="MACAddress=$_net0_mac"
   else _mgmt_match="Driver=virtio_net"; say "import: net0's MAC unreadable — matching the mgmt NIC by driver"; fi
   _mgmt_conf=$(printf '%s\n' \
-    '# The decoder VM has ONE link: a host-only /30 to the Proxmox host,' \
+    '# The decoder VM has ONE link: a host-only /29 to the Proxmox host,' \
     '# which routes and NATs for it.  Written by the appliance importer.' \
     '# Do not add a site-LAN NIC here -- the address must not depend on a' \
     '# network we do not control (see firstboot-v3.sh).' \
@@ -3616,7 +3632,7 @@ if qm start "$VMID" >"$_STARTLOG" 2>&1; then
     "$_mgmt_match" \
     '' \
     '[Network]' \
-    "Address=${MGMT_VM}/30" \
+    "Address=${MGMT_VM}/29" \
     "Gateway=${MGMT_PM}" \
     '# The VM asks its own ROUTER for DNS, not whatever this host happens to' \
     '# use.  PM_DNS is the SITE resolver, and on an IPv6-only site that is an' \
@@ -3624,7 +3640,7 @@ if qm start "$VMID" >"$_STARTLOG" 2>&1; then
     '# routing that worked and name resolution that did not.  Measured in the' \
     '# nested v6 test 2026-09-28 -- curl to a v4 LITERAL returned HTTP 301 in' \
     '# 0.16s while curl by NAME said "Could not resolve host: github.com".' \
-    '# 10.99.0.1 is a constant of the host-only /30, so it is correct on every' \
+    '# 10.99.0.1 is a constant of the host-only /29, so it is correct on every' \
     '# site in either family, and the host now runs a resolver there' \
     '# unconditionally (see the dnsmasq block by the vmbr1 setup).' \
     "DNS=${MGMT_PM}" | base64 -w0)
@@ -3648,7 +3664,7 @@ if qm start "$VMID" >"$_STARTLOG" 2>&1; then
     # request.  The Proxmox host has no keyboard and no USB at all (both
     # controllers are vfio-pci for this VM), so when the network is the thing
     # that is broken the ONLY way in is: type in the VM, read on the host's
-    # monitor, over 10.99.0.0/30 which has no physical port.  A recovery path
+    # monitor, over 10.99.0.0/29 which has no physical port.  A recovery path
     # you have to install over the network is not a recovery path.
     #
     # Failure here is a WARNING, never fatal: a station with no console bridge
@@ -3698,7 +3714,7 @@ if qm start "$VMID" >"$_STARTLOG" 2>&1; then
     fi
   else
     say "import: WARNING — guest agent never answered; VM has no management address yet"
-    say "import:   fix by hand: qm guest exec $VMID -- ip addr add ${MGMT_VM}/30 dev ens18"
+    say "import:   fix by hand: qm guest exec $VMID -- ip addr add ${MGMT_VM}/29 dev ens18"
   fi
 
   say "─────────────────────────────────────────────────────────"
@@ -4072,7 +4088,7 @@ esac
 # ⚠ NOT `hostname -I | awk '{print $1}'`: that lists EVERY address, and since
 # the decoder VM moved behind a host-only bridge this host also holds
 # 10.99.0.1.  Ordering is not guaranteed, so the panel/summary could announce
-# the management /30 -- an address reachable only from the VM -- as the
+# the management /29 -- an address reachable only from the VM -- as the
 # station's address (rob, 2026-09-21: "it was using 10.99.0 ... I think you
 # need to exclude 10.99").  Ask vmbr0 directly, and fall back excluding it.
 # hostname -I lists every address; drop the internal PM<->VM link, loopback
@@ -4270,7 +4286,7 @@ try:
         if i.get("name", "").startswith(("en", "eth")):
             for a in i.get("ip-addresses", []):
                 ip = a["ip-address"]
-                # ⛔ NEVER ADVERTISE THE /30.  10.99.0.0/30 is the private host-to-guest
+                # ⛔ NEVER ADVERTISE THE /29.  10.99.0.0/29 is the private host-to-guest
                 # link.  Nothing off this machine can reach it, and it is the MOST local
                 # address there is, so the is_local sort below puts it first and it wins
                 # every time.  rob, on the AI6VN v3.72 panel: telling people about
@@ -4454,7 +4470,7 @@ fi
 # libc crypt via perl, NOT openssl passwd: Debian roots are yescrypt ($y$),
 # which openssl cannot compute — v3.25 said "the password you set at
 # install" even on a box still on the image default (mjh 2026-08-09).
-# Is the VM behind this host on the management /30, or on the site LAN?
+# Is the VM behind this host on the management /29, or on the site LAN?
 # The panel must not send an operator to an address that only works from
 # here: ka9q-web on a NATed VM is reachable at THIS host's address (the
 # importer DNATs :8081), and saying otherwise is how someone concludes the
@@ -5045,7 +5061,7 @@ _live_console_session(){
 }
 # ⛔ AND NOT OVER A LIVE SPLIT-CONSOLE SESSION.  The keyboard lives in the
 # decoder VM (both USB controllers are vfio-pci) and the monitor is on this
-# host, so a console session arrives over the /30 and is painted on VT1 by
+# host, so a console session arrives over the host-only link and is painted on VT1 by
 # sigmond-console-paint, which holds this flag for its duration.  Without the
 # check the panel would overwrite the operator's shell every refresh -- and
 # they cannot see the VM side to know why their screen keeps clearing.
@@ -5134,7 +5150,7 @@ HOSTIP=$(cur_ip vmbr0)
 # ⚠ NOT `hostname -I | awk '{print $1}'`: that lists EVERY address, and since
 # the decoder VM moved behind a host-only bridge this host also holds
 # 10.99.0.1.  Ordering is not guaranteed, so the panel/summary could announce
-# the management /30 -- an address reachable only from the VM -- as the
+# the management /29 -- an address reachable only from the VM -- as the
 # station's address (rob, 2026-09-21: "it was using 10.99.0 ... I think you
 # need to exclude 10.99").  Ask vmbr0 directly, and fall back excluding it.
 # hostname -I lists every address; drop the internal PM<->VM link, loopback

@@ -12,7 +12,7 @@
 # ⛔ WHY IT MUST SHIP AT ALL.  The Proxmox host has no keyboard and no USB —
 # both controllers are vfio-pci for the decoder VM. When the network is the
 # broken thing, the only way in is: type in the VM, read on the host's monitor,
-# over the 10.99.0.0/30 link that has no physical port. A recovery path you
+# over the 10.99.0.0/29 link that has no physical port. A recovery path you
 # have to install over the network is not a recovery path, so it cannot be a
 # manual post-install step.
 #
@@ -60,7 +60,7 @@ chk "and it names a retry command that exists" \
     "$(grep -c 'chmod +x /usr/local/sbin/sigmond-vm-console-push' "$SRC")" "1"
 
 echo "── the host half is still there to receive it ─────────────────────────"
-chk "relay binds the /30 ONLY, never 0.0.0.0" \
+chk "relay binds the host-only link ONLY, never 0.0.0.0" \
     "$(grep -c 'TCP4-LISTEN:7790,bind=10.99.0.1' "$SRC")" "1"
 # Assert it on the ExecStart line itself, not anywhere in the file -- the
 # comment above it also says max-children and would satisfy a bare count.

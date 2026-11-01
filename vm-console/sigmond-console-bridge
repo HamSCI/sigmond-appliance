@@ -5,10 +5,10 @@
 # through to this VM, so the physical keyboard types into THIS machine; the
 # monitor is wired to the Proxmox host.  Neither half is usable alone.  This
 # runs where the keystrokes land (the VM's tty1), opens a session on the host
-# over the private 10.99.0.0/30 link, and sends every byte of output to the
+# over the private 10.99.0.0/29 link, and sends every byte of output to the
 # host's VT1 — the screen the operator is actually looking at.
 #
-# ⛔ THE /30 IS THE POINT.  It is a host-only bridge with no physical port, so
+# ⛔ THE HOST-ONLY LINK IS THE POINT.  It is a host-only bridge with no physical port, so
 # it is up whether or not the station has any uplink at all.  That is exactly
 # the case this exists for: the network is broken and there is no other way in.
 #
@@ -39,7 +39,7 @@ KBD=/dev/tty1
 #
 # /run is tmpfs: the file cannot survive a boot, so the bridge re-learns the
 # PM's key every time and a key change can never wedge it again.  That is the
-# right trust model here and not a weakening of one -- this is a host-only /30
+# right trust model here and not a weakening of one -- this is a host-only /29
 # with exactly two ends, the PM and its own guest, no router and no third
 # party.  The bridge carries pixels, not privilege: the operator still types
 # the host's real password into the host's own sshd.
@@ -88,7 +88,7 @@ read -rsn1 _ < "$KBD" 2>/dev/null || true
 {
     say ""
     say "  ── Proxmox host console ────────────────────────────────────────"
-    say "  Keyboard: decoder VM.   Screen: this host.   Link: 10.99.0.0/30"
+    say "  Keyboard: decoder VM.   Screen: this host.   Link: 10.99.0.0/29"
     say ""
     say "  Logging in as $USER_@$HOST"
     say "  TYPE THE PROXMOX HOST ROOT PASSWORD, then Enter."

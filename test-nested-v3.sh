@@ -1515,8 +1515,8 @@ $SSHN "ip -4 addr show vmbr1 2>/dev/null | grep -q 10.99.0.1" \
   || { say "FATAL: vmbr1 is not up on the host"; $SSHN "ip -4 -br addr; grep -A6 'iface vmbr1' /etc/network/interfaces"; exit 1; }
 $SSHN "sysctl -n net.ipv4.ip_forward | grep -q 1" \
   && say "host routes for the VM ✓" || { say "FATAL: ip_forward off — the VM has no route out"; exit 1; }
-$SSHN "iptables -t nat -S POSTROUTING | grep -q '10.99.0.0/30.*MASQUERADE'" \
-  && say "host NATs for the VM ✓" || { say "FATAL: no MASQUERADE for 10.99.0.0/30"; $SSHN "iptables -t nat -S"; exit 1; }
+$SSHN "iptables -t nat -S POSTROUTING | grep -q '10.99.0.0/29.*MASQUERADE'" \
+  && say "host NATs for the VM ✓" || { say "FATAL: no MASQUERADE for 10.99.0.0/29"; $SSHN "iptables -t nat -S"; exit 1; }
 # v3.72 #23/#24: an image that ships sigmond-vm4relay puts the DNAT in
 # SIGMOND-VM4, entered from vmbr0 only, and the FORWARD guard first in mangle
 # FORWARD.  An older image (the update test installs the blessed baseline with
@@ -1559,8 +1559,8 @@ done
 # The address the guest actually holds must be the one we intend -- a lease
 # from somewhere would also answer a ping.
 $SSHN "qm guest exec $VMID --timeout 30 -- /bin/bash -c 'ip -4 -br addr show scope global'" 2>/dev/null \
-  | grep -q "10.99.0.2/30" \
-  && say "guest holds the fixed address 10.99.0.2/30 ✓" \
+  | grep -q "10.99.0.2/29" \
+  && say "guest holds the fixed address 10.99.0.2/29 ✓" \
   || say "WARN: could not confirm the guest's address is the fixed one"
 
 say "PHASE C PASS"
