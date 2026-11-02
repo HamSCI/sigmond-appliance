@@ -99,8 +99,8 @@
 #   "HELD"                              bin/smd:3451; exit 3 = bin/smd:3036
 #   emit --dry-run exits 0, and         bin/smd:6670 (dry-run JSON, exit 0)
 #     "heartbeat: not enabled" ABSENT   bin/smd:6624 (that line + exit 2)
-#                                       both at sigmond 401bb12; the install
-#                                       enables it: test-nested-v3.sh:433
+#                                       both at sigmond 401bb12; a v3.84+
+#                                       install leaves it off (e2-heartbeat-pre)
 #   "plan OK — "                        bin/smd:3759, 3764
 #   "sanctioned superset"               bin/smd:3761
 #   "installed live (<sha>) but not in the manifest"
@@ -1065,6 +1065,22 @@ IMG_STAMPS="$(sed -n 's/^STAMP:\([01]\)$/\1/p' "$GX_OUT" | head -1)"
 [ -n "$IMG_STAMPS" ] || fatal "$GX_OUT" "the build-stamp probe gave no answer (not a verdict)"
 say "pre-state: the image's smd $([ "$IMG_STAMPS" = 1 ] && echo records || echo does not record) the commit each deploy.toml build built"
 
+# Is the heartbeat wired before the update?  v3.52 to v3.83 wizards enabled
+# it; from v3.84 the wizard asks nothing and disarms both timers (rob
+# 2026-10-29; test-nested-v3.sh, 4c0c562).  So the base image decides what
+# e8 expects: the update must leave the heartbeat as it found it.
+gx_ok 120 e2-heartbeat-pre 'smd admin heartbeat emit --dry-run' "pre-state: heartbeat contract"
+if [ "$GX_RC" -eq 0 ] && ! grep -qi 'not enabled' "$GX_OUT"; then
+    HB_PRE=1
+elif [ "$GX_RC" -eq 2 ] && grep -qi 'not enabled' "$GX_OUT"; then
+    HB_PRE=0
+else
+    fatal "$GX_OUT" "pre-state heartbeat probe: exit $GX_RC is neither wired (0) nor 'not enabled' (2)"
+fi
+say "pre-state: the heartbeat is $([ "$HB_PRE" = 1 ] && echo wired || echo 'not enabled (a v3.84+ install)')"
+# The sink verdicts (_sp2u_placed) read the same fact.
+SP2_NO_HEARTBEAT=$([ "$HB_PRE" = 1 ] && echo 0 || echo 1)
+
 # ── the update itself, through the production channel ───────────────────
 say "── smd update --apply (this is the channel that crashed on runuser/PATH)"
 # ⛔ NOT INSIDE THE GUEST AGENT'S OWN CGROUP.  sigmond caps
@@ -1239,10 +1255,10 @@ fi
 say "no NEW doctor findings, by component and kind, across the update$([ "$NEWW" -gt 0 ] && echo " beyond $NEWW ownership WARN(s)") ✓"
 
 # ── the awareness payload survives an update, not just an install ───────
-# The station this rig updates has the heartbeat switched on.  The sibling's
-# wizard enables it by default (test-nested-v3.sh:433), and the sibling fails
-# unless emit --dry-run exits 0 without "not enabled" (:677-681).  The same
-# contract must hold AFTER the update.  smd prints "heartbeat: not enabled"
+# The update must leave the heartbeat as the install left it (HB_PRE, read
+# before the update).  A v3.52-v3.83 base has it switched on: the contract
+# must hold AFTER the update.  A v3.84+ base has it off, and the update must
+# not switch it on behind the operator's back.  smd prints "heartbeat: not enabled"
 # and exits 2 when [heartbeat] is off or absent (bin/smd:6624).  A
 # configured station gets the JSON payload and exit 0 (bin/smd:6670).  An
 # update that quietly unwired the heartbeat would leave the fleet blind in
@@ -1253,11 +1269,17 @@ say "no NEW doctor findings, by component and kind, across the update$([ "$NEWW"
 # cannot push it out of the capture.  The grep ignores case, as the
 # sibling's does.
 gx_ok 120 e8-heartbeat 'smd admin heartbeat emit --dry-run' "heartbeat contract"
-[ "$GX_RC" -eq 0 ] || fatal "$WORK/e8-heartbeat.out" "smd admin heartbeat emit --dry-run exited $GX_RC after the update (expected 0: the install enabled the heartbeat, and the update must keep it wired)"
-if grep -qi 'not enabled' "$WORK/e8-heartbeat.out"; then
-    fatal "$WORK/e8-heartbeat.out" "heartbeat emit --dry-run exited 0 but its output says 'not enabled' — the update unwired the heartbeat, or the CLI contract changed under it"
+if [ "$HB_PRE" = 1 ]; then
+    [ "$GX_RC" -eq 0 ] || fatal "$WORK/e8-heartbeat.out" "smd admin heartbeat emit --dry-run exited $GX_RC after the update (expected 0: the heartbeat was wired before the update, and the update must keep it wired)"
+    if grep -qi 'not enabled' "$WORK/e8-heartbeat.out"; then
+        fatal "$WORK/e8-heartbeat.out" "heartbeat emit --dry-run exited 0 but its output says 'not enabled' — the update unwired the heartbeat, or the CLI contract changed under it"
+    fi
+    say "heartbeat still wired after the update: exit 0, no not-enabled ✓"
+else
+    { [ "$GX_RC" -eq 2 ] && grep -qi 'not enabled' "$WORK/e8-heartbeat.out"; } \
+        || fatal "$WORK/e8-heartbeat.out" "the heartbeat was not enabled before the update, but emit --dry-run now exits $GX_RC without 'not enabled' — the update switched on a heartbeat the operator never asked for"
+    say "heartbeat still not enabled after the update, as the install left it ✓"
 fi
-say "heartbeat still wired after the update: exit 0, no not-enabled ✓"
 
 # ── station-web starts on the venv the update left ──────────────────────
 # `smd update` restarts nothing, so station-web still runs the code it
@@ -1767,7 +1789,18 @@ _sp2u_carried() {
 # [uploads], and the heartbeat's file.
 _sp2u_placed() {
     local g="$1" w="$2" gate="$3" v want
-    if [ "$gate" = 1 ]; then
+    if [ "${SP2_NO_HEARTBEAT:-0}" = 1 ]; then
+        # A station that enables no heartbeat (a v3.84+ install, HB_PRE=0):
+        # sigmond writes no sigmond.toml, and neither file carries one.
+        [ "$(sp2_tok "$g" SIGFILE)" = 0 ] \
+            || echo "FAIL: $w: pipelines.d/sigmond.toml exists on a station that enables no heartbeat"
+        v="$(sp2_tok "$g" HBLEG)"
+        [ "$v" = 0 ] || echo "FAIL: $w: the legacy manifest carries a heartbeat the station never enabled (x${v:-?})"
+        if [ "$gate" = 1 ]; then
+            [ "$(sp2_tok "$g" MARKER)" = 1 ] && [ "$(sp2_tok "$g" MARKERREG)" = 1 ] \
+                || echo "FAIL: $w: no carry-over marker (a regular file) at /var/lib/hs-uploader/carry-over-v1.done"
+        fi
+    elif [ "$gate" = 1 ]; then
         [ "$(sp2_tok "$g" MARKER)" = 1 ] && [ "$(sp2_tok "$g" MARKERREG)" = 1 ] \
             || echo "FAIL: $w: no carry-over marker (a regular file) at /var/lib/hs-uploader/carry-over-v1.done"
         [ "$(sp2_tok "$g" SIGFILE)" = 1 ] && [ "$(sp2_tok "$g" HBSIG)" = 1 ] \
