@@ -27,8 +27,10 @@
 #     (the last set is kept in /etc/sigmond-appliance/vm4relay-warnings);
 #     status always shows them.
 #   - never 100.64.0.0/10 (Tailscale, carrier-grade NAT), never 0.0.0.0/0.
-# Anything else gets no DNAT and falls to the host itself, which listens on
-# none of these ports (its own sshd on 22 is not touched).
+# With `ssh22 on`, port 22 from those sources goes to the VM's ssh too, and
+# their port 2022 to the host's own sshd (Rob, 2026-11-02; see SSH22 below).
+# Anything else gets no DNAT and falls to the host itself, whose own sshd on
+# 22 is not touched.
 #
 # The DNAT alone left a second door (v3.72 #24): the host routes for the VM
 # (ip_forward=1) and Proxmox leaves FORWARD at ACCEPT, so a neighbour on the
@@ -78,6 +80,9 @@
 #   sigmond-vm4relay install [vm-ip]   units, then refresh
 #   sigmond-vm4relay refresh           rebuild the chain if it changed
 #   sigmond-vm4relay status            what is live, and anything unrestricted
+#   sigmond-vm4relay ssh22 on|off      the LAN's IPv4 22 to the VM's ssh and
+#                                      2022 to this host's, or back to 22
+#                                      for this host only; then refresh
 #   sigmond-vm4relay remove            the DNAT chain and its jumps (no IPv4
 #                                      relay); the guard and its units stay;
 #                                      leaves a mark pm-align respects
@@ -105,9 +110,24 @@ if [ "${SIGMOND_VM4RELAY_TEST:-}" = 1 ]; then
     ALLOW_OWNER="${SIGMOND_VM4RELAY_TEST_OWNER:-$ALLOW_OWNER}"
 fi
 REMOVED="$STATEDIR/vm4relay-removed"
+SSH22="$STATEDIR/vm4relay-ssh22"
 WARNINGS="$STATEDIR/vm4relay-warnings"
-# listen:target, as the IPv6 relay (sigmond-vm6proxy) has them.
+# listen:target, as the IPv6 relay (sigmond-vm6proxy) has them.  These five
+# are also the shape of the old unrestricted rules this script removes, and
+# pm-align holds the same five; keep them as they are.
 PORTS="8000:8000 8081:8081 8082:8082 8765:8765 2222:22"
+# `ssh22 on` (a mark, SSH22) makes the chain forward the LAN's port 22 to
+# the VM's ssh as well: someone used to a wsprdaemon box without a VM types
+# `ssh user@station` and reaches the decoder (Rob, 2026-11-02).  2222 keeps
+# reaching the VM.  The host's own sshd is not moved: it still listens on
+# 22, and the console, the RAC host tunnel (frpc connects to 127.0.0.1:22,
+# which PREROUTING never sees) and any source this chain does not forward
+# reach it there.  A listed LAN source reaches it on HOST_SSH_PORT, which the
+# chain then redirects to the host's 22.  Off by default: whatever reaches a
+# host's sshd from its LAN today -- an operator's scripts, the nested test
+# rig's port forward from 10.0.2.2 -- would land on the VM instead.
+RELAY_PORTS_SSH22="$PORTS 22:22"
+HOST_SSH_PORT=2022
 CHAIN=SIGMOND-VM4
 FCHAIN=SIGMOND-VM4F
 FJUMP="-A FORWARD -o vmbr1 -j $FCHAIN"
@@ -240,12 +260,15 @@ note_warnings(){
 }
 
 wanted_chain(){   # $1: the override prefixes.  The chain's rules, as `iptables -S` prints them
-    local src pair
+    local src pair ports="$PORTS"
+    [ -e "$SSH22" ] && ports="$RELAY_PORTS_SSH22"
     for src in $FIXED $1; do
-        for pair in $PORTS; do
+        for pair in $ports; do
             printf -- '-A %s -s %s -p tcp -m tcp --dport %s -j DNAT --to-destination %s:%s\n' \
                 "$CHAIN" "$src" "${pair%%:*}" "$VM_IP" "${pair##*:}"
         done
+        [ -e "$SSH22" ] && printf -- '-A %s -s %s -p tcp -m tcp --dport %s -j REDIRECT --to-ports 22\n' \
+            "$CHAIN" "$src" "$HOST_SSH_PORT"
     done
 }
 
@@ -478,6 +501,11 @@ cmd_status(){
             *) say "    $src (override file)" ;;
         esac
     done
+    if [ -e "$SSH22" ]; then
+        say "  ssh22 on: the LAN's port 22 goes to the VM, $HOST_SSH_PORT to this host's own sshd"
+    else
+        say "  ssh22 off: the LAN's port 22 is this host's own sshd; the VM is on 2222"
+    fi
     [ -f "$WARNINGS" ] && sed 's/^/  WARNING: /' "$WARNINGS"
     # Any DNAT to the VM outside the chain answers whatever it matches,
     # whoever added it.
@@ -504,6 +532,22 @@ cmd_status(){
         say "  WARNING: $IFACES still has the old DNAT post-up lines; the next refresh comments them out"
     fi
     [ -e "$REMOVED" ] && say "  removed by the operator ($REMOVED); pm-align does not reinstall it"
+    return 0
+}
+
+cmd_ssh22(){   # on | off
+    case "${1:-}" in
+        on)  mkdir -p "$STATEDIR" && printf 'on %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$SSH22" || return 1 ;;
+        off) rm -f "$SSH22" ;;
+        *)   say "usage: sigmond-vm4relay ssh22 on|off"; return 2 ;;
+    esac
+    cmd_refresh || return 1
+    if [ -e "$SSH22" ]; then
+        say "ssh22: the LAN's IPv4 port 22 reaches the decoder VM; this host's own ssh answers the LAN on $HOST_SSH_PORT"
+    else
+        say "ssh22: off; the LAN's port 22 reaches this host, the decoder VM is on 2222"
+    fi
+    [ -e "$REMOVED" ] && say "  (the relay is removed on this host, so nothing is forwarded until: sudo $SELF install)"
     return 0
 }
 
@@ -540,5 +584,6 @@ case "$CMD" in
     refresh) cmd_refresh ;;
     status)  cmd_status ;;
     remove)  cmd_remove ;;
-    *) say "usage: sigmond-vm4relay {install [vm-ip] | refresh | status | remove}"; exit 2 ;;
+    ssh22)   cmd_ssh22 "$@" ;;
+    *) say "usage: sigmond-vm4relay {install [vm-ip] | refresh | status | remove | ssh22 on|off}"; exit 2 ;;
 esac

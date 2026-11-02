@@ -2745,7 +2745,8 @@ fi
 # instead of two.  Measured on a running station rather than assumed: the
 # decoder VM binds externally on 22, 8000 (station-web), 8081 (ka9q-web) and
 # 8082 (gmag-webui).  ssh is forwarded on 2222 because this host's own sshd
-# owns 22.
+# owns 22.  `sigmond-vm4relay ssh22 on` also passes the LAN's IPv4 22 to the
+# VM, with this host's sshd answering the LAN on 2022 (Rob, 2026-11-02).
 # 8765 is mag-usb's live sample feed: the magnetometer page is on 8082 and its
 # websocket is on 8765, so forwarding one without the other gives a dashboard
 # that loads and then reports "disconnected" for ever (AI6VN 2026-09-30).
@@ -3273,6 +3274,18 @@ VMID="${SIGMOND_VMID:-100}"
 VERSION="$(cat /etc/sigmond-appliance/version 2>/dev/null || echo '?')"
 CONF="$(cat /etc/sigmond-appliance/.configured 2>/dev/null)"
 HOSTIP=$(cur_ip vmbr0)
+# (set again at the start of the rac_block, which its test runs alone)
+# The ssh port option for the decoder VM, and for this host, at HOSTIP.  A
+# host whose IPv4 relay passes the LAN's 22 to the VM (`sigmond-vm4relay
+# ssh22 on`, which leaves this mark; Rob 2026-11-02) has the VM on 22 and
+# its own sshd on 2022 over IPv4.  Otherwise, and always over IPv6, the VM
+# is on 2222 and this host on 22.
+_VMSSH='-p 2222 '; _HSSH=''
+case "$HOSTIP" in
+    *:*) ;;
+    *) [ -e "${SIGMOND_VM4RELAY_SSH22_MARK:-/etc/sigmond-appliance/vm4relay-ssh22}" ] \
+           && { _VMSSH=''; _HSSH='-p 2022 '; } ;;
+esac
 # ⚠ NOT `hostname -I | awk '{print $1}'`: that lists EVERY address, and since
 # the decoder VM moved behind a host-only bridge this host also holds
 # 10.99.0.1.  Ordering is not guaranteed, so the panel/summary could announce
@@ -3685,7 +3698,7 @@ case "${VMIP:-}" in
    station-web  http://$(ipurl "${HOSTIP:-<no-ip-yet>}"):8000
    magnetometer http://$(ipurl "${HOSTIP:-<no-ip-yet>}"):8082
    mag feed     ws://$(ipurl "${HOSTIP:-<no-ip-yet>}"):8765/   (live samples)
-   VM ssh     ssh -p 2222 sigmond@${HOSTIP:-<no-ip-yet>}   (or: sigmond-vm)"
+   VM ssh     ssh ${_VMSSH}sigmond@${HOSTIP:-<no-ip-yet>}   (or: sigmond-vm)"
     ;;
 esac
 
@@ -3697,6 +3710,17 @@ case "$_h" in
 esac
 
 # >>> rac_block (test-panel-remote.sh loads exactly this block)
+# The ssh port option for the decoder VM, and for this host, at HOSTIP.  A
+# host whose IPv4 relay passes the LAN's 22 to the VM (`sigmond-vm4relay
+# ssh22 on`, which leaves this mark; Rob 2026-11-02) has the VM on 22 and
+# its own sshd on 2022 over IPv4.  Otherwise, and always over IPv6, the VM
+# is on 2222 and this host on 22.
+_VMSSH='-p 2222 '; _HSSH=''
+case "$HOSTIP" in
+    *:*) ;;
+    *) [ -e "${SIGMOND_VM4RELAY_SSH22_MARK:-/etc/sigmond-appliance/vm4relay-ssh22}" ] \
+           && { _VMSSH=''; _HSSH='-p 2022 '; } ;;
+esac
 # Remote access (RAC).  The panel used to show LAN addresses only, so an
 # operator standing at the console could not tell whether the station had
 # reached its gateway, which number it got, or WHICH gateway it registered
@@ -3937,7 +3961,7 @@ RACEOF
 fi
 # This host has no keyboard, so every line below reads as something to type
 # on ANOTHER computer.  The switch lives in the decoder VM.
-_rvm="log in to the decoder VM (ssh -p 2222 sigmond@${HOSTIP:-<no-ip-yet>}) and type:"
+_rvm="log in to the decoder VM (ssh ${_VMSSH}sigmond@${HOSTIP:-<no-ip-yet>}) and type:"
 # ⛔ NAME THE VM'S COMMAND ONLY WHERE IT WORKS.  `smd remote` reaches this host
 # through the pairing of the two machines.  A host with the old layout (the VM
 # on the LAN, no private link) forwards nothing on port 2222 and can never
@@ -3957,7 +3981,7 @@ _rhow(){
     if [ "$_rpaired" = yes ]; then
         printf '%s  smd remote %s' "$_rvm" "$1"
     else
-        printf "type on another computer:  ssh root@%s 'sigmond-setup --rac-%s'" "${HOSTIP:-<no-ip-yet>}" "$1"
+        printf "type on another computer:  ssh %sroot@%s 'sigmond-setup --rac-%s'" "${_HSSH}" "${HOSTIP:-<no-ip-yet>}" "$1"
     fi
 }
 # The channel lists.  The audience split is the one thing here that MUST
@@ -4018,11 +4042,11 @@ case "$RSTATE" in
 "
     elif [ "$RRUNS" = running ]; then
         RACBLOCK=" Remote access   WANTED ON, BUT NOT UP — RAC ${RACN:-?} on ${RSRV:-<no server>}: 0/$RDECL channels accepted
-   ==> check: ssh root@${HOSTIP:-<no-ip-yet>} 'journalctl -u sigmond-rac-host -n 50'
+   ==> check: ssh ${_HSSH}root@${HOSTIP:-<no-ip-yet>} 'journalctl -u sigmond-rac-host -n 50'
 "
     else
         RACBLOCK=" Remote access   WANTED ON, BUT NOT UP — the tunnel service does not run (RAC ${RACN:-?})
-   ==> check: ssh root@${HOSTIP:-<no-ip-yet>} 'journalctl -u sigmond-rac-host -n 50'
+   ==> check: ssh ${_HSSH}root@${HOSTIP:-<no-ip-yet>} 'journalctl -u sigmond-rac-host -n 50'
 "
     fi
     ;;
@@ -4033,7 +4057,7 @@ case "$RSTATE" in
     # so a damaged file cannot spill onto the console.
     _rlast=$(printf '%s' "$RCHECKED" | tr -cd '[:print:]' | cut -c1-40)
     RACBLOCK=" Remote access   STATE NOT READ — the switch gave no fresh answer (last: ${_rlast:-none})
-   ==> check: ssh root@${HOSTIP:-<no-ip-yet>} '/usr/local/sbin/sigmond-rac-switch status'
+   ==> check: ssh ${_HSSH}root@${HOSTIP:-<no-ip-yet>} '/usr/local/sbin/sigmond-rac-switch status'
 "
     ;;
   *)
@@ -4158,7 +4182,7 @@ if [ -s /run/sigmond/cable-available ]; then
     # that prints a bare shell command is telling them to do something they
     # physically cannot (rob, 2026-10-01).  Print the whole reach instead.
     [ -n "$_cbl" ] && _cable=" ++ $_cbl has a cable, UNUSED (this host is not on IPv4).  To adopt it, from another computer:
- ++   ssh root@${HOSTIP:-<no-ip-yet>} 'systemctl start sigmond-netfix'"
+ ++   ssh ${_HSSH}root@${HOSTIP:-<no-ip-yet>} 'systemctl start sigmond-netfix'"
 fi
 
 # ⛔ IT MUST FIT ON THE SCREEN.  rob, 2026-10-01: the panel had grown past the
@@ -4181,12 +4205,12 @@ PANEL=$(cat <<PEOF
  The station is the DECODER VIRTUAL MACHINE below — this screen is the
  computer that hosts it.
 ${NETWARN}${BRINGUP}${RXWARN}
- Proxmox host   ssh ${_LROOT}@${_HIP}
+ Proxmox host   ssh ${_HSSH}${_LROOT}@${_HIP}
                 web UI  $(_hl addr "https://$(ipurl "${HOSTIP:-<no-ip-yet>}"):8006")
 
  Decoder virtual machine   ${_VIP:-<starting — this panel refreshes every 5 min>}${VMNOTE}${VMBEHIND}
    from here      ssh ${_LSIG}@${_VIP:-<starting>}   (or: sigmond-vm;  also ${_LHAM}@)
-   via this host  ssh -p 2222 ${_LSIG}@${_HIP}
+   via this host  ssh ${_VMSSH}${_LSIG}@${_HIP}
    via this host  $(_hl addr "http://$(ipurl "${HOSTIP:-<no-ip-yet>}")"):PORT  where PORT =
                   ka9q-web 8081 · station-web 8000 · magnetometer 8082 · mag feed ws 8765
 

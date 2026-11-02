@@ -123,7 +123,7 @@ grep -q 'Press Enter here for a hypervisor login; typing does not echo, which is
     && grep -q 'TYPE THE PROXMOX HOST ROOT PASSWORD' "$FB" \
     && echo "  ok   firstboot: the panel's second line offers a login on the host, and the screen asks for its root password" \
     || { echo "  FAIL firstboot-v3.sh no longer prints the keyboard line, or the password prompt, that the documents repeat"; fail=1; }
-grep -qF "printf \"type on another computer:  ssh root@%s 'sigmond-setup --rac-%s'\"" "$FB" \
+grep -qF "printf \"type on another computer:  ssh %sroot@%s 'sigmond-setup --rac-%s'\" \"\${_HSSH}\"" "$FB" \
     && echo "  ok   firstboot: the panel prints the host's own switch as ssh root@<host> '...' on a station that has not paired" \
     || { echo "  FAIL firstboot-v3.sh no longer prints the unpaired instruction the documents repeat"; fail=1; }
 for d in $DOCS; do

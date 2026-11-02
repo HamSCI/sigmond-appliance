@@ -427,6 +427,13 @@ SSH stays off on the VM.
 | Proxmox host (the machine itself) | `ssh root@<host address>` or browse `https://<host address>:8006` |
 | Decoder VM (the radio) | `ssh -p 2222 sigmond@<host address>` (relayed by the host; also `hamsci@`). On a station with the old layout, where the VM sits on your own network with no private link to the host: `ssh sigmond@<VM address>` |
 
+**The decoder VM on port 22.** On the host, `sigmond-vm4relay ssh22 on` makes
+the host pass the LAN's IPv4 port 22 to the VM, so `ssh sigmond@<host address>`
+reaches the VM the way it reached a wsprdaemon computer without a VM. Port 2222
+still reaches the VM. The host's own ssh then answers the LAN on 2022:
+`ssh -p 2022 root@<host address>`. Over IPv6 nothing changes. The console panel
+prints the commands that apply. `sigmond-vm4relay ssh22 off` puts it back.
+
 Change it: run `passwd` on the host, and in the VM.
 
 **PSWS stations:** the VM's login banner shows this machine's public upload key.

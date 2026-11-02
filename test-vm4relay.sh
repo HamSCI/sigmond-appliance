@@ -560,6 +560,50 @@ grep -q 'SIGMOND-VM4' "$T/nat" && bad "a refresh after remove relays nothing" "$
 relay install; snap
 grep -q -- '-j SIGMOND-VM4$' "$T/nat" && ok "install after remove relays again" || bad "install after remove relays again" "$(cat "$T/nat")"
 
+
+echo
+echo "ssh22: the LAN's 22 to the VM, 2022 to this host (Rob, 2026-11-02), only when asked"
+reset_nat; rm -f "$STATEDIR/vm4relay-removed" "$STATEDIR/vm4relay-ssh22" "$ALLOW"
+echo "2: vmbr0    inet 192.168.1.50/24 scope global vmbr0\\  x" > "$IP4_ADDRS"
+echo "default via 192.168.1.1 dev vmbr0 proto dhcp src 192.168.1.50 metric 100" > "$IP4_DEFAULT"
+relay install; snap
+lacks "off by default: no DNAT of 22" "$T/chain" "--dport 22 -j DNAT"
+lacks "off by default: no redirect to the host's ssh" "$T/chain" "REDIRECT"
+relay status
+grep -q 'ssh22 off' "$T/out" && ok "status says ssh22 is off" || bad "status says ssh22 is off" "$(cat "$T/out")"
+relay ssh22 on; rc=$?; snap
+[ "$rc" = 0 ] && [ -e "$STATEDIR/vm4relay-ssh22" ] && ok "ssh22 on exits 0 and leaves its mark" || bad "ssh22 on exits 0 and leaves its mark" "rc=$rc $(cat "$T/out")"
+grep -q "this host's own ssh answers the LAN on 2022" "$T/out" && ok "and says where this host's ssh went" || bad "and says where this host's ssh went" "$(cat "$T/out")"
+for src in 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16; do
+    has ":22 from $src goes to the VM's ssh" "$T/chain" \
+        "-A SIGMOND-VM4 -s $src -p tcp -m tcp --dport 22 -j DNAT --to-destination 10.99.0.2:22"
+    has ":2222 from $src still goes to the VM's ssh" "$T/chain" \
+        "-A SIGMOND-VM4 -s $src -p tcp -m tcp --dport 2222 -j DNAT --to-destination 10.99.0.2:22"
+    has ":2022 from $src reaches this host's own sshd" "$T/chain" \
+        "-A SIGMOND-VM4 -s $src -p tcp -m tcp --dport 2022 -j REDIRECT --to-ports 22"
+done
+[ "$(grep -c '^-A SIGMOND-VM4 ' "$T/chain")" = 21 ] && ok "21 rules: 3 sources x (6 ports + this host's ssh)" \
+    || bad "21 rules: 3 sources x 7" "$(cat "$T/chain")"
+grep '^-A SIGMOND-VM4 ' "$T/chain" | grep -v -- ' -s ' | grep -q . \
+    && bad "every rule still matches a source" "$(cat "$T/chain")" || ok "every rule still matches a source"
+grep -- '--dport 22 ' "$T/nat" | grep -v '^-A SIGMOND-VM4 -s ' | grep -q . \
+    && bad "22 is taken only inside the chain, from listed sources" "$(cat "$T/nat")" || ok "22 is taken only inside the chain, from listed sources"
+printf '129.24.8.0/22\n' > "$ALLOW"; chmod 644 "$ALLOW"
+relay refresh; snap
+has "a listed prefix gets 22 too" "$T/chain" "-A SIGMOND-VM4 -s 129.24.8.0/22 -p tcp -m tcp --dport 22 -j DNAT --to-destination 10.99.0.2:22"
+has "and this host's ssh on 2022" "$T/chain" "-A SIGMOND-VM4 -s 129.24.8.0/22 -p tcp -m tcp --dport 2022 -j REDIRECT --to-ports 22"
+rm -f "$ALLOW"; relay refresh
+: > "$RESTORE_LOG"; relay refresh
+[ -s "$RESTORE_LOG" ] && bad "ssh22 on is stable: a second refresh changes nothing" "$(cat "$RESTORE_LOG")" || ok "ssh22 on is stable: a second refresh changes nothing"
+relay status
+grep -q 'ssh22 on' "$T/out" && ok "status says ssh22 is on" || bad "status says ssh22 is on" "$(cat "$T/out")"
+relay ssh22 off; rc=$?; snap
+[ "$rc" = 0 ] && [ ! -e "$STATEDIR/vm4relay-ssh22" ] && ok "ssh22 off exits 0 and clears its mark" || bad "ssh22 off exits 0 and clears its mark" "rc=$rc"
+lacks "off again: no DNAT of 22" "$T/chain" "--dport 22 -j DNAT"
+lacks "off again: no redirect" "$T/chain" "REDIRECT"
+[ "$(grep -c '^-A SIGMOND-VM4 ' "$T/chain")" = 15 ] && ok "back to 15 rules" || bad "back to 15 rules" "$(cat "$T/chain")"
+relay ssh22 sideways; rc=$?
+[ "$rc" = 2 ] && [ ! -e "$STATEDIR/vm4relay-ssh22" ] && ok "a bad word is refused and changes nothing" || bad "a bad word is refused and changes nothing" "rc=$rc"
 echo
 echo "firstboot and the build"
 IMPORTER="$T/importer.sh"
