@@ -4,7 +4,8 @@
 #
 # One script for every release.  It reads the public download folder, picks
 # the highest version that has both an .img and its .sha256, downloads it (or
-# reuses a copy already downloaded and verified), checks the sha256, writes
+# reuses a copy already downloaded and verified; after a new download only it
+# and the previous version are kept), checks the sha256, writes
 # the stick and reads it back.  Nothing needs a Google login or rclone: the
 # folder is "anyone with the link", and curl is enough.
 #
@@ -78,6 +79,28 @@ confirm_erase(){
 # --download-only work anywhere curl does.
 need(){ for t in "$@"; do command -v "$t" >/dev/null || die "missing tool: $t"; done; }
 need curl awk sed sort
+
+# After a new image has downloaded and verified, keep it and the newest older
+# version (the last good one) and delete every older one with its .sha256 and
+# any .part.  Only sigmond-appliance-v*-release files in IMG_DIR are touched,
+# and nothing newer than the image just fetched (--version may pick an old one).
+prune_old_images(){
+    local keep_prev old f n=0 freed=0
+    keep_prev=$(ls "$IMG_DIR" 2>/dev/null \
+        | sed -nE 's/^sigmond-appliance-(v[0-9.]+)-[0-9]{8}-release\..*/\1/p' | sort -uV \
+        | awk -v v="$VER" '$0!=v' | while read -r o; do
+              [ "$(printf '%s\n%s\n' "$o" "$VER" | sort -V | tail -1)" = "$VER" ] && echo "$o"
+          done)
+    old=$(printf '%s\n' "$keep_prev" | sed '$d')     # all but the newest older one
+    for o in $old; do
+        for f in "$IMG_DIR"/sigmond-appliance-"$o"-*-release.*; do
+            [ -f "$f" ] || continue
+            freed=$(( freed + $(fsize "$f") )); rm -f "$f" && n=$((n+1))
+        done
+    done
+    [ "$n" -gt 0 ] && say "removed $n older image file(s) ($((freed/1048576)) MiB); kept $VER and $(printf '%s\n' "$keep_prev" | tail -1)"
+    return 0
+}
 
 # The write needs root.  When sudo would ask for a password, offer once to let
 # this account use sudo without one (a drop-in under /etc/sudoers.d, checked
@@ -178,6 +201,7 @@ if [ ! -f "$IMG" ]; then
     fi
     mv "$IMG.part" "$IMG"
     say "download verified: $IMG"
+    prune_old_images
 fi
 BYTES=$(fsize "$IMG")
 
