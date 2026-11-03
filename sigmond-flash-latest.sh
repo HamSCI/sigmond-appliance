@@ -63,8 +63,7 @@ case "$OS" in
             fsize(){ stat -f %z "$1"; } ;;
     *)      die "unsupported system: $OS (Linux or macOS only)" ;;
 esac
-# Disk tools are checked only when a stick is to be written, so --list and
-# --download-only work anywhere curl does.
+
 # Only one candidate is ever offered, so a plain yes is enough; the device
 # name is accepted too.  Anything else, including just Enter, writes nothing.
 confirm_erase(){
@@ -75,8 +74,34 @@ confirm_erase(){
         *) die "not confirmed — nothing written" ;;
     esac
 }
+# Disk tools are checked only when a stick is to be written, so --list and
+# --download-only work anywhere curl does.
 need(){ for t in "$@"; do command -v "$t" >/dev/null || die "missing tool: $t"; done; }
 need curl awk sed sort
+
+# The write needs root.  When sudo would ask for a password, offer once to let
+# this account use sudo without one (a drop-in under /etc/sudoers.d, checked
+# with visudo before it is installed).  The default is no: sudo then just asks.
+offer_nopasswd_sudo(){
+    sudo -n true 2>/dev/null && return 0
+    [ -t 0 ] && [ "${FORCE:-0}" != 1 ] || return 0
+    local u f tmp grp ans
+    u=$(id -un); f="/etc/sudoers.d/90-nopasswd-${u//[^A-Za-z0-9_-]/_}"
+    say "sudo will ask for your password for the write (and again for the read-back"
+    say "  if it takes longer than sudo remembers it)."
+    printf '%s  let %s use sudo without a password from now on? This writes %s [y/N] ' "$(ts)" "$u" "$f"
+    read -r ans
+    case "$ans" in y|Y|yes|Yes|YES) ;; *) say "ok — sudo will ask"; return 0 ;; esac
+    tmp=$(mktemp) || die "cannot make a temp file"
+    printf '%s ALL=(ALL) NOPASSWD: ALL\n' "$u" > "$tmp"
+    [ "$OS" = Darwin ] && grp=wheel || grp=root
+    if sudo visudo -cqf "$tmp" && sudo install -m 0440 -o root -g "$grp" "$tmp" "$f" && sudo -n true 2>/dev/null; then
+        say "done: $u now uses sudo without a password (undo: sudo rm $f)"
+    else
+        say "could not set that up; sudo will ask for your password"
+    fi
+    rm -f "$tmp"
+}
 
 # ── 1. what is published ────────────────────────────────────────────────────
 # The embedded folder view is plain HTML, one <div class="flip-entry"
@@ -216,11 +241,12 @@ flash_macos(){
         [ -t 0 ] || die "no terminal to confirm on — run the downloaded script directly (bash sigmond-flash-latest.sh), or set FORCE=1"
         confirm_erase
     fi
+    offer_nopasswd_sudo
 
     diskutil unmountDisk "$DISK" >/dev/null || die "cannot unmount $DISK (close any Finder windows on it)"
     # The raw node (/dev/rdiskN) skips the buffer cache: several times faster.
     RAW="${DISK/disk/rdisk}"
-    say "writing $((BYTES/1048576)) MiB to $RAW — a few minutes; sudo will ask for your password"
+    say "writing $((BYTES/1048576)) MiB to $RAW — a few minutes"
     START=$(date +%s)
     sudo dd if="$IMG" of="$RAW" bs=4194304 status=progress || die "write failed"
     sync
@@ -271,6 +297,7 @@ else
     done < <(lsblk -nro NAME,MOUNTPOINT "$DISK" 2>/dev/null | tail -n +2)
     [ -z "$BUSY" ] || die "$DISK has partitions mounted in service:$BUSY — refusing"
 
+    offer_nopasswd_sudo
     DBYTES=$(sudo blockdev --getsize64 "$DISK") || die "cannot read the size of $DISK (needs sudo)"
     [ "$BYTES" -le "$DBYTES" ] || die "the image ($((BYTES/1048576)) MiB) does not fit on $DISK ($((DBYTES/1048576)) MiB)"
     MODEL=$(lsblk -dno VENDOR,MODEL "$DISK" 2>/dev/null | tr -s ' ' | sed 's/^ //;s/ $//')
