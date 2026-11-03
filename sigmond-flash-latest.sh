@@ -172,6 +172,9 @@ flash_macos(){
             DISK="$d"; N=$((N+1))
             say "found USB stick: $d  $(( $(dinfo "$d" TotalSize) / 1000000000 )) GB  $(dinfo "$d" MediaName)"
         done
+        # loginwindow ejects removable disks attached while the screen is
+        # locked (seen 2026-11-03): the stick is on the bus with no disk.
+        [ "$N" -eq 0 ] && say "no stick found. If one IS plugged in: macOS ejects a stick attached while the screen is locked — unplug it and plug it in again with the Mac unlocked."
         [ "$N" -eq 1 ] || die "expected exactly one USB stick plugged in, found $N — plug in one, or name it: --device /dev/diskN (see: diskutil list external)"
     fi
     [ "$(dinfo "$DISK" Internal)" = true ] && [ "${ALLOW_FIXED:-0}" != 1 ] && die "$DISK is an internal disk; refusing"
