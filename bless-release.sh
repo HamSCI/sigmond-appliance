@@ -399,6 +399,21 @@ G7_BAD=()
 _have_inst=0; _have_page=0
 git -C "$REPO" show "origin/main:INSTALL.md" > "$INSTR_MD" 2>/dev/null && _have_inst=1
 git -C "$REPO" show "origin/main:docs/install-page.html" > "$INSTR_HTML" 2>/dev/null && _have_page=1
+# The flasher (Michael, 2026-11-03).  sigmond-flash-latest.sh sits in each download
+# folder under ONE fixed name, so the link test sites hold never changes, and the
+# bless re-uploads it every time so that copy never goes stale.  Same origin/main
+# read as the instructions.  Not a gate: a release ships without it, with a NOTE.
+FLASHER=""
+FLASHER_NOTE=""
+if git -C "$REPO" show "origin/main:sigmond-flash-latest.sh" > "$INSTR_DIR/sigmond-flash-latest.sh" 2>/dev/null; then
+    if bash -n "$INSTR_DIR/sigmond-flash-latest.sh" 2>/dev/null; then
+        FLASHER="$INSTR_DIR/sigmond-flash-latest.sh"
+    else
+        FLASHER_NOTE="WARNING: sigmond-flash-latest.sh on origin/main fails bash -n -- not publishing it; each folder keeps its previous copy"
+    fi
+else
+    FLASHER_NOTE="NOTE: no sigmond-flash-latest.sh on origin/main -- the flasher in the download folders was not refreshed"
+fi
 
 if [ $_have_inst -eq 0 ]; then
     G7_BAD+=("INSTALL.md is not readable at origin/main")
@@ -457,6 +472,7 @@ if [ $APPLY -eq 0 ]; then
     say "  $(basename "$MANIFEST")"
     say "  $(basename "$SHAFILE")"
     say "DRY RUN -- would also publish $(basename "$INSTR_MD") and $(basename "$INSTR_HTML") beside the image at every publish target (from origin/main)"
+    if [ -n "$FLASHER" ]; then say "DRY RUN -- and sigmond-flash-latest.sh (from origin/main), under its fixed name"; else say "DRY RUN -- ${FLASHER_NOTE:-no flasher}"; fi
     say "Re-run with --apply to publish. Creating a public Release is outward-facing and requires explicit human authorization."
     exit 0
 fi
@@ -914,6 +930,18 @@ if [ $RC -eq 0 ]; then
                     say "  [$_lab]   by hand, in a checkout with origin/main fetched: git show origin/main:INSTALL.md > '$(basename "$INSTR_MD")'; git show origin/main:docs/install-page.html > '$(basename "$INSTR_HTML")'"
                     say "  [$_lab]   then copy both files beside $IMGBASE in $_d"
                 fi
+                # The flasher keeps its one name in every folder: rclone copyto onto
+                # the same name updates the Drive file in place, so its id and link
+                # stay.  Only after the image landed, like the instructions.
+                if [ -n "$FLASHER" ]; then
+                    if pub_put "$_d" "" "$FLASHER" 2>/dev/null; then
+                        say "  [$_lab] flasher: sigmond-flash-latest.sh"
+                    else
+                        _allok=0
+                        say "  [$_lab] WARNING: could not publish sigmond-flash-latest.sh to $_d"
+                        say "  [$_lab]   by hand: git show origin/main:sigmond-flash-latest.sh > sigmond-flash-latest.sh; rclone copyto sigmond-flash-latest.sh '$_d/sigmond-flash-latest.sh'"
+                    fi
+                fi
                 # Prune what this bless supersedes, only AFTER the promote
                 # landed, so a target is never left without the image.  Newer
                 # candidates stay; see pub_superseded.
@@ -938,6 +966,7 @@ if [ $RC -eq 0 ]; then
         # this point.  Say so loudly rather than unwind a Release over a
         # download convenience -- but name every target that missed, so a
         # partial publish can never read as a complete one.
+        [ -n "$FLASHER_NOTE" ] && say "$FLASHER_NOTE"
         [ "$_allok" = 1 ] || say "NOTE: some targets above did not receive $IMGBASE or its install instructions (see the WARNING lines) — the GitHub Release is authoritative."
     fi
 fi

@@ -138,6 +138,7 @@ sc_reset() {
     SC_INSTALL=""; SC_PAGE=""            # commit 2, pushed to origin/main ("" = no change; DELETE = remove)
     SC_LOCAL_INSTALL=""; SC_LOCAL_PAGE=""  # an UNPUSHED commit in the checkout
     SC_NOIMAGE=0; SC_NOPENDING=""
+    SC_FLASHER=""                         # sigmond-flash-latest.sh pushed to origin/main ("" = none)
 }
 
 # mkscene <name> — builds $T/<name>/{origin.git,seed,repo,rig,bless,remote,tmp}.
@@ -173,6 +174,11 @@ mkscene() {
                 *)      printf '%s\n' "$SC_PAGE" > docs/install-page.html ;;
             esac
             git add -A && git commit -q -m "docs: instructions for the new image"
+            git push -q origin main 2>/dev/null
+        fi
+        if [ -n "$SC_FLASHER" ]; then
+            printf '%s\n' "$SC_FLASHER" > sigmond-flash-latest.sh
+            git add -A && git commit -q -m "sigmond-flash-latest.sh"
             git push -q origin main 2>/dev/null
         fi
     )
@@ -439,6 +445,43 @@ has   "WARNING says wd30 could not be promoted"  "$OUT" "[wd30] WARNING: could n
 lacks "no instructions line for wd30"            "$OUT" "[wd30] instructions:"
 chk   "[wd30] no instructions file written"      "$(find "$T/nopromo/remote/home-wd30" -name '*INSTALL*' 2>/dev/null | wc -l | tr -d ' ')" "0"
 has   "[rob] still got its instructions"         "$OUT" "[rob] instructions:"
+
+# ═══════════════════════════════════════════════════════════════════════════
+# The flasher (Michael, 2026-11-03): sigmond-flash-latest.sh lives in each
+# download folder under ONE fixed name, so the link the test sites hold never
+# changes.  The bless re-uploads it from origin/main every time, after the image
+# landed, so the folder's copy never goes stale.  rclone copyto onto the same
+# name updates the Drive file in place, which keeps its id and so its link.
+GOOD_FLASHER='#!/bin/bash
+echo "flash the newest image"'
+echo "--apply: the flasher reaches every target, from origin/main, under its fixed name"
+sc_reset; SC_INSTALL="$GOOD_INST"; SC_PAGE="$GOOD_PAGE"; SC_FLASHER="$GOOD_FLASHER"; mkscene flash; run_bless flash 1
+R="$T/flash/remote"
+chk   "the bless exits 0" "$RC" "0"
+for pair in "rob:$R/gdrive/sigmond-images" "mjh:$R/gdrive,root_folder_id=ABC123" "wd30:$R/home-wd30" "bl:$R/gdrive/blessed-only"; do
+    lab="${pair%%:*}"; dir="${pair#*:}"
+    chk "[$lab] sigmond-flash-latest.sh arrived, byte for byte from origin/main" \
+        "$(git -C "$T/flash/origin.git" show main:sigmond-flash-latest.sh | cmp -s - "$dir/sigmond-flash-latest.sh" && echo same || echo differ)" "same"
+    chk "[$lab] no versioned copy of the flasher" "$(ls "$dir" | grep -c 'flash-latest' )" "1"
+    has "[$lab] the log names the flasher" "$OUT" "[$lab] flasher: sigmond-flash-latest.sh"
+done
+n_mv="$(grep -n "moveto -q gdrive:sigmond-images/pending/$IMG" "$T/flash/calls" | head -1 | cut -d: -f1)"
+n_fl="$(grep -n "copyto -q .*sigmond-flash-latest.sh gdrive:sigmond-images/sigmond-flash-latest.sh" "$T/flash/calls" | head -1 | cut -d: -f1)"
+chk "[rob] the image lands before the flasher" "$([ -n "$n_mv" ] && [ -n "$n_fl" ] && [ "$n_mv" -lt "$n_fl" ] && echo before || echo "mv=$n_mv fl=$n_fl")" "before"
+chk "no temp files left" "$(leftover flash)" "0"
+
+echo "--apply: no flasher on origin/main is a NOTE, not a failure"
+sc_reset; SC_INSTALL="$GOOD_INST"; SC_PAGE="$GOOD_PAGE"; mkscene noflash; run_bless noflash 1
+chk   "the bless exits 0" "$RC" "0"
+has   "the log says the flasher was not refreshed" "$OUT" "no sigmond-flash-latest.sh on origin/main"
+chk   "nothing named flash-latest was uploaded" "$(grep -c 'flash-latest' "$T/noflash/calls")" "0"
+
+echo "--apply: a flasher that fails bash -n is not published"
+sc_reset; SC_INSTALL="$GOOD_INST"; SC_PAGE="$GOOD_PAGE"; SC_FLASHER='#!/bin/bash
+if then fi ('; mkscene badflash; run_bless badflash 1
+chk   "the bless exits 0" "$RC" "0"
+has   "the log warns" "$OUT" "sigmond-flash-latest.sh on origin/main fails bash -n"
+chk   "nothing named flash-latest was uploaded" "$(grep -c 'flash-latest' "$T/badflash/calls")" "0"
 
 echo "--apply: a failing gate 7 blocks everything"
 sc_reset; mkscene blocked; run_bless blocked 1
