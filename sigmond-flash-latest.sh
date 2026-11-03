@@ -6,7 +6,8 @@
 # the highest version that has both an .img and its .sha256, downloads it (or
 # reuses a copy already downloaded and verified; after a new download only it
 # and the previous version are kept), checks the sha256, writes
-# the stick and reads it back.  Nothing needs a Google login or rclone: the
+# the stick and reads it back.  If a newer copy of this script is published,
+# it replaces itself and asks you to run it again.  Nothing needs a Google login or rclone: the
 # folder is "anyone with the link", and curl is enough.
 #
 # Runs on Linux and macOS.
@@ -24,6 +25,7 @@
 #   SIGMOND_IMAGE_FOLDER  Drive folder id          (default: the HamSCI release folder)
 #   FORCE=1               skip the "erase it? [y/N]" confirmation
 #   ALLOW_FIXED=1         allow a non-removable target (never needed for a stick)
+#   SIGMOND_NO_UPDATE=1   do not replace this script with a newer published one
 #
 # The stick is found by attribute (USB transport AND removable), never by a
 # letter, and a disk carrying the running system or an in-service mount is
@@ -31,6 +33,9 @@
 # external USB hard disk reports "Removable Media: Fixed" and is never picked.  These are the rules of flash-usb.sh in the appliance repo, which
 # writes an image you already have; this script adds the fetch.
 set -uo pipefail
+
+# Bump on every published change: the self-update below compares this.
+FLASH_VERSION=2026.11.03.2
 
 FOLDER_ID="${SIGMOND_IMAGE_FOLDER:-1Eym7xsP_qVvbGOVmlXER73K3jx6J7dQs}"
 IMG_DIR="${SIGMOND_IMAGE_DIR:-$HOME/sigmond-images}"
@@ -138,6 +143,42 @@ ENTRIES=$(printf '%s' "$LISTING" | sed 's/<div class="flip-entry" id="entry-/\n@
 [ -n "$ENTRIES" ] || die "the download folder listing had no files (did Google change the page?)"
 
 id_of(){ printf '%s\n' "$ENTRIES" | awk -v n="$1" '$2==n{print $1; exit}'; }
+
+# ── self-update ─────────────────────────────────────────────────────────────
+# The published copy of this script sits in the same folder.  If its
+# FLASH_VERSION is newer than this one's, replace this file with it and ask for a rerun, so a
+# fix reaches everyone who kept an old copy.  The new copy must look like this
+# script and parse before it replaces anything.  SIGMOND_NO_UPDATE=1 skips this.
+self_update(){
+    [ "${SIGMOND_NO_UPDATE:-0}" = 1 ] && return 0
+    local sid self new
+    sid=$(id_of sigmond-flash-latest.sh); [ -n "$sid" ] || return 0
+    self=$0; [ -f "$self" ] || return 0
+    new=$(mktemp) || return 0
+    if ! curl -fsL --max-time 60 -o "$new" "${DL_URL}${sid}" \
+       || ! head -1 "$new" | grep -q '^#!/bin/bash' \
+       || ! grep -q 'sigmond-flash-latest' "$new" || ! bash -n "$new" 2>/dev/null; then
+        say "could not check for a newer version of this script; carrying on with this one"
+        rm -f "$new"; return 0
+    fi
+    local pub
+    pub=$(sed -n 's/^FLASH_VERSION=\([0-9.]*\).*/\1/p' "$new" | head -1)
+    if [ -z "$pub" ] || [ "$pub" = "$FLASH_VERSION" ] \
+       || [ "$(printf '%s\n%s\n' "$pub" "$FLASH_VERSION" | sort -V | tail -1)" != "$pub" ]; then
+        rm -f "$new"; return 0      # published copy is not newer than this one
+    fi
+    if [ -w "$self" ] && cat "$new" > "$self"; then
+        rm -f "$new"
+        say "a newer version of this script ($pub; you had $FLASH_VERSION) was published; $self is now updated."
+        say "Please run it again (same command)."
+        exit 0
+    fi
+    mv "$new" "$IMG_DIR/sigmond-flash-latest.sh.new" 2>/dev/null \
+        && say "a newer version of this script is at $IMG_DIR/sigmond-flash-latest.sh.new (cannot write $self); carrying on with this one"
+    return 0
+}
+mkdir -p "$IMG_DIR" 2>/dev/null
+self_update
 
 # Versions with BOTH an image and its checksum, newest last.
 VERSIONS=$(printf '%s\n' "$ENTRIES" | awk '{print $2}' \
