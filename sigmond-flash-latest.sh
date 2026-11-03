@@ -21,7 +21,7 @@
 # Environment:
 #   SIGMOND_IMAGE_DIR     where images are kept   (default ~/sigmond-images)
 #   SIGMOND_IMAGE_FOLDER  Drive folder id          (default: the HamSCI release folder)
-#   FORCE=1               skip the "type the device" confirmation
+#   FORCE=1               skip the "erase it? [y/N]" confirmation
 #   ALLOW_FIXED=1         allow a non-removable target (never needed for a stick)
 #
 # The stick is found by attribute (USB transport AND removable), never by a
@@ -65,6 +65,16 @@ case "$OS" in
 esac
 # Disk tools are checked only when a stick is to be written, so --list and
 # --download-only work anywhere curl does.
+# Only one candidate is ever offered, so a plain yes is enough; the device
+# name is accepted too.  Anything else, including just Enter, writes nothing.
+confirm_erase(){
+    printf '%s  erase %s and write the image? [y/N] ' "$(ts)" "$DISK"
+    read -r ans
+    case "$ans" in
+        y|Y|yes|Yes|YES|"$DISK") ;;
+        *) die "not confirmed — nothing written" ;;
+    esac
+}
 need(){ for t in "$@"; do command -v "$t" >/dev/null || die "missing tool: $t"; done; }
 need curl awk sed sort
 
@@ -204,9 +214,7 @@ flash_macos(){
     # than erase a disk unasked.  Download the script and run it instead.
     if [ "${FORCE:-0}" != 1 ]; then
         [ -t 0 ] || die "no terminal to confirm on — run the downloaded script directly (bash sigmond-flash-latest.sh), or set FORCE=1"
-        printf '%s  type the device to confirm (%s): ' "$(ts)" "$DISK"
-        read -r ans
-        [ "$ans" = "$DISK" ] || die "got '$ans', expected '$DISK' — nothing written"
+        confirm_erase
     fi
 
     diskutil unmountDisk "$DISK" >/dev/null || die "cannot unmount $DISK (close any Finder windows on it)"
@@ -277,9 +285,7 @@ else
     # than erase a disk unasked.  Download the script and run it instead.
     if [ "${FORCE:-0}" != 1 ]; then
         [ -t 0 ] || die "no terminal to confirm on — run the downloaded script directly (bash sigmond-flash-latest.sh), or set FORCE=1"
-        printf '%s  type the device to confirm (%s): ' "$(ts)" "$DISK"
-        read -r ans
-        [ "$ans" = "$DISK" ] || die "got '$ans', expected '$DISK' — nothing written"
+        confirm_erase
     fi
 
     # ── 4. write ────────────────────────────────────────────────────────────────

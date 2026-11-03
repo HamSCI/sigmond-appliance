@@ -12,7 +12,7 @@ safety rules are the bash script's:
   * the stick is found by attribute: USB bus AND Windows' "Removable Media".
     An external USB hard disk reports "External hard disk media" and is never
     picked; the boot and system disks are always refused;
-  * you type the disk number to confirm; the whole image is read back.
+  * you answer y to confirm; the whole image is read back.
 
 Run from a PowerShell opened with "Run as administrator" (writing a whole
 disk needs it):
@@ -159,8 +159,8 @@ Get-Partition -DiskNumber $N -ErrorAction SilentlyContinue |
     Format-Table PartitionNumber, DriveLetter, @{n='SizeGB';e={[math]::Round($_.Size/1e9,1)}}, Type -AutoSize | Out-String | Write-Host
 if ($DryRun) { Say 'DRY RUN - every check passed; nothing written'; exit 0 }
 if (-not $Force) {
-    $ans = Read-Host "type the disk number to confirm ($N)"
-    if ($ans -ne "$N") { Die "got '$ans', expected '$N' - nothing written" }
+    $ans = Read-Host "erase disk $N and write the image? [y/N]"
+    if ($ans -notin @('y', 'yes', "$N")) { Die 'not confirmed - nothing written' }
 }
 
 # ── 4. write ────────────────────────────────────────────────────────────────
