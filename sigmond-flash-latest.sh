@@ -8,11 +8,13 @@
 # the stick and reads it back.  Nothing needs a Google login or rclone: the
 # folder is "anyone with the link", and curl is enough.
 #
+# Runs on Linux and macOS.
+#
 # Usage (as a normal user with sudo; the write itself needs root):
 #   bash sigmond-flash-latest.sh                  # newest image, auto-find the stick
 #   bash sigmond-flash-latest.sh --list           # show what is published, write nothing
 #   bash sigmond-flash-latest.sh --version v3.85  # a specific published version
-#   bash sigmond-flash-latest.sh --device /dev/sdb
+#   bash sigmond-flash-latest.sh --device /dev/sdb     (macOS: /dev/disk5)
 #   bash sigmond-flash-latest.sh --download-only  # fetch and verify, no stick
 #   DRY_RUN=1 bash sigmond-flash-latest.sh        # every check, no write
 #
@@ -24,7 +26,8 @@
 #
 # The stick is found by attribute (USB transport AND removable), never by a
 # letter, and a disk carrying the running system or an in-service mount is
-# refused.  These are the rules of flash-usb.sh in the appliance repo, which
+# refused.  On macOS the same attributes come from `diskutil info`: an
+# external USB hard disk reports "Removable Media: Fixed" and is never picked.  These are the rules of flash-usb.sh in the appliance repo, which
 # writes an image you already have; this script adds the fetch.
 set -uo pipefail
 
@@ -50,9 +53,20 @@ while [ $# -gt 0 ]; do
 done
 [ -n "$WANT_VER" ] && case "$WANT_VER" in v*) ;; *) WANT_VER="v$WANT_VER" ;; esac
 
-for t in curl sha256sum lsblk findmnt dd stat awk sed sort; do
-    command -v "$t" >/dev/null || die "missing tool: $t"
-done
+OS=$(uname -s)
+case "$OS" in
+    Linux)  DISK_TOOLS="lsblk findmnt dd"
+            sha256(){ sha256sum "$@"; }
+            fsize(){ stat -c %s "$1"; } ;;
+    Darwin) DISK_TOOLS="diskutil plutil dd"
+            sha256(){ shasum -a 256 "$@"; }
+            fsize(){ stat -f %z "$1"; } ;;
+    *)      die "unsupported system: $OS (Linux or macOS only)" ;;
+esac
+# Disk tools are checked only when a stick is to be written, so --list and
+# --download-only work anywhere curl does.
+need(){ for t in "$@"; do command -v "$t" >/dev/null || die "missing tool: $t"; done; }
+need curl awk sed sort
 
 # ── 1. what is published ────────────────────────────────────────────────────
 # The embedded folder view is plain HTML, one <div class="flip-entry"
@@ -101,7 +115,7 @@ say "published sha256 ${WANT_SHA:0:16}…"
 
 if [ -f "$IMG" ]; then
     say "found $IMG already — checking it"
-    if [ "$(sha256sum "$IMG" | awk '{print $1}')" = "$WANT_SHA" ]; then
+    if [ "$(sha256 "$IMG" | awk '{print $1}')" = "$WANT_SHA" ]; then
         say "  it matches the published checksum; not downloading again"
     else
         say "  it does NOT match; downloading again"
@@ -112,17 +126,17 @@ if [ ! -f "$IMG" ]; then
     IMG_ID=$(id_of "$IMG_NAME")
     SIZE=$(curl -fsIL --max-time 60 "${DL_URL}${IMG_ID}" | tr -d '\r' \
         | awk 'tolower($1)=="content-length:"{n=$2} END{print n+0}')
-    FREE=$(df -PB1 "$IMG_DIR" | awk 'NR==2{print $4}')
+    FREE=$(( $(df -Pk "$IMG_DIR" | awk 'NR==2{print $4}') * 1024 ))
     [ "${SIZE:-0}" -gt 0 ] && [ "$FREE" -lt "$SIZE" ] \
         && die "$IMG_DIR has $((FREE/1048576)) MiB free; the image needs $((SIZE/1048576)) MiB (set SIGMOND_IMAGE_DIR elsewhere)"
     say "downloading $((SIZE/1048576)) MiB to $IMG_DIR (resumes if interrupted; rerun to continue)"
     curl -fL --retry 5 --retry-delay 5 -C - -o "$IMG.part" "${DL_URL}${IMG_ID}" \
         || die "download failed — rerun this script to resume"
-    BYTES=$(stat -c %s "$IMG.part")
+    BYTES=$(fsize "$IMG.part")
     # A Drive error page or quota interstitial is a few KB of HTML.
     [ "$BYTES" -gt 1000000000 ] || { head -c 300 "$IMG.part" >&2; echo >&2; rm -f "$IMG.part"; die "download is only $BYTES bytes — Google returned a page, not the image; try again later"; }
     say "verifying the download"
-    GOT=$(sha256sum "$IMG.part" | awk '{print $1}')
+    GOT=$(sha256 "$IMG.part" | awk '{print $1}')
     if [ "$GOT" != "$WANT_SHA" ]; then
         rm -f "$IMG.part"
         die "download checksum ${GOT:0:16}… does not match the published ${WANT_SHA:0:16}… — deleted; rerun to fetch again"
@@ -130,81 +144,159 @@ if [ ! -f "$IMG" ]; then
     mv "$IMG.part" "$IMG"
     say "download verified: $IMG"
 fi
-BYTES=$(stat -c %s "$IMG")
+BYTES=$(fsize "$IMG")
 
 if [ "$DL_ONLY" = 1 ]; then
     say "DONE (download only): $IMG is $VER, sha256 ${WANT_SHA:0:16}…"
     exit 0
 fi
 
-# ── 3. the stick, found by attribute and never by letter ───────────────────
-if [ -n "$WANT_DEV" ]; then
-    [ -b "$WANT_DEV" ] || die "$WANT_DEV is not a block device"
-    DISK="$WANT_DEV"
-    rm_=$(lsblk -dno RM "$DISK" | tr -d ' ')
-    if [ "$rm_" != "1" ]; then
-        [ "${ALLOW_FIXED:-0}" = 1 ] || die "$DISK is not removable (a fixed disk, not a stick); refusing"
-        say "ALLOW_FIXED=1 — proceeding against a FIXED disk"
+# ── 3-5 on macOS: the same rules, from diskutil ─────────────────────────────
+# dinfo <disk> <key> — one field of `diskutil info -plist`.
+dinfo(){ diskutil info -plist "$1" 2>/dev/null | plutil -extract "$2" raw -o - - 2>/dev/null; }
+
+flash_macos(){
+    need $DISK_TOOLS
+    if [ -n "$WANT_DEV" ]; then
+        DISK="/dev/${WANT_DEV#/dev/}"; DISK="${DISK/rdisk/disk}"
+        [ "$(dinfo "$DISK" WholeDisk)" = true ] || die "$DISK is not a whole disk (name the disk, e.g. /dev/disk5, not a partition)"
+        if [ "$(dinfo "$DISK" RemovableMedia)" != true ]; then
+            [ "${ALLOW_FIXED:-0}" = 1 ] || die "$DISK is not removable (a fixed disk, not a stick); refusing"
+            say "ALLOW_FIXED=1 — proceeding against a FIXED disk"
+        fi
+    else
+        DISK=""; N=0
+        for d in $(diskutil list external physical | sed -nE 's#^(/dev/disk[0-9]+) .*#\1#p'); do
+            [ "$(dinfo "$d" BusProtocol)" = USB ] && [ "$(dinfo "$d" RemovableMedia)" = true ] \
+                && [ "$(dinfo "$d" Internal)" = false ] || continue
+            DISK="$d"; N=$((N+1))
+            say "found USB stick: $d  $(( $(dinfo "$d" TotalSize) / 1000000000 )) GB  $(dinfo "$d" MediaName)"
+        done
+        [ "$N" -eq 1 ] || die "expected exactly one USB stick plugged in, found $N — plug in one, or name it: --device /dev/diskN (see: diskutil list external)"
     fi
+    [ "$(dinfo "$DISK" Internal)" = true ] && [ "${ALLOW_FIXED:-0}" != 1 ] && die "$DISK is an internal disk; refusing"
+
+    # Never the disk macOS runs from: its APFS container's physical store.
+    BOOT=$(dinfo / ParentWholeDisk)
+    for i in 0 1 2 3; do
+        st=$(diskutil info -plist / | plutil -extract "APFSPhysicalStores.$i.APFSPhysicalStore" raw -o - - 2>/dev/null) || break
+        BOOT="$BOOT $(dinfo "$st" ParentWholeDisk)"
+    done
+    for b in $BOOT; do
+        [ "/dev/$b" = "$DISK" ] && die "$DISK CARRIES THE RUNNING SYSTEM — refusing"
+    done
+
+    DBYTES=$(dinfo "$DISK" TotalSize)
+    [ -n "$DBYTES" ] || die "cannot read the size of $DISK"
+    [ "$BYTES" -le "$DBYTES" ] || die "the image ($((BYTES/1048576)) MiB) does not fit on $DISK ($((DBYTES/1048576)) MiB)"
+    MODEL=$(dinfo "$DISK" MediaName)
+
+    say "about to ERASE $DISK (${MODEL:-unknown model}, $((DBYTES/1000000000)) GB):"
+    diskutil list "$DISK" 2>/dev/null | sed 's/^/          /'
+    if [ "${DRY_RUN:-0}" = 1 ]; then
+        say "DRY_RUN=1 — every check passed; nothing written"
+        exit 0
+    fi
+    # No terminal (e.g. `curl ... | bash`) means no one to confirm: refuse rather
+    # than erase a disk unasked.  Download the script and run it instead.
+    if [ "${FORCE:-0}" != 1 ]; then
+        [ -t 0 ] || die "no terminal to confirm on — run the downloaded script directly (bash sigmond-flash-latest.sh), or set FORCE=1"
+        printf '%s  type the device to confirm (%s): ' "$(ts)" "$DISK"
+        read -r ans
+        [ "$ans" = "$DISK" ] || die "got '$ans', expected '$DISK' — nothing written"
+    fi
+
+    diskutil unmountDisk "$DISK" >/dev/null || die "cannot unmount $DISK (close any Finder windows on it)"
+    # The raw node (/dev/rdiskN) skips the buffer cache: several times faster.
+    RAW="${DISK/disk/rdisk}"
+    say "writing $((BYTES/1048576)) MiB to $RAW — a few minutes; sudo will ask for your password"
+    START=$(date +%s)
+    sudo dd if="$IMG" of="$RAW" bs=4194304 status=progress || die "write failed"
+    sync
+    EL=$(( $(date +%s) - START )); [ "$EL" -lt 1 ] && EL=1
+    say "wrote in ${EL}s"
+
+    # Read back through the raw node in whole 1 MiB blocks (raw reads must be
+    # block-aligned), trimmed to the image's exact byte count.
+    say "reading the stick back and comparing"
+    diskutil unmountDisk "$DISK" >/dev/null 2>&1
+    BLKS=$(( (BYTES + 1048575) / 1048576 ))
+    BACK=$(sudo dd if="$RAW" bs=1048576 count="$BLKS" 2>/dev/null | head -c "$BYTES" | sha256 | awk '{print $1}')
+}
+
+if [ "$OS" = Darwin ]; then
+    flash_macos
 else
-    DISK=""; N=0
-    while read -r name size tran rm_ type; do
-        [ "$type" = disk ] && [ "$tran" = usb ] && [ "$rm_" = 1 ] || continue
-        DISK="/dev/$name"; N=$((N+1))
-        say "found USB stick: /dev/$name  $size"
-    done < <(lsblk -dno NAME,SIZE,TRAN,RM,TYPE)
-    [ "$N" -eq 1 ] || die "expected exactly one USB stick plugged in, found $N — plug in one, or name it: --device /dev/sdX"
+    need $DISK_TOOLS
+    # ── 3. the stick, found by attribute and never by letter ───────────────────
+    if [ -n "$WANT_DEV" ]; then
+        [ -b "$WANT_DEV" ] || die "$WANT_DEV is not a block device"
+        DISK="$WANT_DEV"
+        rm_=$(lsblk -dno RM "$DISK" | tr -d ' ')
+        if [ "$rm_" != "1" ]; then
+            [ "${ALLOW_FIXED:-0}" = 1 ] || die "$DISK is not removable (a fixed disk, not a stick); refusing"
+            say "ALLOW_FIXED=1 — proceeding against a FIXED disk"
+        fi
+    else
+        DISK=""; N=0
+        while read -r name size tran rm_ type; do
+            [ "$type" = disk ] && [ "$tran" = usb ] && [ "$rm_" = 1 ] || continue
+            DISK="/dev/$name"; N=$((N+1))
+            say "found USB stick: /dev/$name  $size"
+        done < <(lsblk -dno NAME,SIZE,TRAN,RM,TYPE)
+        [ "$N" -eq 1 ] || die "expected exactly one USB stick plugged in, found $N — plug in one, or name it: --device /dev/sdX"
+    fi
+
+    for m in / /boot /boot/efi; do
+        src=$(findmnt -no SOURCE "$m" 2>/dev/null) || continue
+        pk=$(lsblk -no PKNAME "$src" 2>/dev/null | head -1)
+        [ -n "$pk" ] && [ "/dev/$pk" = "$DISK" ] && die "$DISK CARRIES THE RUNNING SYSTEM — refusing"
+    done
+    BUSY=""
+    while read -r part mp; do
+        [ -n "$mp" ] || continue
+        case "$mp" in /media/*|/mnt/*|/run/media/*) continue ;; esac
+        BUSY="$BUSY $part=$mp"
+    done < <(lsblk -nro NAME,MOUNTPOINT "$DISK" 2>/dev/null | tail -n +2)
+    [ -z "$BUSY" ] || die "$DISK has partitions mounted in service:$BUSY — refusing"
+
+    DBYTES=$(sudo blockdev --getsize64 "$DISK") || die "cannot read the size of $DISK (needs sudo)"
+    [ "$BYTES" -le "$DBYTES" ] || die "the image ($((BYTES/1048576)) MiB) does not fit on $DISK ($((DBYTES/1048576)) MiB)"
+    MODEL=$(lsblk -dno VENDOR,MODEL "$DISK" 2>/dev/null | tr -s ' ' | sed 's/^ //;s/ $//')
+
+    say "about to ERASE $DISK (${MODEL:-unknown model}, $((DBYTES/1000000000)) GB):"
+    lsblk -o NAME,SIZE,FSTYPE,LABEL,MOUNTPOINT "$DISK" 2>/dev/null | sed 's/^/          /'
+    if [ "${DRY_RUN:-0}" = 1 ]; then
+        say "DRY_RUN=1 — every check passed; nothing written"
+        exit 0
+    fi
+    # No terminal (e.g. `curl ... | bash`) means no one to confirm: refuse rather
+    # than erase a disk unasked.  Download the script and run it instead.
+    if [ "${FORCE:-0}" != 1 ]; then
+        [ -t 0 ] || die "no terminal to confirm on — run the downloaded script directly (bash sigmond-flash-latest.sh), or set FORCE=1"
+        printf '%s  type the device to confirm (%s): ' "$(ts)" "$DISK"
+        read -r ans
+        [ "$ans" = "$DISK" ] || die "got '$ans', expected '$DISK' — nothing written"
+    fi
+
+    # ── 4. write ────────────────────────────────────────────────────────────────
+    for p in $(lsblk -nro NAME "$DISK" | tail -n +2); do
+        sudo umount "/dev/$p" 2>/dev/null && say "unmounted /dev/$p"
+    done
+    say "writing $((BYTES/1048576)) MiB — about 2 min on USB 3, 10 min on USB 2"
+    START=$(date +%s)
+    sudo dd if="$IMG" of="$DISK" bs=4M oflag=direct conv=fsync status=progress || die "write failed"
+    sudo sync
+    EL=$(( $(date +%s) - START )); [ "$EL" -lt 1 ] && EL=1
+    say "wrote in ${EL}s"
+
+    # ── 5. read it back — the only step that proves anything ──────────────────
+    # Exactly the image's byte count; `head -c` reading a device is safe here
+    # (it is `dd | head` that dies of SIGPIPE after a good write).
+    say "reading the stick back and comparing"
+    sudo blockdev --flushbufs "$DISK" 2>/dev/null
+    BACK=$(sudo head -c "$BYTES" "$DISK" | sha256sum | awk '{print $1}')
 fi
-
-for m in / /boot /boot/efi; do
-    src=$(findmnt -no SOURCE "$m" 2>/dev/null) || continue
-    pk=$(lsblk -no PKNAME "$src" 2>/dev/null | head -1)
-    [ -n "$pk" ] && [ "/dev/$pk" = "$DISK" ] && die "$DISK CARRIES THE RUNNING SYSTEM — refusing"
-done
-BUSY=""
-while read -r part mp; do
-    [ -n "$mp" ] || continue
-    case "$mp" in /media/*|/mnt/*|/run/media/*) continue ;; esac
-    BUSY="$BUSY $part=$mp"
-done < <(lsblk -nro NAME,MOUNTPOINT "$DISK" 2>/dev/null | tail -n +2)
-[ -z "$BUSY" ] || die "$DISK has partitions mounted in service:$BUSY — refusing"
-
-DBYTES=$(sudo blockdev --getsize64 "$DISK") || die "cannot read the size of $DISK (needs sudo)"
-[ "$BYTES" -le "$DBYTES" ] || die "the image ($((BYTES/1048576)) MiB) does not fit on $DISK ($((DBYTES/1048576)) MiB)"
-MODEL=$(lsblk -dno VENDOR,MODEL "$DISK" 2>/dev/null | tr -s ' ' | sed 's/^ //;s/ $//')
-
-say "about to ERASE $DISK (${MODEL:-unknown model}, $((DBYTES/1000000000)) GB):"
-lsblk -o NAME,SIZE,FSTYPE,LABEL,MOUNTPOINT "$DISK" 2>/dev/null | sed 's/^/          /'
-if [ "${DRY_RUN:-0}" = 1 ]; then
-    say "DRY_RUN=1 — every check passed; nothing written"
-    exit 0
-fi
-# No terminal (e.g. `curl ... | bash`) means no one to confirm: refuse rather
-# than erase a disk unasked.  Download the script and run it instead.
-if [ "${FORCE:-0}" != 1 ]; then
-    [ -t 0 ] || die "no terminal to confirm on — run the downloaded script directly (bash sigmond-flash-latest.sh), or set FORCE=1"
-    printf '%s  type the device to confirm (%s): ' "$(ts)" "$DISK"
-    read -r ans
-    [ "$ans" = "$DISK" ] || die "got '$ans', expected '$DISK' — nothing written"
-fi
-
-# ── 4. write ────────────────────────────────────────────────────────────────
-for p in $(lsblk -nro NAME "$DISK" | tail -n +2); do
-    sudo umount "/dev/$p" 2>/dev/null && say "unmounted /dev/$p"
-done
-say "writing $((BYTES/1048576)) MiB — about 2 min on USB 3, 10 min on USB 2"
-START=$(date +%s)
-sudo dd if="$IMG" of="$DISK" bs=4M oflag=direct conv=fsync status=progress || die "write failed"
-sudo sync
-EL=$(( $(date +%s) - START )); [ "$EL" -lt 1 ] && EL=1
-say "wrote in ${EL}s"
-
-# ── 5. read it back — the only step that proves anything ──────────────────
-# Exactly the image's byte count; `head -c` reading a device is safe here
-# (it is `dd | head` that dies of SIGPIPE after a good write).
-say "reading the stick back and comparing"
-sudo blockdev --flushbufs "$DISK" 2>/dev/null
-BACK=$(sudo head -c "$BYTES" "$DISK" | sha256sum | awk '{print $1}')
 if [ "$BACK" = "$WANT_SHA" ]; then
     echo
     say "VERIFIED — $DISK matches the published image byte for byte"
@@ -212,6 +304,7 @@ if [ "$BACK" = "$WANT_SHA" ]; then
     say "   version $VER, built $DATE, sha256 $WANT_SHA"
     II=$(id_of "$STEM.INSTALL.html")
     [ -n "$II" ] && say "   install guide: https://drive.google.com/file/d/$II/view"
+    [ "$OS" = Darwin ] && diskutil eject "$DISK" >/dev/null 2>&1 && say "ejected $DISK"
     say "Remove the stick. Connect the RX888 (and GPSDO) BEFORE booting the target machine from it."
 else
     die "READ-BACK MISMATCH: stick ${BACK:0:16}… vs image ${WANT_SHA:0:16}… — DO NOT USE THIS STICK; rerun"
