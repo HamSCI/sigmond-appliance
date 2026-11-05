@@ -269,6 +269,16 @@ echo "### capture-prep exit=$?"
 smd admin readiness --gate capture --json > $HOME/capture-gate.json 2>&1
 echo "### capture gate: $(grep -o '"ready": *[a-z]*' $HOME/capture-gate.json | head -1)"
 
+# Golden-image marker, written AFTER capture-prep so the scrub keeps it.
+# sigmond's provenance.is_appliance_install() reads it.  The version file
+# reaches this VM only when sigmond-wizard.sh copies it, late in the first
+# boot; sigmond-wisdom.service runs before that, and on a fresh image
+# (sigmond final review, 2026-11-05) judged the baked wisdom below as a
+# repo install's: no adopted sidecar, a later replan gating radiod.
+sudo mkdir -p /etc/sigmond-appliance
+echo "golden VM built $(date -u +%Y-%m-%dT%H:%M:%SZ)" | sudo tee /etc/sigmond-appliance/golden-image >/dev/null
+echo "### golden-image marker written: /etc/sigmond-appliance/golden-image"
+
 echo "### FFTW wisdom bake — AFTER capture-prep, which deliberately scrubs it"
 # capture-prep deletes /etc/fftw/wisdomf ("per-CPU — a clone must
 # regenerate"), which is exactly why v3.0/v3.1 golden shipped without
