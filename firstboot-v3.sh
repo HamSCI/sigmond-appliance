@@ -220,6 +220,105 @@ reload_net(){
     else ifdown vmbr0 2>/dev/null; ifup vmbr0 2>/dev/null; fi
 }
 
+# ── put back vmbr0, and ONLY vmbr0, from a backup ──────────────────────────
+# ⛔ NEVER RESTORE THE WHOLE FILE.  /etc/network/interfaces is not netfix's
+# alone: the appliance installer appends the host-only vmbr1 (the decoder VM's
+# bridge, 10.99.0.1/30, with the post-up MASQUERADE rules that are the VM's
+# only way out), and anything else -- vmbr9, an operator's own stanza -- can
+# arrive after netfix wrote its backup.  Both restore paths used to do
+#     cp -a "$IFACES.netfix-static-bak" "$IFACES"
+# which silently rolls ALL of that back to whenever the backup was taken.
+#
+# KPH1-PM 2026-11-07: vmbr1 lost, VM never started.  The static backup was
+# written at 20:49Z; the installer added vmbr1 at ~20:55Z.  At the 21:03Z boot
+# the USB NIC vmbr0 bridged was missing, the "older netfix stranded it" repair
+# below fired, copied the 20:49 file over the live one, and vmbr1 was gone.
+# Every VM start then failed with "bridge 'vmbr1' does not exist" and
+# sigmond-vm-guard spent both its attempts on a VM that could never start.
+# Nothing about vmbr0 needed vmbr1 deleted; the whole-file copy did it as a
+# side effect nobody asked for.
+#
+# So: splice the backup's vmbr0 stanza in place of the current one and keep
+# every other stanza exactly as it stands NOW.  If the backup's bridge-port
+# has an `iface X inet manual` stanza that the current file lacks, bring that
+# along too, since ifupdown2 wants the port declared.
+#
+# A STANZA is `auto vmbr0` / `allow-* vmbr0` / `iface vmbr0 ...` and every line
+# after it up to the next line that starts a NEW top-level thing: a column-0
+# `auto`, `iface`, `allow-*`, `source*`, `mapping`, `rename`, or a column-0
+# comment.  The column-0 comment matters: the installer writes vmbr1 as
+#     # Host-only management bridge for the decoder VM ...
+#     auto vmbr1
+# and that comment belongs to vmbr1, not to whatever precedes it.  Indented
+# comments (vmbr1 has several, inside its post-up block) stay with their
+# stanza.  Blank lines are NOT boundaries -- ifupdown does not treat them as
+# such and the python rebinder below consumes them as part of the stanza --
+# but trailing blanks are kept as separators rather than swallowed.
+#
+# Written in POSIX awk on purpose: PVE ships mawk, and this runs before the
+# network is up, so nothing here may depend on gawk or on python being sane.
+_ifaces_stanza_awk='
+function hdr(l) { return l ~ /^(auto|allow-[^ \t]+)[ \t]+/ || l ~ /^iface[ \t]/ \
+                      || l ~ /^(source|source-directory|mapping|rename)([ \t]|$)/ \
+                      || l ~ /^#/ }
+function mine(l) { return l ~ ("^(auto|allow-[^ \t]+)[ \t]+" N "[ \t]*$") \
+                       || l ~ ("^iface[ \t]+" N "[ \t]") }
+'
+# stanza_of NAME FILE -> the stanza(s) for NAME, trailing blank lines trimmed
+stanza_of(){
+    awk -v N="$1" "$_ifaces_stanza_awk"'
+        hdr($0) { in_ = mine($0) }
+        in_ { if ($0 ~ /^[ \t]*$/) { held = held $0 "\n"; next }
+              printf "%s%s\n", held, $0; held = "" }
+    ' "$2"
+}
+# restore_vmbr0_stanza BACKUP TARGET -> 0 on success, 1 (TARGET untouched) if
+# the backup holds no vmbr0 stanza or the splice does not produce one.
+restore_vmbr0_stanza(){
+    local bak="$1" tgt="$2" blk pre out p
+    blk=$(stanza_of vmbr0 "$bak")
+    printf '%s\n' "$blk" | grep -q '^iface[[:space:]]\+vmbr0[[:space:]]' || return 1
+    pre=$(mktemp) && out=$(mktemp) || return 1
+    cp -a "$tgt" "$pre"
+    printf '%s\n' "$blk" > "$out.blk"
+    # replace the FIRST vmbr0 stanza with the backup's; drop any later ones
+    # (a split `auto vmbr0` ... `iface vmbr0`); append if there was none.
+    awk -v N=vmbr0 -v B="$out.blk" "$_ifaces_stanza_awk"'
+        hdr($0) { was = in_; in_ = mine($0)
+                  if (was && !in_) { printf "%s", held; held = "" } }
+        in_ { if (!done) { while ((getline l < B) > 0) print l; done = 1 }
+              if ($0 ~ /^[ \t]*$/) held = held $0 "\n"; else held = ""
+              next }
+        { print }
+        END { if (!done) { print ""; while ((getline l < B) > 0) print l }
+              else if (in_) printf "%s", held }
+    ' "$pre" > "$out"
+    rm -f "$out.blk"
+    if ! grep -q '^iface[[:space:]]\+vmbr0[[:space:]]' "$out"; then
+        rm -f "$pre" "$out"; return 1
+    fi
+    # the bridge-port's `iface X inet manual`, if the backup has one and the
+    # current file does not
+    for p in $(printf '%s\n' "$blk" | awk '$1=="bridge-ports"{for(i=2;i<=NF;i++)print $i}'); do
+        [ "$p" = none ] && continue
+        grep -q "^iface[[:space:]]\+${p}[[:space:]]" "$out" && continue
+        stanza_of "$p" "$bak" | grep -q . || continue
+        { echo; stanza_of "$p" "$bak"; } >> "$out"
+    done
+    # ⚠ BELT AND BRACES.  vmbr1 is the one stanza whose loss is invisible until
+    # the VM will not start (KPH1-PM 2026-11-07: vmbr1 lost, VM never started).
+    # If the splice above ever mis-parses, do not let it take vmbr1 with it:
+    # whatever the pre-restore file had for vmbr1 goes back on the end.
+    if grep -q '^iface[[:space:]]\+vmbr1[[:space:]]' "$pre" \
+       && ! grep -q '^iface[[:space:]]\+vmbr1[[:space:]]' "$out"; then
+        { echo; stanza_of vmbr1 "$pre"; } >> "$out"
+        say "  WARNING: vmbr0 restore dropped vmbr1 -- put it back from the pre-restore file"
+    fi
+    # write in place (not mv) so the file keeps its owner, mode and inode
+    cat "$out" > "$tgt"
+    rm -f "$pre" "$out"
+}
+
 # cur_ip() and ipurl() now live in /usr/local/lib/sigmond-net.sh, written
 # above, because sigmond-issue needs them too.  They used to be defined HERE
 # and called THERE, which is not a thing shell does: every panel refresh on
@@ -400,9 +499,15 @@ if grep -q '^iface vmbr0 inet dhcp' "$IFACES" 2>/dev/null \
     say "  An older netfix converted it and could not restore it. Restoring now, so the"
     say "  NEXT boot does not sit in networking.service waiting for a lease that cannot come."
     cp -a "$IFACES" "$IFACES.netfix-dhcp-bak" 2>/dev/null
-    cp -a "$IFACES.netfix-static-bak" "$IFACES"
-    reload_net
-    say "vmbr0 restored from $IFACES.netfix-static-bak"
+    # ⛔ vmbr0's stanza ONLY -- see restore_vmbr0_stanza.  This line used to
+    # copy the whole backup over the live file and deleted vmbr1 with it
+    # (KPH1-PM 2026-11-07: vmbr1 lost, VM never started).
+    if restore_vmbr0_stanza "$IFACES.netfix-static-bak" "$IFACES"; then
+        reload_net
+        say "vmbr0 restored from $IFACES.netfix-static-bak (other stanzas kept)"
+    else
+        say "WARNING: could not splice vmbr0 from $IFACES.netfix-static-bak -- left as is"
+    fi
 fi
 
 # ── is there anything to do? ────────────────────────────────────────────────
@@ -612,7 +717,14 @@ case "$IP" in
         else
             # Never trade a working address for none.
             say "WARNING: no lease after 60s — restoring the static config ($IP)"
-            cp -a "$IFACES.netfix-static-bak" "$IFACES"
+            # ⛔ vmbr0's stanza ONLY, never the whole backup.  The backup was
+            # taken a minute ago in this same run, so the window is small --
+            # but the installer appends vmbr1 concurrently on a first boot, and
+            # a whole-file copy is the exact operation that cost KPH1-PM its
+            # vmbr1 (KPH1-PM 2026-11-07: vmbr1 lost, VM never started).
+            cp -a "$IFACES" "$IFACES.netfix-dhcp-bak" 2>/dev/null
+            restore_vmbr0_stanza "$IFACES.netfix-static-bak" "$IFACES" \
+                || say "WARNING: could not splice vmbr0 back from $IFACES.netfix-static-bak"
             reload_net
         fi
         exit 0 ;;
