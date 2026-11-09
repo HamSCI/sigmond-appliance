@@ -1275,7 +1275,12 @@ case "$DECODER_VERDICT" in
     ok\ *)   say "ubersdr decoders built from the pin sigmond names (${DECODER_VERDICT#ok }) ✓" ;;
     nosrc)   say "no ubersdr_wsprd checkout on this guest — decoder pin not assessed" ;;
     stale\ *) fatal "$GX_OUT" "ubersdr decoders still built from ${DECODER_VERDICT##* } after smd update --apply; sigmond pins $(echo "$DECODER_VERDICT" | cut -d' ' -f2) — the update moved (or did not move) the checkout but never rebuilt the decoders" ;;
-    noprov\ *) fatal "$GX_OUT" "ubersdr_wsprd is checked out but /usr/local/libexec/sigmond/decoders/ubersdr/.provenance is missing or names no commit (pin ${DECODER_VERDICT#noprov })" ;;
+    # Fatal on this rig because the appliance image builds UberSDR's
+    # decoders by default ([decoders] implementation = ubersdr), so a
+    # checkout with no provenance means a build that never finished.  A
+    # station configured for wsjtx could hold a checkout and no ubersdr
+    # build; this rig's guest is not one.
+    noprov\ *) fatal "$GX_OUT" "ubersdr_wsprd is checked out but /usr/local/libexec/sigmond/decoders/ubersdr/.provenance is missing or names no commit (pin ${DECODER_VERDICT#noprov }). The appliance builds UberSDR's decoders by default, so the likely cause is an ubersdr-decoders build that failed or never ran: see smd doctor's native-build-failed finding, /var/lib/sigmond/native-build-failed/, and the update log under /var/log/sigmond/" ;;
     *)       fatal "$GX_OUT" "could not read _UBERSDR_COMMIT from the guest's /opt/git/sigmond/sigmond/bin/smd — rig fault, decoder pin not assessed" ;;
 esac
 
