@@ -1774,6 +1774,149 @@ WantedBy=timers.target
 NWTMREOF
 systemctl enable sigmond-netwatch.timer 2>/dev/null
 
+# ── site radio network: radiod multicast between hosts, never on the site LAN ─
+# Many sites (KPH, most homes) have an unmanaged switch and a Wi-Fi AP on the
+# station LAN.  An unmanaged switch floods multicast like broadcast, and an AP
+# repeats it to every Wi-Fi client, so tens to hundreds of Mb/s of radiod
+# streams can make a LAN unusable.  The radio network keeps that traffic off the
+# LAN: each host's vmbr9 is a private bridge for its VMs' second NIC, and the
+# hosts at one site are joined by a VXLAN tunnel, which crosses the LAN only as
+# unicast between those hosts.  Inside the tunnel IGMP snooping sends a stream
+# to another host only while a client there has joined it (KPH 2026-11-09:
+# 27 Mb/s of unrequested streams between KPH2-PM and KPH1-PM went to 0).
+# Built by hand at KFS 2026-11-04 and KPH 2026-11-07; shipped here so new sites
+# get it.  It stays inert until the site has both per-host pieces, which hold
+# per-host addresses and so are not written here:
+#   /etc/network/interfaces.d/sigmond-radionet   vmbr9, 10.98.0.<n>/24, mtu 1450
+#   /etc/sigmond/radionet.conf                   RADIONET_PEERS="<other hosts>"
+# and each decoder VM has a second NIC on vmbr9.
+cat > /usr/local/sbin/sigmond-radionet <<'RADIONETEOF'
+#!/bin/bash
+# sigmond-radionet: join this Proxmox host's radio bridge to the other
+# Sigmond hosts on the same site LAN, so every decoder VM at the site shares
+# one multicast segment (radiod status/control/data, mDNS).
+#
+# The bridge itself (vmbr9) is declared in /etc/network/interfaces.d so the
+# VMs' second NIC always has something to attach to at boot.  This script
+# adds the VXLAN tunnel to the peer hosts and keeps it right: it is run at
+# boot and every two minutes, and does nothing when all is already in place.
+# Multicast never leaves the site: the tunnel is unicast to the listed peers
+# only, and radiod sends with ttl=1.
+#
+# Config: /etc/sigmond/radionet.conf
+#   RADIONET_BRIDGE=vmbr9
+#   RADIONET_VNI=4159
+#   RADIONET_UPLINK=vmbr0          # the site-LAN bridge
+#   RADIONET_PEERS="10.2.80.20 10.2.80.11"   # the other hosts, IPv4 or IPv6
+set -u
+CONF=/etc/sigmond/radionet.conf
+[ -r "$CONF" ] || { echo "sigmond-radionet: no $CONF; nothing to do"; exit 0; }
+. "$CONF"
+BR=${RADIONET_BRIDGE:-vmbr9} VNI=${RADIONET_VNI:-4159} UP=${RADIONET_UPLINK:-vmbr0}
+VX=vxradio
+PEERS=${RADIONET_PEERS:-}
+ip link show "$BR" >/dev/null 2>&1 || { echo "sigmond-radionet: bridge $BR missing (ifup $BR)"; exit 1; }
+
+# One family for the whole tunnel: IPv6 if the peers are IPv6.  VXLAN adds
+# 50 bytes over IPv4, 70 over IPv6; the radio net's MTU is what is left.
+case "$PEERS" in *:*) MTU=1430 ;; *) MTU=1450 ;; esac
+
+if ! ip -d link show "$VX" 2>/dev/null | grep -q "vxlan id $VNI .*dev $UP"; then
+    ip link del "$VX" 2>/dev/null
+    # No 'local': the source follows the uplink's current address, so a DHCP
+    # change on this host needs no action here.
+    ip link add "$VX" mtu "$MTU" type vxlan id "$VNI" dstport 4789 dev "$UP" \
+        || { echo "sigmond-radionet: cannot create $VX"; exit 1; }
+    echo "sigmond-radionet: created $VX (VNI $VNI over $UP)"
+fi
+ip link set "$VX" mtu "$MTU" master "$BR"
+ip link set "$BR" mtu "$MTU"
+ip link set "$VX" up
+
+# Flood list = exactly the configured peers.
+have=$(bridge fdb show dev "$VX" | awk '$1=="00:00:00:00:00:00"{print $3}' | sort)
+want=$(printf '%s\n' $PEERS | sort)
+for p in $(comm -23 <(echo "$have") <(echo "$want")); do bridge fdb del 00:00:00:00:00:00 dev "$VX" dst "$p"; echo "sigmond-radionet: dropped peer $p"; done
+for p in $(comm -13 <(echo "$have") <(echo "$want")); do bridge fdb append 00:00:00:00:00:00 dev "$VX" dst "$p"; echo "sigmond-radionet: added peer $p"; done
+
+# IGMP snooping keeps each VM to the groups it joined; the bridge is the
+# querier so memberships are refreshed (without one they expire in ~260 s and
+# streams to other machines stop silently).  Lowest address wins the election.
+echo 1 > "/sys/class/net/$BR/bridge/multicast_snooping"
+echo 1 > "/sys/class/net/$BR/bridge/multicast_querier"
+# Only streams someone across the tunnel has joined may cross it.  The other
+# hosts' queriers arrive over $VX, which by default makes $VX a multicast
+# router port, and a router port is sent EVERY group: each host then copied all
+# its local radiod streams to every peer (180 Mb/s from one host, 2026-11-09).
+# So $VX is never a router port and unjoined groups are not flooded into it.
+# IGMPv3 keeps every report on 224.0.0.22 (v2 reports go to each group).
+echo 3 > "/sys/class/net/$BR/bridge/multicast_igmp_version"
+bridge link set dev "$VX" mcast_router 0 mcast_flood off
+
+# ...but mcast_flood off also stops 224.0.0.0/24 (link-local, never in the
+# mdb) from entering $VX, and two things live there: IGMPv3 reports
+# (224.0.0.22) and mDNS (224.0.0.251).  Without them a VM behind this host can
+# neither join a stream from a radiod behind another host nor resolve that
+# radiod's name -- KPH 2026-11-09: 0 packets, and `control` on KPH1 saw KPH2
+# advertised but "Failed to resolve service 'KPH2 RX-888 Mk2'" and fell back
+# to itself.  Fix: copy the link-local multicast a local VM sends straight
+# into $VX.  The other hosts' bridges learn the join on their $VX port and send
+# that one group across; when the VM leaves (or stops answering queries) it
+# stops again.  Data groups are never copied, and only what enters from local
+# VM ports is, so nothing can loop.  Bare peers without a bridge (kfs-net, the
+# Airspy) need none of this: they send straight into the tunnel.
+devs=$(bridge link show master "$BR" 2>/dev/null | awk -F': ' '{sub(/@.*/,"",$2); print $2}' | grep -vx "$VX" | sort | tr '\n' ' ')
+# Reinstalled on every run (one atomic nft transaction): a VM restart recreates
+# its tap port under the same name and the kernel drops the old hook with it.
+state=/run/sigmond-radionet.igmp-ports
+if [ -z "$devs" ]; then
+    nft delete table netdev radionet 2>/dev/null
+    rm -f "$state"
+else
+    list=$(for d in $devs; do printf '"%s", ' "$d"; done); list=${list%, }
+    if nft -f - <<EOF
+table netdev radionet
+delete table netdev radionet
+table netdev radionet {
+  chain vm_igmp {
+    type filter hook ingress devices = { $list } priority 0; policy accept;
+    ip daddr 224.0.0.0/24 counter dup to "$VX"
+  }
+}
+EOF
+    then
+        [ "$devs" = "$(cat "$state" 2>/dev/null)" ] || echo "sigmond-radionet: VM joins carried over $VX from: $devs"
+        echo "$devs" > "$state"
+    else echo "sigmond-radionet: could not install the link-local copy rule"; fi
+fi
+exit 0
+RADIONETEOF
+chmod +x /usr/local/sbin/sigmond-radionet
+
+cat > /etc/systemd/system/sigmond-radionet.service <<'RNSVCEOF'
+[Unit]
+Description=Sigmond site radio network (VXLAN to the other hosts on this LAN)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/sigmond-radionet
+RNSVCEOF
+
+cat > /etc/systemd/system/sigmond-radionet.timer <<'RNTMREOF'
+[Unit]
+Description=Keep the Sigmond site radio network in place
+
+[Timer]
+OnBootSec=30s
+OnUnitActiveSec=2min
+
+[Install]
+WantedBy=timers.target
+RNTMREOF
+systemctl enable sigmond-radionet.timer 2>/dev/null
+
 # ── networking.service must never cost us the whole machine ────────────────
 # ⛔ THE REAL LESSON OF AI6VN, 2026-10-15.  One wrong word in
 # /etc/network/interfaces (`dhcp` on a site with no DHCPv4 server) made the
