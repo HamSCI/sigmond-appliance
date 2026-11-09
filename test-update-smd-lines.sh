@@ -305,5 +305,38 @@ done
     && echo "  ok   PHASE G compares (component, kind) pairs" \
     || { echo "  FAIL PHASE G does not compare (component, kind) pairs"; fail=1; }
 
-[ "$fail" = 0 ] && echo "PASS: held_names, restore_moved, PANEL_DEFECT_RE, doctor_pairs, manifest_drift" || echo "FAILED: held_names, restore_moved, PANEL_DEFECT_RE, doctor_pairs, manifest_drift"
+# ── decoder_pin_verdict: the installed UberSDR build against the pin ──────
+eval "$(sed -n '/^# >>> decoder_pin_verdict/,/^# <<< decoder_pin_verdict/p' "$SRC")"
+if ! type decoder_pin_verdict >/dev/null 2>&1; then
+    echo "  FAIL decoder_pin_verdict not found between its markers in $SRC"; fail=1
+else
+    NEWP=8719788abb7718412a77ba85d0d4d6c717d1a58e
+    OLDP=529ec5d2530f5ffc2ad4a73a3be6c10c0a8b4027
+    dpv() {  # dpv <name> <want> <capture lines...>
+        local name="$1" want="$2"; shift 2
+        printf '%s\n' "$@" > "$T/dpv.out"
+        local got; got="$(decoder_pin_verdict "$T/dpv.out")"
+        if [ "$got" = "$want" ]; then echo "  ok   decoder_pin_verdict: $name"
+        else echo "  FAIL decoder_pin_verdict: $name: got '$got', want '$want'"; fail=1; fi
+    }
+    # The 2026-11-09 failure: pin moved, decoders left at 529ec5d.
+    dpv "the v3.86 run's state is stale" "stale ${NEWP:0:12} ${OLDP:0:12}" \
+        "PIN $NEWP" "SRC yes" \
+        "PROV ubersdr-decoders $OLDP version=sigmond-529ec5d25 march=x86-64-v3 parity=verified"
+    dpv "a rebuilt guest passes" "ok ${NEWP:0:12}" \
+        "PIN $NEWP" "SRC yes" \
+        "PROV ubersdr-decoders $NEWP version=sigmond-8719788ab march=x86-64-v3 parity=verified"
+    dpv "no provenance beside a checkout" "noprov ${NEWP:0:12}" \
+        "PIN $NEWP" "SRC yes" "PROV "
+    dpv "no checkout: nothing to assert" "nosrc" "PIN $NEWP" "SRC no" "PROV "
+    dpv "an unreadable pin is a rig fault" "nopin" "PIN " "SRC yes" "PROV x"
+    dpv "lines in any order, CRLF-free" "ok ${NEWP:0:12}" \
+        "PROV ubersdr-decoders $NEWP x" "SRC yes" "PIN $NEWP"
+fi
+[ -n "$(lnum 'decoder_pin_verdict "$GX_OUT"')" ] \
+  && [ "$(lnum 'gx_ok 3600 e3-update-apply')" -lt "$(lnum 'decoder_pin_verdict "$GX_OUT"')" ] \
+    && echo "  ok   PHASE E checks the decoder provenance after the update" \
+    || { echo "  FAIL PHASE E does not check the decoder provenance after the update"; fail=1; }
+
+[ "$fail" = 0 ] && echo "PASS: held_names, restore_moved, PANEL_DEFECT_RE, doctor_pairs, manifest_drift, decoder_pin_verdict" || echo "FAILED: held_names, restore_moved, PANEL_DEFECT_RE, doctor_pairs, manifest_drift, decoder_pin_verdict"
 exit "$fail"

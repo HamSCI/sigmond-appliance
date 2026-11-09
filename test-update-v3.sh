@@ -510,6 +510,36 @@ held_names(){
 }
 # <<< held_names
 
+# >>> decoder_pin_verdict (test-update-smd-lines.sh loads exactly this block)
+# decoder_pin_verdict <capture>: does the INSTALLED UberSDR decoder build come
+# from the commit the updated sigmond pins?  The capture holds three lines the
+# guest prints: "PIN <_UBERSDR_COMMIT read from the guest's bin/smd>",
+# "SRC yes|no" (an ubersdr_wsprd checkout exists) and "PROV <the
+# .provenance line>".  Prints one of:
+#   ok <pin12>                  the provenance names the pin
+#   stale <pin12> <found12>     it names another commit
+#   noprov <pin12>              a checkout, but no provenance at all
+#   nosrc                       no UberSDR checkout: nothing to assert
+#   nopin                       the guest's bin/smd names no pin (rig fault)
+# Why: on 2026-11-09 the v3.86 run moved the pin to 8719788 and left the
+# decoders at 529ec5d; a checkout at the right commit beside old binaries
+# would pass every git-level check above.
+decoder_pin_verdict(){
+    local pin src prov found
+    pin="$(LC_ALL=C sed -nE 's/^PIN ([0-9a-f]{7,40})[[:space:]]*$/\1/p' "$1" 2>/dev/null | head -1)"
+    src="$(LC_ALL=C sed -nE 's/^SRC (yes|no)[[:space:]]*$/\1/p' "$1" 2>/dev/null | head -1)"
+    prov="$(LC_ALL=C sed -nE 's/^PROV (.*)$/\1/p' "$1" 2>/dev/null | head -1)"
+    [ -n "$pin" ] || { echo nopin; return; }
+    [ "$src" = yes ] || { echo nosrc; return; }
+    found="$(printf '%s\n' "$prov" | LC_ALL=C grep -oE '\b[0-9a-f]{40}\b' | head -1)"
+    [ -n "$found" ] || { echo "noprov ${pin:0:12}"; return; }
+    case "$found" in
+        "$pin"*) echo "ok ${pin:0:12}" ;;
+        *)       echo "stale ${pin:0:12} ${found:0:12}" ;;
+    esac
+}
+# <<< decoder_pin_verdict
+
 # >>> restore_moved (test-update-smd-lines.sh loads exactly this block)
 # restore_moved <restore-apply-output>: the count in restore's own success
 # line, "restored to manifest <dash> N component(s) moved", or nothing.
@@ -1230,6 +1260,24 @@ ASSESSED="$(awk '$1=="BEHIND"' "$WORK/e6-behind.out" | awk 'END{print NR}')"
 [ "$ASSESSED" -ge "$MIN_ROWS" ] || fatal "$WORK/e6-behind.out" "only $ASSESSED component(s) could be assessed for upstream distance (floor $MIN_ROWS) — the level-with-upstream check measured almost nothing and would have passed regardless. Not assessed: ${NOUP:-none reported}"
 [ -z "$NOUP" ] && say "every component checkout is level with its upstream ✓ ($ASSESSED assessed)" \
                || say "every component with an upstream is level ✓ ($ASSESSED assessed; no upstream, not assessed: $NOUP)"
+
+# ── the INSTALLED UberSDR decoders come from the pin sigmond now names ──
+# The checks above read git; a checkout moved to the new pin beside the old
+# binaries passes all of them.  Read the pin from the guest's own (updated)
+# bin/smd, never from this script, so a later pin bump needs no edit here.
+gx_ok 120 e6b-decoder-pin '
+printf "PIN %s\n" "$(sed -nE "s/^_UBERSDR_COMMIT *= *.([0-9a-f]{40}).*/\1/p" /opt/git/sigmond/sigmond/bin/smd | head -1)"
+if [ -d /opt/git/sigmond/ubersdr_wsprd/.git ]; then echo "SRC yes"; else echo "SRC no"; fi
+printf "PROV %s\n" "$(head -1 /usr/local/libexec/sigmond/decoders/ubersdr/.provenance 2>/dev/null)"
+exit 0' "post-update: ubersdr decoder provenance"
+DECODER_VERDICT="$(decoder_pin_verdict "$GX_OUT")"
+case "$DECODER_VERDICT" in
+    ok\ *)   say "ubersdr decoders built from the pin sigmond names (${DECODER_VERDICT#ok }) ✓" ;;
+    nosrc)   say "no ubersdr_wsprd checkout on this guest — decoder pin not assessed" ;;
+    stale\ *) fatal "$GX_OUT" "ubersdr decoders still built from ${DECODER_VERDICT##* } after smd update --apply; sigmond pins $(echo "$DECODER_VERDICT" | cut -d' ' -f2) — the update moved (or did not move) the checkout but never rebuilt the decoders" ;;
+    noprov\ *) fatal "$GX_OUT" "ubersdr_wsprd is checked out but /usr/local/libexec/sigmond/decoders/ubersdr/.provenance is missing or names no commit (pin ${DECODER_VERDICT#noprov })" ;;
+    *)       fatal "$GX_OUT" "could not read _UBERSDR_COMMIT from the guest's /opt/git/sigmond/sigmond/bin/smd — rig fault, decoder pin not assessed" ;;
+esac
 
 # ── doctor gained no NEW (component, kind) findings ─────────────────────
 # Per component, not per kind: v3.80's bare-kind check passed superdarn-
