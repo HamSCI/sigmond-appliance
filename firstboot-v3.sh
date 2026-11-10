@@ -2350,7 +2350,66 @@ APP=/root/sigmond-appliance
 say(){ local m="[sigmond $(date '+%T')] $*"; echo "$m" >>"$LOG" 2>/dev/null
       [ -z "$_SAY_NL" ] && { _SAY_NL=1; printf '\n' >/dev/console 2>/dev/null; }
       echo "$m" >/dev/console 2>/dev/null; }
-if qm config "$VMID" 2>/dev/null | grep -q '^scsi0:'; then exit 0; fi
+# Why this machine cannot run the decoder VM, or nothing if it can.  Used
+# before the import (so a host that can never start the VM says so in seconds,
+# not after a 20 GB copy) and again if `qm start` fails.
+kvm_problem(){
+  [ -e /dev/kvm ] && return 0
+  if dmesg 2>/dev/null | grep -qiE '(VMX|SVM).*disabled by BIOS|kvm: disabled by bios'; then
+    echo "CPU virtualization (Intel VT-x / AMD SVM) is DISABLED IN THE BIOS"
+  elif ! grep -qwE 'vmx|svm' /proc/cpuinfo 2>/dev/null; then
+    echo "this CPU reports no virtualization support (VT-x/SVM off in the BIOS, or absent)"
+  else
+    echo "/dev/kvm is missing (the kvm module did not load: see 'dmesg | grep -i kvm')"
+  fi
+}
+say_kvm_fix(){
+  say "  ═══════════════════════════════════════════════════════════"
+  say "  !! THE DECODER VM CANNOT RUN ON THIS MACHINE AS CONFIGURED"
+  say "  !! $1"
+  say "  FIX: reboot into the BIOS setup (usually F1, F2 or Del at power-on),"
+  say "       turn ON 'Intel Virtualization Technology' (VT-x), or 'SVM Mode' on"
+  say "       AMD, and VT-d / IOMMU too.  Save, and boot with THIS USB STICK STILL"
+  say "       PLUGGED IN: the decoder VM import then runs again by itself."
+  say "  ═══════════════════════════════════════════════════════════"
+}
+# ⛔ CHECK KVM BEFORE ANYTHING ELSE.  A host with VT-x off in the BIOS installs
+# Proxmox perfectly, imports the 20 GB decoder disk, and then `qm start` fails
+# with "KVM virtualisation configured, but not available".  That message went
+# to the journal, the console said "import: qm start failed" and then
+# "first-boot v3 complete", and the machine looked hung forever with the VM
+# stopped (rob, i5-6500T, v3.85, 2026-11-09).  Fail here instead, before any
+# VM exists, so the reboot after the BIOS fix redoes the import cleanly.
+_KVM_WHY=$(kvm_problem)
+if [ -n "$_KVM_WHY" ]; then
+  say "import: STOPPED — $_KVM_WHY"
+  say_kvm_fix "$_KVM_WHY"
+  exit 1
+fi
+# ⛔ AND VT-d.  The same i5-6500T, once VT-x was on, had VT-d off too: no
+# DMAR ACPI table, zero IOMMU groups, and after finalize every VM start
+# failed with "cannot prepare PCI pass-through, IOMMU not present" (v3.87,
+# 2026-11-10).  Only a WARNING here, not a stop: the VM runs fine without
+# passthrough until finalize binds it, and test-nested-v3.sh runs in a nest
+# with no IOMMU by design.  But say it now, while the operator may still be
+# standing at the BIOS.  The firmware table is the truth: intel_iommu=on is
+# not on the command line yet at first boot, so iommu_groups can be empty
+# even on a machine that is fine.
+if ! ls /sys/firmware/acpi/tables/DMAR* /sys/firmware/acpi/tables/IVRS* >/dev/null 2>&1; then
+  say "  ═══════════════════════════════════════════════════════════"
+  say "  !! WARNING: the IOMMU (Intel VT-d / AMD-Vi) is DISABLED IN THE BIOS"
+  say "  !! (no DMAR/IVRS ACPI table).  The install continues, but the RX888's"
+  say "  !! USB controller cannot be passed to the decoder VM, and after the"
+  say "  !! final power-off the VM will NOT start, until it is turned on."
+  say "  FIX: in the BIOS setup turn ON 'VT-d' (Intel) or 'IOMMU' (AMD)."
+  say "  ═══════════════════════════════════════════════════════════"
+fi
+# Done means imported AND started: the success branch below leaves
+# .vm-imported.  A VM with a disk but no marker is a run that failed at
+# `qm start` or later, and must not be mistaken for a finished install, or
+# re-plugging the stick after fixing the cause would silently do nothing.
+if qm config "$VMID" 2>/dev/null | grep -q '^scsi0:' \
+   && [ -f /etc/sigmond-appliance/.vm-imported ]; then exit 0; fi
 if qm status "$VMID" >/dev/null 2>&1; then qm stop "$VMID" 2>/dev/null; sleep 2; qm destroy "$VMID" --purge 2>/dev/null; fi
 MEDIA=""
 for t in $(seq 1 12); do
@@ -2968,7 +3027,11 @@ fi
 [ -x "$APP/sigmond-rac/install-host.sh" ] && bash "$APP/sigmond-rac/install-host.sh" >>"$LOG" 2>&1 \
   && say "import: host RAC installed (inert until configured)"
 
-if qm start "$VMID"; then
+# ⛔ CAPTURE WHAT qm SAYS.  Its error used to go only to the journal, so the
+# console showed "qm start failed" with the cause thrown away.
+_STARTLOG=/tmp/sigmond-qmstart.$$.log
+if qm start "$VMID" >"$_STARTLOG" 2>&1; then
+  cat "$_STARTLOG" >>"$LOG" 2>/dev/null; rm -f "$_STARTLOG"
   # ── give the guest its fixed address ────────────────────────────────────
   #
   # There is no DHCP server on vmbr1 by design, so the VM boots with no IPv4
@@ -3089,7 +3152,17 @@ if qm start "$VMID"; then
   systemctl --no-block restart sigmond-wizard.service 2>/dev/null
   say "site wizard starting on the console"
 else
-  say "import: qm start failed"; exit 1
+  say "import: qm start FAILED — the decoder VM is imported but NOT RUNNING.  qm said:"
+  tail -8 "$_STARTLOG" 2>/dev/null | while IFS= read -r _l; do say "    $_l"; done
+  rm -f "$_STARTLOG"
+  _KVM_WHY=$(kvm_problem)
+  if [ -n "$_KVM_WHY" ]; then
+    say_kvm_fix "$_KVM_WHY"
+  else
+    say "  Fix the cause above, then re-plug this USB stick (or run"
+    say "  /usr/local/sbin/sigmond-import.sh) and the import runs again."
+  fi
+  exit 1
 fi
 IMPEOF
 chmod +x /usr/local/sbin/sigmond-import.sh
@@ -3121,9 +3194,24 @@ systemctl disable sigmond-wizard.service 2>/dev/null
 finalized(){ touch /etc/sigmond-appliance/.finalized
              systemctl disable sigmond-finalize.path 2>/dev/null; }
 
+# ⛔ NO LAYOUT IS NOT A QUIET SUCCESS.  This branch printed two log-style
+# lines and exited, so the operator -- who was told "host tuning + reboot
+# happen AFTER the wizard" -- watched the console sit there with no power-off
+# and no "install complete", and reasonably called it hung.  Worse, it means
+# NO USB passthrough: the RX888 never reaches the decoder VM and the station
+# cannot receive.  Hit on a non-SMT i5-6500T (v3.87, 2026-11-10), whose
+# layout sigmond's compute_host_cpu_layout refused.  Say all of that.
 if [ ! -f /etc/sigmond-appliance/layout.env ]; then
-  say "finalize: no CPU layout saved — leaving VM untuned (unpinned, no passthrough)."
-  say "finalize: tune later from a sigmond checkout: scripts/proxmox/bootstrap.sh"
+  _why=$(grep -E '^(ValueError|[A-Za-z]+Error):' "$LOG" 2>/dev/null | tail -1)
+  say "═════════════════════════════════════════════════════════"
+  say " !! INSTALL NOT FINISHED: no CPU layout was computed for this host."
+  [ -n "$_why" ] && say " !! $_why"
+  say " !! Host tuning was SKIPPED: no CPU pinning and NO USB passthrough,"
+  say " !! so the RX888 does NOT reach the decoder VM and the station"
+  say " !! cannot receive.  This machine will NOT power off by itself."
+  say " Fix: update sigmond, then tune from it (scripts/proxmox/bootstrap.sh)."
+  say " Details: $LOG"
+  say "═════════════════════════════════════════════════════════"
   finalized
   exit 0
 fi
@@ -3163,6 +3251,19 @@ say " Power it back on to finish the installation.  The full"
 say " power-off also resets the RX888 SDR, so on that power-on"
 say " the decoder VM can finally see it."
 say "─────────────────────────────────────────────────────────"
+# The passthrough just bound needs the IOMMU, and this power-off is the moment
+# the operator can reach the BIOS.  Same check and reasoning as the import's
+# warning; repeated here because that was ~10 minutes and a wizard ago.
+if ! ls /sys/firmware/acpi/tables/DMAR* /sys/firmware/acpi/tables/IVRS* >/dev/null 2>&1; then
+  say "═════════════════════════════════════════════════════════"
+  say " !! BUT THE IOMMU (Intel VT-d / AMD-Vi) IS DISABLED IN THE BIOS."
+  say " !! The decoder VM will NOT start after this power-off:"
+  say " !!   'cannot prepare PCI pass-through, IOMMU not present'."
+  say " When you power back on, enter the BIOS setup (F1/F2/Del) and turn"
+  say " ON 'VT-d' (Intel) or 'IOMMU' (AMD) first.  Already rebooted without"
+  say " it?  Turn it on, then:  rm /var/lib/sigmond/vm-guard-$VMID; reboot"
+  say "═════════════════════════════════════════════════════════"
+fi
 # Wait for removal before acting (up to 60 min): booting with the stick in
 # risks a BIOS USB-first loop back into the PVE installer, and acting only
 # after removal proves the operator has read the instruction.
@@ -4492,5 +4593,15 @@ say " then installs itself automatically. Leave the stick in until it says"
 say " it is finished."
 say "─────────────────────────────────────────────────────────"
 /usr/local/sbin/sigmond-import.sh
-say "first-boot v3 complete"
+_IMPORT_RC=$?
+# ⛔ NOT "complete" WHEN THE IMPORT FAILED.  This line printed unconditionally,
+# so a host whose VM never started ended its console on "first-boot v3
+# complete" and looked finished-but-hung.  test-nested-v3.sh waits for the
+# exact success string, so a failed import now fails that test too, instead
+# of passing it and timing out later.
+if [ "$_IMPORT_RC" -eq 0 ]; then
+  say "first-boot v3 complete"
+else
+  say "first-boot v3 FINISHED WITH ERRORS — the decoder VM is NOT running (see the messages above)"
+fi
 exit 0
