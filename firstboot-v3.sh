@@ -3176,9 +3176,24 @@ systemctl disable sigmond-wizard.service 2>/dev/null
 finalized(){ touch /etc/sigmond-appliance/.finalized
              systemctl disable sigmond-finalize.path 2>/dev/null; }
 
+# ⛔ NO LAYOUT IS NOT A QUIET SUCCESS.  This branch printed two log-style
+# lines and exited, so the operator -- who was told "host tuning + reboot
+# happen AFTER the wizard" -- watched the console sit there with no power-off
+# and no "install complete", and reasonably called it hung.  Worse, it means
+# NO USB passthrough: the RX888 never reaches the decoder VM and the station
+# cannot receive.  Hit on a non-SMT i5-6500T (v3.87, 2026-11-10), whose
+# layout sigmond's compute_host_cpu_layout refused.  Say all of that.
 if [ ! -f /etc/sigmond-appliance/layout.env ]; then
-  say "finalize: no CPU layout saved — leaving VM untuned (unpinned, no passthrough)."
-  say "finalize: tune later from a sigmond checkout: scripts/proxmox/bootstrap.sh"
+  _why=$(grep -E '^(ValueError|[A-Za-z]+Error):' "$LOG" 2>/dev/null | tail -1)
+  say "═════════════════════════════════════════════════════════"
+  say " !! INSTALL NOT FINISHED: no CPU layout was computed for this host."
+  [ -n "$_why" ] && say " !! $_why"
+  say " !! Host tuning was SKIPPED: no CPU pinning and NO USB passthrough,"
+  say " !! so the RX888 does NOT reach the decoder VM and the station"
+  say " !! cannot receive.  This machine will NOT power off by itself."
+  say " Fix: update sigmond, then tune from it (scripts/proxmox/bootstrap.sh)."
+  say " Details: $LOG"
+  say "═════════════════════════════════════════════════════════"
   finalized
   exit 0
 fi
