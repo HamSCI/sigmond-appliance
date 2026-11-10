@@ -2386,6 +2386,24 @@ if [ -n "$_KVM_WHY" ]; then
   say_kvm_fix "$_KVM_WHY"
   exit 1
 fi
+# ⛔ AND VT-d.  The same i5-6500T, once VT-x was on, had VT-d off too: no
+# DMAR ACPI table, zero IOMMU groups, and after finalize every VM start
+# failed with "cannot prepare PCI pass-through, IOMMU not present" (v3.87,
+# 2026-11-10).  Only a WARNING here, not a stop: the VM runs fine without
+# passthrough until finalize binds it, and test-nested-v3.sh runs in a nest
+# with no IOMMU by design.  But say it now, while the operator may still be
+# standing at the BIOS.  The firmware table is the truth: intel_iommu=on is
+# not on the command line yet at first boot, so iommu_groups can be empty
+# even on a machine that is fine.
+if ! ls /sys/firmware/acpi/tables/DMAR* /sys/firmware/acpi/tables/IVRS* >/dev/null 2>&1; then
+  say "  ═══════════════════════════════════════════════════════════"
+  say "  !! WARNING: the IOMMU (Intel VT-d / AMD-Vi) is DISABLED IN THE BIOS"
+  say "  !! (no DMAR/IVRS ACPI table).  The install continues, but the RX888's"
+  say "  !! USB controller cannot be passed to the decoder VM, and after the"
+  say "  !! final power-off the VM will NOT start, until it is turned on."
+  say "  FIX: in the BIOS setup turn ON 'VT-d' (Intel) or 'IOMMU' (AMD)."
+  say "  ═══════════════════════════════════════════════════════════"
+fi
 # Done means imported AND started: the success branch below leaves
 # .vm-imported.  A VM with a disk but no marker is a run that failed at
 # `qm start` or later, and must not be mistaken for a finished install, or
@@ -3233,6 +3251,19 @@ say " Power it back on to finish the installation.  The full"
 say " power-off also resets the RX888 SDR, so on that power-on"
 say " the decoder VM can finally see it."
 say "─────────────────────────────────────────────────────────"
+# The passthrough just bound needs the IOMMU, and this power-off is the moment
+# the operator can reach the BIOS.  Same check and reasoning as the import's
+# warning; repeated here because that was ~10 minutes and a wizard ago.
+if ! ls /sys/firmware/acpi/tables/DMAR* /sys/firmware/acpi/tables/IVRS* >/dev/null 2>&1; then
+  say "═════════════════════════════════════════════════════════"
+  say " !! BUT THE IOMMU (Intel VT-d / AMD-Vi) IS DISABLED IN THE BIOS."
+  say " !! The decoder VM will NOT start after this power-off:"
+  say " !!   'cannot prepare PCI pass-through, IOMMU not present'."
+  say " When you power back on, enter the BIOS setup (F1/F2/Del) and turn"
+  say " ON 'VT-d' (Intel) or 'IOMMU' (AMD) first.  Already rebooted without"
+  say " it?  Turn it on, then:  rm /var/lib/sigmond/vm-guard-$VMID; reboot"
+  say "═════════════════════════════════════════════════════════"
+fi
 # Wait for removal before acting (up to 60 min): booting with the stick in
 # risks a BIOS USB-first loop back into the PVE installer, and acting only
 # after removal proves the operator has read the instruction.
