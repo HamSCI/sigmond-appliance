@@ -218,6 +218,40 @@ FALLBACK_NET='192\.168\.100\.'
 reload_net(){
     if command -v ifreload >/dev/null 2>&1; then ifreload -a 2>/dev/null
     else ifdown vmbr0 2>/dev/null; ifup vmbr0 2>/dev/null; fi
+    v4_route_heal
+}
+
+# ⛔ A LEASE IS NOT A ROUTE.  i5-6500T on v3.88, 2026-11-10 22:46: netfix's
+# retry dhclient bound 10.22.23.78 (router 10.22.23.1), netfix converted the
+# vmbr0 stanza static -> dhcp and ran ifreload.  ifreload tore down the static
+# config (its `gateway 192.168.100.1` with it) and restarted the bridge's
+# dhclient, which logged "timeout failed to detect new ip addresses" because
+# the address was already there -- and NOTHING put a default route back.  The
+# host kept 10.22.23.78, answered on the LAN, could reach no further than its
+# own subnet: apt "Network is unreachable", and the site wizard aborted with
+# "no Internet connection".  Renewals never repair it: dhclient-script only
+# adds routes when the address or the router list CHANGES.
+# So after every reload: vmbr0 is DHCP, holds a real IPv4 address, and there is
+# no IPv4 default route -> take the router from vmbr0's own lease and install it.
+# No address = nothing to route (IPv6-only site, or the lease is still coming,
+# in which case dhclient's own BOUND adds the route), so no wait is spent.
+v4_route_heal(){
+    grep -q '^iface vmbr0 inet dhcp' "$IFACES" 2>/dev/null || return 0
+    ip -4 -o addr show vmbr0 2>/dev/null | grep -v "$FALLBACK_NET" | grep -q ' inet ' || return 0
+    local i _gw _lf
+    for i in 1 2 3; do
+        ip -4 route show default 2>/dev/null | grep -q . && return 0
+        sleep 1
+    done
+    for _lf in /var/lib/dhcp/dhclient.vmbr0.leases /var/lib/dhcp/dhclient.leases; do
+        _gw=$(awk '/interface "vmbr0"/{v=1} /option routers/{if(v)r=$3} /^}/{v=0} END{gsub(/[;,].*/,"",r); print r}' "$_lf" 2>/dev/null)
+        [ -n "$_gw" ] && break
+    done
+    if [ -n "$_gw" ] && ip -4 route replace default via "$_gw" dev vmbr0 2>/dev/null; then
+        say "  vmbr0 had a lease but NO IPv4 DEFAULT ROUTE after the reload — installed via $_gw (the lease's router)"
+    else
+        say "  ⚠ vmbr0 has an IPv4 address but NO DEFAULT ROUTE, and its lease names no router"
+    fi
 }
 
 # ── put back vmbr0, and ONLY vmbr0, from a backup ──────────────────────────
@@ -711,6 +745,7 @@ case "$IP" in
         for i in $(seq 1 12); do NEW="$(_v4_lease)"; [ -n "$NEW" ] && break; sleep 5; done
         if [ -n "${NEW:-}" ]; then
             say "vmbr0 now takes DHCP; lease $NEW"
+            v4_route_heal
             H=$(hostname)
             grep -qE "^[0-9.]+[[:space:]].*\b$H\b" /etc/hosts 2>/dev/null && \
                 sed -i -E "s/^[0-9.]+([[:space:]].*\b$H\b)/$NEW\1/" /etc/hosts
@@ -921,6 +956,13 @@ if [ -z "$LIVE" ]; then
             sed -i -e '/^iface vmbr0 inet static/,/^[[:space:]]*$/{/^[[:space:]]*address[[:space:]]/d;/^[[:space:]]*gateway[[:space:]]/d;}' \
                    -e 's/^iface vmbr0 inet static/iface vmbr0 inet dhcp/' "$IFACES"
             say "  vmbr0 converted to DHCP so the default route follows the lease"
+            # The retry above left its dhclient running (default pidfile).
+            # ifreload starts the bridge's own; two clients on one interface
+            # renew the same lease twice and leave the stray one unaccounted
+            # for (v3.88, 2026-11-10: pid 1218 still running 20 min later).
+            # Stop ours first; reload_net re-leases and checks the route.
+            [ -s /run/dhclient.pid ] && kill "$(cat /run/dhclient.pid)" 2>/dev/null
+            rm -f /run/dhclient.pid
             reload_net
         fi
         rm -f /etc/sigmond-appliance/.network-unreachable 2>/dev/null
@@ -1092,6 +1134,7 @@ case "${IP:-}" in
     *)
         rm -f /etc/sigmond-appliance/.network-unreachable 2>/dev/null
         say "vmbr0 is now on $WINNER with $IP"
+        v4_route_heal
         # PVE resolves its own node name through /etc/hosts; keep it on the
         # live lease or pvecm/pveproxy misbehave.
         H=$(hostname)
@@ -2395,7 +2438,7 @@ fi
 # standing at the BIOS.  The firmware table is the truth: intel_iommu=on is
 # not on the command line yet at first boot, so iommu_groups can be empty
 # even on a machine that is fine.
-if ! ls /sys/firmware/acpi/tables/DMAR* /sys/firmware/acpi/tables/IVRS* >/dev/null 2>&1; then
+if [ ! -e /sys/firmware/acpi/tables/DMAR ] && [ ! -e /sys/firmware/acpi/tables/IVRS ]; then
   say "  ═══════════════════════════════════════════════════════════"
   say "  !! WARNING: the IOMMU (Intel VT-d / AMD-Vi) is DISABLED IN THE BIOS"
   say "  !! (no DMAR/IVRS ACPI table).  The install continues, but the RX888's"
@@ -3254,7 +3297,7 @@ say "─────────────────────────
 # The passthrough just bound needs the IOMMU, and this power-off is the moment
 # the operator can reach the BIOS.  Same check and reasoning as the import's
 # warning; repeated here because that was ~10 minutes and a wizard ago.
-if ! ls /sys/firmware/acpi/tables/DMAR* /sys/firmware/acpi/tables/IVRS* >/dev/null 2>&1; then
+if [ ! -e /sys/firmware/acpi/tables/DMAR ] && [ ! -e /sys/firmware/acpi/tables/IVRS ]; then
   say "═════════════════════════════════════════════════════════"
   say " !! BUT THE IOMMU (Intel VT-d / AMD-Vi) IS DISABLED IN THE BIOS."
   say " !! The decoder VM will NOT start after this power-off:"
