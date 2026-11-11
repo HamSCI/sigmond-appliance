@@ -77,4 +77,9 @@ sed "/^nameserver ${_st_gw//./\\.}\$/d" "$TMP/resolv" > "$TMP/resolv.new" && mv 
 grep -qx 'nameserver 10.22.23.1' "$TMP/resolv" && bad "the dead resolver stays" "" || ok "the dead LAN's resolver line is removed"
 grep -qx 'nameserver 10.22.23.10' "$TMP/resolv" && ok "a different resolver (10.22.23.10) is kept" || bad "dots were not escaped" "10.22.23.10 removed too"
 
+echo "── the retry branch: an IPv6 address is not a DHCPv4 lease ───────"
+grep -qE '""\|192\.168\.100\.\*\|\*:\*\) _got="" ;;' "$TMP/code" \
+    && ok "an IPv6 address falls through to the IPv6 branch" \
+    || bad "the retry branch accepts an IPv6 address as a lease" "it writes inet dhcp on an IPv6-only site (v3.90, 2026-11-11)"
+
 echo; echo "$pass passed, $fail failed"; [ "$fail" -eq 0 ]

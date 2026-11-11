@@ -996,8 +996,14 @@ if [ -z "$LIVE" ]; then
     # good RA went unanswered.  Measured in the nested v6-only test,
     # 2026-09-28: "vmbr0 now has 192.168.100.2 — nothing further to do".
     _got="$(cur_ip vmbr0)"
+    # ⛔ AND AN IPv6 ADDRESS IS NOT A LEASE.  cur_ip() reports the global v6
+    # address when vmbr0 has no IPv4.  The question here is whether DHCPv4
+    # answered, so a v6 address must fall through to the IPv6 branch below.
+    # v3.90 on the IPv6-only lab VLAN (both hosts, 2026-11-11): "vmbr0 now has
+    # fd4f:...", then "converted to DHCP" -- `iface vmbr0 inet dhcp` on a
+    # network with no DHCPv4 server, so every boot waits out dhclient.
     case "$_got" in
-        ""|192.168.100.*) _got="" ;;
+        ""|192.168.100.*|*:*) _got="" ;;
     esac
     if [ -n "$_got" ]; then
         say "vmbr0 now has $_got"
@@ -3438,13 +3444,24 @@ if qm start "$VMID" >"$_STARTLOG" 2>&1; then
   # and kept its real route only because ens18 happened to sort first.
   # Driver=virtio_net is the one NIC Proxmox gives the VM, whatever udev
   # names it (ens18, enp6s18, eth0).
+  #
+  # ⛔ AND THEN NOT EVEN THE DRIVER: net0's OWN MAC.  A site radio network
+  # (sigmond-radionet) gives the VM a SECOND virtio NIC on vmbr9, and
+  # Driver=virtio_net caught that one too: in the IPv6-only radionet test
+  # (6500 + Beelink, 2026-11-11) both VMs put 10.99.0.2/30 on ens18 AND
+  # ens19.  The host knows net0's MAC; match exactly that.  The driver match
+  # stays only as the fallback when qm config cannot be read.
+  _net0_mac=$(qm config "$VMID" 2>/dev/null \
+      | sed -n 's/^net0: [a-z0-9]*=\([0-9A-Fa-f:]\{17\}\),.*/\1/p' | tr 'A-F' 'a-f')
+  if [ -n "$_net0_mac" ]; then _mgmt_match="MACAddress=$_net0_mac"
+  else _mgmt_match="Driver=virtio_net"; say "import: net0's MAC unreadable — matching the mgmt NIC by driver"; fi
   _mgmt_conf=$(printf '%s\n' \
     '# The decoder VM has ONE link: a host-only /30 to the Proxmox host,' \
     '# which routes and NATs for it.  Written by the appliance importer.' \
     '# Do not add a site-LAN NIC here -- the address must not depend on a' \
     '# network we do not control (see firstboot-v3.sh).' \
     '[Match]' \
-    'Driver=virtio_net' \
+    "$_mgmt_match" \
     '' \
     '[Network]' \
     "Address=${MGMT_VM}/30" \
