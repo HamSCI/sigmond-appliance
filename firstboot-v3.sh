@@ -750,6 +750,64 @@ case "$IP" in
             grep -qE "^[0-9.]+[[:space:]].*\b$H\b" /etc/hosts 2>/dev/null && \
                 sed -i -E "s/^[0-9.]+([[:space:]].*\b$H\b)/$NEW\1/" /etc/hosts
         else
+            # ⛔ A STATIC ADDRESS IS ONLY WORTH RESTORING IF ITS GATEWAY ANSWERS.
+            # "Never trade a working address for none" assumed the static one
+            # works.  i5-6500T on v3.90, 2026-11-11: the stanza held
+            # 10.22.23.78 gw 10.22.23.1 from rob's HamLAN, but the box was
+            # cabled to the IPv6-only lab VLAN (no DHCPv4, RA + NAT64 + DNS64).
+            # netfix waited 60 s for a lease, restored the dead address, and
+            # exited.  First boot then called the site "ipv4-only",
+            # sigmond-v6-gateway said "vmbr0 has IPv4 — nothing to do", vmbr0
+            # never took the RA (accept_ra 1 on a forwarding bridge), and the
+            # wizard stopped on "cannot resolve github.com" with its resolver
+            # pointed at 10.22.23.1.  So: put the address back just long enough
+            # to ask its gateway; if nobody answers AND the bridge has a live
+            # IPv6 uplink, this is an IPv6-only site.  Take the v6 path instead.
+            # A real static-IPv4 site (no DHCP, gateway answers) keeps its
+            # address exactly as before.
+            _st_addr=$(awk '/^iface vmbr0 inet static/{f=1;next} f&&/^[^ \t]/{f=0} f&&$1=="address"{print $2;exit}' "$IFACES.netfix-static-bak" 2>/dev/null)
+            _st_gw=$(awk '/^iface vmbr0 inet static/{f=1;next} f&&/^[^ \t]/{f=0} f&&$1=="gateway"{print $2;exit}' "$IFACES.netfix-static-bak" 2>/dev/null)
+            _gw_alive=yes
+            if [ -n "$_st_addr" ] && [ -n "$_st_gw" ]; then
+                _gw_alive=no
+                ip addr add "$_st_addr" dev vmbr0 2>/dev/null && _st_added=1 || _st_added=0
+                ping -c2 -W1 -I vmbr0 "$_st_gw" >/dev/null 2>&1 && _gw_alive=yes
+                [ "$_st_added" = 1 ] && ip addr del "$_st_addr" dev vmbr0 2>/dev/null
+            fi
+            if [ "$_gw_alive" = no ]; then
+                say "no lease after 60s, and the static gateway $_st_gw does not answer — looking for IPv6 on vmbr0"
+                # A Proxmox host forwards, and Linux ignores RAs on a forwarding
+                # interface unless accept_ra is 2.
+                sysctl -qw net.ipv6.conf.vmbr0.accept_ra=2 2>/dev/null
+                sysctl -qw net.ipv6.conf.vmbr0.accept_ra_defrtr=1 2>/dev/null
+                sysctl -qw net.ipv6.conf.vmbr0.disable_ipv6=0 2>/dev/null
+                for _r in $(seq 1 "${SIGMOND_RA_WAIT:-12}"); do
+                    v6_uplink_on vmbr0 && break
+                    sleep 2
+                done
+            fi
+            if [ "$_gw_alive" = no ] && v6_uplink_on vmbr0; then
+                _got6=$(ip -6 -o addr show vmbr0 scope global 2>/dev/null \
+                        | grep -v -e tentative -e deprecated | awk '{print $4; exit}')
+                say "vmbr0 is IPv6-only at $_got6 — not restoring $IP (its gateway $_st_gw is not on this network)"
+                # No IPv4 stanza left to wait on at the next boot: the bridge
+                # stays up with no v4 method, and v6 comes from the RA.
+                sed -i 's/^iface vmbr0 inet dhcp/iface vmbr0 inet manual/' "$IFACES"
+                if ! grep -q '^iface vmbr0 inet6' "$IFACES" 2>/dev/null; then
+                    printf 'iface vmbr0 inet6 auto\n\tpost-up sysctl -qw net.ipv6.conf.vmbr0.accept_ra=2 || true\n\tpost-up sysctl -qw net.ipv6.conf.all.forwarding=1 || true\n' \
+                        >> "$IFACES"
+                fi
+                # The conversion's dhclient would sit on vmbr0 forever; no
+                # IPv4 is wanted here, so its STOP flush costs nothing.
+                dhclient -x -pf /run/dhclient.vmbr0.pid vmbr0 >/dev/null 2>&1
+                ip -4 addr flush dev vmbr0 scope global 2>/dev/null
+                ip -4 route del default dev vmbr0 2>/dev/null
+                # The installer wrote the dead LAN's resolver too; the RA's
+                # RDNSS (rdnssd) supplies the live one.
+                sed -i "/^nameserver ${_st_gw//./\\.}\$/d" /etc/resolv.conf 2>/dev/null
+                rm -f /etc/sigmond-appliance/.network-unreachable 2>/dev/null
+                exit 0
+            fi
             # Never trade a working address for none.
             say "WARNING: no lease after 60s — restoring the static config ($IP)"
             # ⛔ vmbr0's stanza ONLY, never the whole backup.  The backup was
