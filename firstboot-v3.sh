@@ -2013,6 +2013,146 @@ radionet_nic_fixes() { # <qemu-server dir> <bridge> <bridge mtu>
 }
 # ---- end radionet functions ----
 
+# ---- setup and status: what an operator runs (docs/radionet.md in sigmond) ----
+# `sigmond-radionet setup --index N --peer <host> [--peer ...] [--vmid 100]`
+# does everything one station needs, host and VM, and the timer then keeps
+# it.  Before this, every piece was done by hand (KFS, KPH, and the IPv6 lab
+# on 2026-11-11), and each hand step was a place to go wrong.
+radionet_usage() {
+    echo "usage: sigmond-radionet setup --index N --peer <other host> [--peer ...] [--vmid ID]"
+    echo "       sigmond-radionet status [--vmid ID]"
+    echo "       sigmond-radionet            (keep the tunnel right; the timer runs this)"
+}
+
+radionet_vm() { # <vmid> <timeout> <smd args...> -- run smd in the VM, print its output
+    local vmid=$1 to=$2; shift 2
+    qm guest exec "$vmid" --timeout "$to" -- env SIGMOND_ALLOW_SUDO=1 smd "$@" 2>&1 \
+        | python3 -c '
+import json, sys
+raw = sys.stdin.read()
+try:
+    d = json.loads(raw)
+except ValueError:
+    print(raw.strip()); sys.exit(1)
+out = (d.get("out-data") or "") + (d.get("err-data") or "")
+print(out.rstrip())
+sys.exit(d.get("exitcode", 1) if d.get("exited") else 1)'
+}
+
+radionet_setup() {
+    local idx="" peers="" vmid="${SIGMOND_VMID:-100}" fam mtu f p net1 mac
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --index) idx=${2:-}; shift 2 ;;
+            --peer)  peers="$peers ${2:-}"; shift 2 ;;
+            --vmid)  vmid=${2:-}; shift 2 ;;
+            *) radionet_usage; return 2 ;;
+        esac
+    done
+    case "$idx" in ''|*[!0-9]*) radionet_usage; return 2 ;; esac
+    [ "$idx" -ge 1 ] && [ "$idx" -le 99 ] || { echo "sigmond-radionet: --index must be 1-99"; return 2; }
+    [ -n "${peers# }" ] || { echo "sigmond-radionet: name at least one --peer"; return 2; }
+    # One family for the whole tunnel (see the MTU note above).
+    fam=""
+    for p in $peers; do
+        case "$p" in *:*) f=inet6 ;; *) f=inet ;; esac
+        [ -z "$fam" ] || [ "$fam" = "$f" ] || { echo "sigmond-radionet: peers mix IPv4 and IPv6; use one family"; return 2; }
+        fam=$f
+    done
+    [ "$fam" = inet6 ] && mtu=1430 || mtu=1450
+
+    # The bridge: declared for the next boot, created now with ip.
+    # ⛔ NOT ifup.  On a v3.85 host `ifup vmbr9` re-processed vmbr0 and
+    # dropped its SLAAC address, and the host went off the network
+    # (IPv6 lab, 2026-11-11).
+    cat > /etc/network/interfaces.d/sigmond-radionet <<STANZA
+# Sigmond site radio network: every decoder VM's second NIC.  No uplink and no
+# NAT; sigmond-radionet joins it to the other hosts at this site over VXLAN.
+# Written by \`sigmond-radionet setup --index $idx\`.
+auto vmbr9
+iface vmbr9 inet static
+    address 10.98.0.$idx/24
+    bridge-ports none
+    bridge-stp off
+    bridge-fd 0
+    mtu $mtu
+STANZA
+    ip link show vmbr9 >/dev/null 2>&1 || ip link add vmbr9 type bridge
+    ip link set vmbr9 mtu "$mtu"
+    ip addr replace "10.98.0.$idx/24" dev vmbr9
+    ip link set vmbr9 up
+    echo "sigmond-radionet: vmbr9 is 10.98.0.$idx/24, MTU $mtu"
+
+    mkdir -p /etc/sigmond
+    cat > "$CONF" <<RNCONF
+# Written by \`sigmond-radionet setup\`.
+RADIONET_BRIDGE=vmbr9
+RADIONET_VNI=4159
+RADIONET_UPLINK=vmbr0
+RADIONET_PEERS="${peers# }"
+RNCONF
+    echo "sigmond-radionet: peers:${peers}"
+
+    # The VM's radio NIC.
+    net1=$(qm config "$vmid" 2>/dev/null | sed -n 's/^net1: //p')
+    if [ -z "$net1" ]; then
+        qm set "$vmid" --net1 virtio,bridge=vmbr9,mtu=1 >/dev/null \
+            || { echo "sigmond-radionet: could not add net1 to VM $vmid"; return 1; }
+        net1=$(qm config "$vmid" | sed -n 's/^net1: //p')
+        echo "sigmond-radionet: VM $vmid has a radio NIC now (net1 on vmbr9)"
+    fi
+    case "$net1" in
+        *bridge=vmbr9*) ;;
+        *) echo "sigmond-radionet: VM $vmid's net1 is not on vmbr9 ($net1); refusing to change it"; return 1 ;;
+    esac
+    mac=$(printf '%s\n' "$net1" | sed -n 's/^[a-z0-9]*=\([0-9A-Fa-f:]\{17\}\),.*/\1/p' | tr 'A-F' 'a-f')
+    [ -n "$mac" ] || { echo "sigmond-radionet: cannot read net1's MAC ($net1)"; return 1; }
+
+    # The tunnel, now and every two minutes from here on.
+    "$0" || return 1
+    systemctl enable --now sigmond-radionet.timer >/dev/null 2>&1
+
+    # The VM's half: its radio NIC, radiod's ttl and iface, and a restart.
+    echo "sigmond-radionet: configuring VM $vmid (smd radionet apply; it restarts the station)"
+    radionet_vm "$vmid" 900 radionet apply --address "10.98.0.$((100 + idx))/24" --mac "$mac" --mtu "$mtu"
+    case $? in
+        0) ;;
+        3) echo "sigmond-radionet: the VM is configured, but its station restart could not be started:"
+           echo "  run \`smd restart\` in the VM." ;;
+        *) echo "sigmond-radionet: the VM half did not complete.  If the VM's sigmond predates"
+           echo "  \`smd radionet\`, update it (smd update) and run this again; the host half is done."
+           return 1 ;;
+    esac
+    echo "sigmond-radionet: station $idx is on the site radio network; its VM is restarting the"
+    echo "  station now (a few minutes): \`smd status\` in the VM, or \`sigmond-radionet status\` here."
+}
+
+radionet_status() {
+    local vmid="${SIGMOND_VMID:-100}"
+    [ "${1:-}" = --vmid ] && vmid=${2:-$vmid}
+    if [ ! -r "$CONF" ]; then echo "radio network: not set up (sigmond-radionet setup)"; return 0; fi
+    . "$CONF"
+    echo "host:"
+    echo "  vmbr9:   $(ip -br addr show vmbr9 2>/dev/null | awk '{print $3, "MTU"}') $(cat /sys/class/net/vmbr9/mtu 2>/dev/null)"
+    echo "  tunnel:  $(ip -d -j link show "$VX" 2>/dev/null | python3 -c 'import json,sys
+try: l=json.load(sys.stdin)[0]; print(l.get("ifalias") or "sigmond-radionet inet", "VNI", l["linkinfo"]["info_data"].get("id"), l.get("operstate"))
+except Exception: print("MISSING")')"
+    echo "  peers:   $(bridge fdb show dev "$VX" 2>/dev/null | awk '$1=="00:00:00:00:00:00"{printf "%s ", $3}')(configured: ${RADIONET_PEERS:-})"
+    echo "  dropped from non-peers: $(nft list table $NFT_TABLE 2>/dev/null | sed -n 's/.*counter packets \([0-9]*\).* drop.*/\1/p' | head -1) packets"
+    echo "  rx/tx:   $(( $(cat /sys/class/net/$VX/statistics/rx_bytes 2>/dev/null || echo 0) / 1048576 )) / $(( $(cat /sys/class/net/$VX/statistics/tx_bytes 2>/dev/null || echo 0) / 1048576 )) MiB since the tunnel came up"
+    echo "  VM $vmid: $(qm config "$vmid" 2>/dev/null | sed -n 's/^net1: /net1 /p')"
+    echo "VM:"
+    radionet_vm "$vmid" 60 radionet status | sed 's/^/  /'
+}
+
+case "${1:-}" in
+    setup)  shift; radionet_setup "$@"; exit $? ;;
+    status) shift; radionet_status "$@"; exit $? ;;
+    -h|--help|help) radionet_usage; exit 0 ;;
+    "") ;;
+    *) radionet_usage; exit 2 ;;
+esac
+
 # Not configured: stay silent, but take down anything an earlier
 # configuration left, so no tunnel listens without its peer filter.
 if [ ! -r "$CONF" ]; then

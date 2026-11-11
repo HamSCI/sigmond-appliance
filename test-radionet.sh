@@ -181,5 +181,26 @@ chk "e1000 warned"                     "$(echo "$out" | grep -c 'VM 104 net1 .*c
 out=$(run c4)
 chk "logged once, not every run"       "$(echo "$out" | grep -c 'VM 10')" 0
 
+echo "setup and status (operator verbs)"
+sed -e "s|^CONF=.*|CONF=$WORK/none.conf|" "$S" > "$WORK/rn-verbs"
+v(){ bash "$WORK/rn-verbs" "$@" 2>&1; echo "rc=$?"; }
+chk "--help exits 0"                   "$(v --help | tail -1)" "rc=0"
+chk "setup with no args: usage, 2"     "$(v setup | tail -1)" "rc=2"
+chk "setup --index 0 refused"          "$(v setup --index 0 --peer 10.0.0.2 | tail -1)" "rc=2"
+chk "setup --index 100 refused"        "$(v setup --index 100 --peer 10.0.0.2 | grep -c '1-99')" 1
+chk "setup with no peer refused"       "$(v setup --index 3 | grep -c 'at least one --peer')" 1
+chk "mixed peer families refused"      "$(v setup --index 3 --peer 10.0.0.2 --peer fd00::2 | grep -c 'mix IPv4 and IPv6')" 1
+chk "unknown verb: usage, 2"           "$(v frobnicate | tail -1)" "rc=2"
+chk "status with no config"            "$(v status | head -1)" "radio network: not set up (sigmond-radionet setup)"
+code=$(grep -vE '^[[:space:]]*#' "$S")
+setup_fn=$(printf '%s\n' "$code" | awk '/^radionet_setup\(\) \{/{f=1} f{print} f&&/^\}/{exit}')
+chk "setup never runs ifup"            "$(printf '%s\n' "$setup_fn" | grep -c 'ifup')" 0
+chk "setup function found"             "$(printf '%s\n' "$setup_fn" | grep -c '^radionet_setup() {')" 1
+chk "setup makes vmbr9 with ip"        "$(printf '%s\n' "$code" | grep -c 'ip link add vmbr9 type bridge')" 1
+chk "VM address is 100 + index"        "$(printf '%s\n' "$code" | grep -c '10.98.0.$((100 + idx))/24')" 1
+chk "VM half is smd radionet apply"    "$(printf '%s\n' "$code" | grep -c 'radionet_vm "$vmid" 900 radionet apply')" 1
+chk "net1 MAC read for the VM half"    "$(printf '%s\n' "$code" | grep -c 'mac=$(printf')" 1
+chk "the timer is enabled by setup"    "$(printf '%s\n' "$code" | grep -c 'systemctl enable --now sigmond-radionet.timer')" 1
+
 echo; echo "passed $PASS, failed $FAIL"
 [ "$FAIL" -eq 0 ]
