@@ -7,6 +7,11 @@
 
 Day-2 operation, troubleshooting beyond §11, remote access and what-not-to-touch live in the [Operator guide](https://github.com/HamSCI/sigmond/blob/main/docs/operator/README.md).
 
+Sigmond installs two ways.  This guide covers the first: a USB image that turns
+a dedicated computer into a Proxmox host, with the station in a virtual machine
+on it.  To install on a Linux machine you already run, with no Proxmox, follow
+[Installing a station on your own Linux machine](https://github.com/HamSCI/sigmond/blob/main/docs/install-bare-metal.md) instead.
+
 This walks you through turning a small computer into a complete
 HamSCI/WsprDaemon receiving station. **No Linux experience needed.** You
 answer a handful of questions with a keyboard, plug and unplug one USB
@@ -67,7 +72,23 @@ fleet admin. Any other name is an ordinary station and nothing here applies.
 
 ## 2. Get the image
 
-Ask your fleet admin for the current release — or download links for it:
+**Easiest, on Linux or a Mac:** `sigmond-flash-latest.sh` does this section and
+the next in one step.  It downloads the newest published image, checks it
+against its checksum, finds the USB stick by itself, writes it and reads it
+back to compare every byte.  Plug in the stick, then run:
+
+```
+curl -fsSLO https://raw.githubusercontent.com/HamSCI/sigmond-appliance/main/sigmond-flash-latest.sh
+bash sigmond-flash-latest.sh
+```
+
+It asks for your password (writing a whole stick needs root) and for a `y`
+before it erases the stick.  When it prints `VERIFIED`, go on to §5; if this
+stick replaces an existing station, read §4 first.
+`bash sigmond-flash-latest.sh --list` shows what is published and writes
+nothing.
+
+**By hand:** ask your fleet admin for the current release — or download links for it:
 
 - `sigmond-appliance-v3.88-20261110-release.img`  (about 5.7 GB)
 - `sigmond-appliance-v3.88-20261110-release.sha256`  (its checksum)
@@ -86,9 +107,12 @@ sha256sum -c sigmond-appliance-v3.88-20261110-release.sha256
 
 ## 3. Write the image to the USB stick
 
-**Best:** the flasher from this repo. It finds the stick by its removable and
-USB attributes instead of a letter you type, refuses the disk your computer
-runs from, and reads the stick back to compare every byte:
+If you used `sigmond-flash-latest.sh` in §2, the stick is already written.
+
+**With an image you downloaded yourself:** the flasher from this repo. It finds
+the stick by its removable and USB attributes instead of a letter you type,
+refuses the disk your computer runs from, and reads the stick back to compare
+every byte:
 
 ```
 ./flash-usb.sh sigmond-appliance-v3.88-20261110-release.img

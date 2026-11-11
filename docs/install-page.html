@@ -93,6 +93,12 @@ ol li, ul li{margin:.25rem 0;}
 </header>
 
 <div class="col">
+<div class="note">
+  <p>Sigmond installs two ways. This page covers the USB image, which turns a dedicated
+  computer into a Proxmox host with the station in a virtual machine on it. To install on
+  a Linux machine you already run, with no Proxmox, follow
+  <a href="https://github.com/HamSCI/sigmond/blob/main/docs/install-bare-metal.md">Installing a station on your own Linux machine</a> instead.</p>
+</div>
 <div class="note warn">
   <p><b>This erases the computer's internal disk.</b> Everything on it goes, with no
   further warning once you boot from the stick. Use a machine you intend to dedicate to
@@ -158,14 +164,21 @@ Wi-Fi network you join during setup. Sites with only IPv6 work too.</li>
 <h2>2 &middot; Get the image and write the stick</h2>
 <div class="step">
   <span class="num">step 1</span>
-  <p>Your fleet admin sends you two files, or download links for them: the image,
+  <p><b>Easiest, on Linux or a Mac:</b> one script downloads the newest image, checks it
+  against its checksum, finds the USB stick by itself, writes it and reads it back to check
+  every byte. Plug in the stick, then run:</p>
+  <pre>curl -fsSLO https://raw.githubusercontent.com/HamSCI/sigmond-appliance/main/sigmond-flash-latest.sh
+bash sigmond-flash-latest.sh</pre>
+  <p>It asks for your password and for a <span class="mono">y</span> before it erases the
+  stick. When it prints <span class="mono">VERIFIED</span>, go on to section 3.</p>
+  <p><b>By hand:</b> your fleet admin sends you two files, or download links for them: the image,
   <span class="mono">sigmond-appliance-v3.88-20261110-release.img</span> (about 5.7 GB), and its
   checksum, <span class="mono">…release.sha256</span>. A later release carries its own version and
   date in the name; use the names you were given. Keep both in one folder and check the
   image:</p>
   <pre>sha256sum -c sigmond-appliance-v3.88-20261110-release.sha256</pre>
   <p>The image is <b>not compressed</b>: there is nothing to unzip.</p>
-  <p>With the project's tools, this is the safe way to write it. It finds the stick by
+  <p>With an image you downloaded yourself, this is the safe way to write it. It finds the stick by
   looking for something removable, <em>refuses</em> the disk your own computer runs from,
   and reads the stick back afterwards to check every byte:</p>
   <pre>./flash-usb.sh sigmond-appliance-v3.88-20261110-release.img</pre>
