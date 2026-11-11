@@ -414,11 +414,6 @@ if git -C "$REPO" show "origin/main:sigmond-flash-latest.sh" > "$INSTR_DIR/sigmo
 else
     FLASHER_NOTE="NOTE: no sigmond-flash-latest.sh on origin/main -- the flasher in the download folders was not refreshed"
 fi
-# Its Windows twin rides along under its own fixed name.  No parse check here:
-# the rig has no PowerShell.
-FLASHER_PS1=""
-git -C "$REPO" show "origin/main:sigmond-flash-latest.ps1" > "$INSTR_DIR/sigmond-flash-latest.ps1" 2>/dev/null \
-    && FLASHER_PS1="$INSTR_DIR/sigmond-flash-latest.ps1"
 
 if [ $_have_inst -eq 0 ]; then
     G7_BAD+=("INSTALL.md is not readable at origin/main")
@@ -478,7 +473,6 @@ if [ $APPLY -eq 0 ]; then
     say "  $(basename "$SHAFILE")"
     say "DRY RUN -- would also publish $(basename "$INSTR_MD") and $(basename "$INSTR_HTML") beside the image at every publish target (from origin/main)"
     if [ -n "$FLASHER" ]; then say "DRY RUN -- and sigmond-flash-latest.sh (from origin/main), under its fixed name"; else say "DRY RUN -- ${FLASHER_NOTE:-no flasher}"; fi
-    [ -n "$FLASHER_PS1" ] && say "DRY RUN -- and sigmond-flash-latest.ps1 (from origin/main), under its fixed name"
     say "Re-run with --apply to publish. Creating a public Release is outward-facing and requires explicit human authorization."
     exit 0
 fi
@@ -946,15 +940,6 @@ if [ $RC -eq 0 ]; then
                         _allok=0
                         say "  [$_lab] WARNING: could not publish sigmond-flash-latest.sh to $_d"
                         say "  [$_lab]   by hand: git show origin/main:sigmond-flash-latest.sh > sigmond-flash-latest.sh; rclone copyto sigmond-flash-latest.sh '$_d/sigmond-flash-latest.sh'"
-                    fi
-                fi
-                if [ -n "$FLASHER_PS1" ]; then
-                    if pub_put "$_d" "" "$FLASHER_PS1" 2>/dev/null; then
-                        say "  [$_lab] flasher: sigmond-flash-latest.ps1"
-                    else
-                        _allok=0
-                        say "  [$_lab] WARNING: could not publish sigmond-flash-latest.ps1 to $_d"
-                        say "  [$_lab]   by hand: git show origin/main:sigmond-flash-latest.ps1 > sigmond-flash-latest.ps1; rclone copyto sigmond-flash-latest.ps1 '$_d/sigmond-flash-latest.ps1'"
                     fi
                 fi
                 # Prune what this bless supersedes, only AFTER the promote
