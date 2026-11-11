@@ -3084,15 +3084,24 @@ if qm start "$VMID" >"$_STARTLOG" 2>&1; then
   # out, because the channel that delivers it is not the network it
   # configures.
   #
-  # Sorts before the template's 99-dhcp-*.network, so it wins the match.  The
-  # VM has exactly one NIC now, so `en*` is unambiguous.
+  # Sorts before the template's 99-dhcp-*.network, so it wins the match.
+  #
+  # ⛔ MATCH THE virtio NIC, NOT `en*`.  `en*` was "unambiguous" only until
+  # something else showed up: the RX888's USB controller is passed through to
+  # this VM, so anything plugged into the station's USB ports lands HERE.  On
+  # the i5-6500T (v3.88, 2026-11-11) three USB Ethernet adapters on a hub each
+  # took 10.99.0.2/30, and one installed a second `default via 10.99.0.1` out
+  # a site-LAN port.  The VM answered for its management address on the LAN
+  # and kept its real route only because ens18 happened to sort first.
+  # Driver=virtio_net is the one NIC Proxmox gives the VM, whatever udev
+  # names it (ens18, enp6s18, eth0).
   _mgmt_conf=$(printf '%s\n' \
     '# The decoder VM has ONE link: a host-only /30 to the Proxmox host,' \
     '# which routes and NATs for it.  Written by the appliance importer.' \
     '# Do not add a site-LAN NIC here -- the address must not depend on a' \
     '# network we do not control (see firstboot-v3.sh).' \
     '[Match]' \
-    'Name=en*' \
+    'Driver=virtio_net' \
     '' \
     '[Network]' \
     "Address=${MGMT_VM}/30" \
