@@ -24,18 +24,26 @@
 #   SIGMOND_IMAGE_DIR     where images are kept   (default ~/sigmond-images)
 #   SIGMOND_IMAGE_FOLDER  Drive folder id          (default: the HamSCI release folder)
 #   FORCE=1               skip the "erase it? [y/N]" confirmation
-#   ALLOW_FIXED=1         allow a non-removable target (never needed for a stick)
+#   ALLOW_FIXED=1         with --device only: accept a USB whole disk that does
+#                         not report itself removable (never needed for a stick)
+#   SIGMOND_FLASH_MAX_GB  size cap for the automatic pick, in GiB (default 1024)
+#
+# Exit status: 0 written and verified (or --list/--download-only/DRY_RUN done),
+# 2 no USB stick plugged in (nothing to write to; not a failure), 1 any failure.
 #   SIGMOND_NO_UPDATE=1   do not replace this script with a newer published one
 #
-# The stick is found by attribute (USB transport AND removable), never by a
-# letter, and a disk carrying the running system or an in-service mount is
-# refused.  On macOS the same attributes come from `diskutil info`: an
-# external USB hard disk reports "Removable Media: Fixed" and is never picked.  These are the rules of flash-usb.sh in the appliance repo, which
-# writes an image you already have; this script adds the fetch.
+# The stick is found by attribute (whole disk AND USB transport AND removable
+# AND under the size cap), never by a letter, and a disk carrying the running
+# system or an in-service mount is refused.  A named --device must pass the
+# same attribute checks (all but the cap).  On macOS the same attributes come
+# from `diskutil info`: an external USB hard disk reports "Removable Media:
+# Fixed" and is never picked.  The rules follow flash-usb.sh and rig-flash.sh
+# in the appliance repo, which write an image you already have; this script
+# adds the fetch.
 set -uo pipefail
 
 # Bump on every published change: the self-update below compares this.
-FLASH_VERSION=2026.11.03.2
+FLASH_VERSION=2026.11.11.1
 
 FOLDER_ID="${SIGMOND_IMAGE_FOLDER:-1Eym7xsP_qVvbGOVmlXER73K3jx6J7dQs}"
 IMG_DIR="${SIGMOND_IMAGE_DIR:-$HOME/sigmond-images}"
@@ -47,13 +55,20 @@ say(){ printf '%s  %s\n' "$(ts)" "$*"; }
 die(){ printf '%s  ABORT: %s\n' "$(ts)" "$*" >&2; exit 1; }
 
 WANT_VER="" WANT_DEV="" LIST_ONLY=0 DL_ONLY=0
+# argval <option> <rest of argv...> -- the option's value, or die.  A missing
+# value used to leave `shift 2` failing on the last argument, so the loop
+# never advanced and the script hung.
+argval(){
+    case "${2:-}" in ""|-*) die "$1 needs a value (try --help)" ;; esac
+    printf '%s' "$2"
+}
 while [ $# -gt 0 ]; do
     case "$1" in
-        --version)       WANT_VER="${2:-}"; shift 2 ;;
-        --device)        WANT_DEV="${2:-}"; shift 2 ;;
+        --version)       WANT_VER=$(argval "$@") || exit 1; shift 2 ;;
+        --device)        WANT_DEV=$(argval "$@") || exit 1; shift 2 ;;
         --list)          LIST_ONLY=1; shift ;;
         --download-only) DL_ONLY=1; shift ;;
-        -h|--help)       sed -n '2,30p' "$0"; exit 0 ;;
+        -h|--help)       sed -n '2,42p' "$0"; exit 0 ;;
         *)               die "unknown argument: $1 (try --help)" ;;
     esac
 done
@@ -107,28 +122,18 @@ prune_old_images(){
     return 0
 }
 
-# The write needs root.  When sudo would ask for a password, offer once to let
-# this account use sudo without one (a drop-in under /etc/sudoers.d, checked
-# with visudo before it is installed).  The default is no: sudo then just asks.
-offer_nopasswd_sudo(){
-    sudo -n true 2>/dev/null && return 0
-    [ -t 0 ] && [ "${FORCE:-0}" != 1 ] || return 0
-    local u f tmp grp ans
-    u=$(id -un); f="/etc/sudoers.d/90-nopasswd-${u//[^A-Za-z0-9_-]/_}"
-    say "sudo will ask for your password for the write (and again for the read-back"
-    say "  if it takes longer than sudo remembers it)."
-    printf '%s  let %s use sudo without a password from now on? This writes %s [y/N] ' "$(ts)" "$u" "$f"
-    read -r ans
-    case "$ans" in y|Y|yes|Yes|YES) ;; *) say "ok — sudo will ask"; return 0 ;; esac
-    tmp=$(mktemp) || die "cannot make a temp file"
-    printf '%s ALL=(ALL) NOPASSWD: ALL\n' "$u" > "$tmp"
-    [ "$OS" = Darwin ] && grp=wheel || grp=root
-    if sudo visudo -cqf "$tmp" && sudo install -m 0440 -o root -g "$grp" "$tmp" "$f" && sudo -n true 2>/dev/null; then
-        say "done: $u now uses sudo without a password (undo: sudo rm $f)"
-    else
-        say "could not set that up; sudo will ask for your password"
-    fi
-    rm -f "$tmp"
+# The write needs root.  Plain sudo, which asks for a password if it needs
+# one; this script never changes the machine's sudo policy.
+need_sudo(){
+    say "the write needs root: sudo may ask for your password"
+    sudo -v || die "sudo is needed to write the stick"
+}
+MAX_GB="${SIGMOND_FLASH_MAX_GB:-1024}"
+case "$MAX_GB" in ''|*[!0-9]*) die "SIGMOND_FLASH_MAX_GB must be a whole number of GiB" ;; esac
+MAX_BYTES=$(( MAX_GB * 1073741824 ))
+no_stick(){
+    say "NO USB STICK FOUND — nothing written.  $*"
+    exit 2      # distinct from a failure, as in rig-flash.sh: nothing to write to
 }
 
 # ── 1. what is published ────────────────────────────────────────────────────
@@ -259,7 +264,11 @@ flash_macos(){
     need $DISK_TOOLS
     if [ -n "$WANT_DEV" ]; then
         DISK="/dev/${WANT_DEV#/dev/}"; DISK="${DISK/rdisk/disk}"
+        diskutil info "$DISK" >/dev/null 2>&1 || die "$DISK is not a disk (see: diskutil list external)"
         [ "$(dinfo "$DISK" WholeDisk)" = true ] || die "$DISK is not a whole disk (name the disk, e.g. /dev/disk5, not a partition)"
+        [ "$(dinfo "$DISK" VirtualOrPhysical)" = Virtual ] && die "$DISK is a virtual disk (an APFS container or disk image), not a stick; refusing"
+        [ "$(dinfo "$DISK" Internal)" = false ] || die "$DISK is not an external disk; refusing"
+        [ "$(dinfo "$DISK" BusProtocol)" = USB ] || die "$DISK is not on USB (bus: $(dinfo "$DISK" BusProtocol)); refusing"
         if [ "$(dinfo "$DISK" RemovableMedia)" != true ]; then
             [ "${ALLOW_FIXED:-0}" = 1 ] || die "$DISK is not removable (a fixed disk, not a stick); refusing"
             say "ALLOW_FIXED=1 — proceeding against a FIXED disk"
@@ -267,17 +276,20 @@ flash_macos(){
     else
         DISK=""; N=0
         for d in $(diskutil list external physical | sed -nE 's#^(/dev/disk[0-9]+) .*#\1#p'); do
-            [ "$(dinfo "$d" BusProtocol)" = USB ] && [ "$(dinfo "$d" RemovableMedia)" = true ] \
-                && [ "$(dinfo "$d" Internal)" = false ] || continue
+            [ "$(dinfo "$d" WholeDisk)" = true ] && [ "$(dinfo "$d" BusProtocol)" = USB ] \
+                && [ "$(dinfo "$d" RemovableMedia)" = true ] && [ "$(dinfo "$d" Internal)" = false ] || continue
+            sz=$(dinfo "$d" TotalSize)
+            [ "${sz:-0}" -gt 0 ] && [ "$sz" -lt "$MAX_BYTES" ] \
+                || { say "skipping $d: $(( ${sz:-0} / 1000000000 )) GB is over the ${MAX_GB} GiB cap for a stick"; continue; }
             DISK="$d"; N=$((N+1))
             say "found USB stick: $d  $(( $(dinfo "$d" TotalSize) / 1000000000 )) GB  $(dinfo "$d" MediaName)"
         done
         # loginwindow ejects removable disks attached while the screen is
         # locked (seen 2026-11-03): the stick is on the bus with no disk.
-        [ "$N" -eq 0 ] && say "no stick found. If one IS plugged in: macOS ejects a stick attached while the screen is locked — unplug it and plug it in again with the Mac unlocked."
+        [ "$N" -eq 0 ] && no_stick "If one IS plugged in: macOS ejects a stick attached while the screen is locked — unplug it and plug it in again with the Mac unlocked."
         [ "$N" -eq 1 ] || die "expected exactly one USB stick plugged in, found $N — plug in one, or name it: --device /dev/diskN (see: diskutil list external)"
     fi
-    [ "$(dinfo "$DISK" Internal)" = true ] && [ "${ALLOW_FIXED:-0}" != 1 ] && die "$DISK is an internal disk; refusing"
+    [ "$(dinfo "$DISK" Internal)" = true ] && die "$DISK is an internal disk; refusing"
 
     # Never the disk macOS runs from: its APFS container's physical store.
     BOOT=$(dinfo / ParentWholeDisk)
@@ -306,7 +318,7 @@ flash_macos(){
         [ -t 0 ] || die "no terminal to confirm on — run the downloaded script directly (bash sigmond-flash-latest.sh), or set FORCE=1"
         confirm_erase
     fi
-    offer_nopasswd_sudo
+    need_sudo
 
     diskutil unmountDisk "$DISK" >/dev/null || die "cannot unmount $DISK (close any Finder windows on it)"
     # The raw node (/dev/rdiskN) skips the buffer cache: several times faster.
@@ -331,28 +343,55 @@ if [ "$OS" = Darwin ]; then
 else
     need $DISK_TOOLS
     # ── 3. the stick, found by attribute and never by letter ───────────────────
-    if [ -n "$WANT_DEV" ]; then
-        [ -b "$WANT_DEV" ] || die "$WANT_DEV is not a block device"
-        DISK="$WANT_DEV"
-        rm_=$(lsblk -dno RM "$DISK" | tr -d ' ')
-        if [ "$rm_" != "1" ]; then
-            [ "${ALLOW_FIXED:-0}" = 1 ] || die "$DISK is not removable (a fixed disk, not a stick); refusing"
-            say "ALLOW_FIXED=1 — proceeding against a FIXED disk"
+    # lsq <dev> <column> — one lsblk column for the device itself (not its
+    # partitions), trimmed.
+    lsq(){ lsblk -dnbo "$2" "$1" 2>/dev/null | head -1 | tr -d ' '; }
+    # stick_refusal <dev> — why <dev> may not be written, or nothing if it may.
+    # A whole disk, on USB, flagged removable; ALLOW_FIXED=1 lifts only the
+    # removable flag, and only for a named --device.
+    stick_refusal(){
+        local t
+        t=$(lsq "$1" TYPE)
+        [ -n "$t" ] || { echo "$1 is not a block device"; return; }
+        [ "$t" = disk ] || { echo "$1 is a $t, not a whole disk (name the disk, e.g. /dev/sdb, not /dev/sdb1)"; return; }
+        t=$(lsq "$1" TRAN)
+        [ "$t" = usb ] || { echo "$1 is not on USB (transport: ${t:-none}); refusing"; return; }
+        if [ "$(lsq "$1" RM)" != 1 ]; then
+            [ "${2:-}" = named ] && [ "${ALLOW_FIXED:-0}" = 1 ] && return
+            echo "$1 is not removable (a fixed disk, not a stick); refusing"
         fi
+    }
+    if [ -n "$WANT_DEV" ]; then
+        # The canonical name (a /dev/disk/by-id link becomes /dev/sdX), so the
+        # running-system comparison below sees the same string lsblk prints.
+        DISK=$(lsblk -dnpo NAME "$WANT_DEV" 2>/dev/null | head -1 | tr -d ' ')
+        [ -n "$DISK" ] || die "$WANT_DEV is not a block device"
+        why=$(stick_refusal "$DISK" named)
+        [ -z "$why" ] || die "$why"
+        [ "$(lsq "$DISK" RM)" = 1 ] || say "ALLOW_FIXED=1 — proceeding against a USB disk that is not flagged removable"
     else
         DISK=""; N=0
-        while read -r name size tran rm_ type; do
-            [ "$type" = disk ] && [ "$tran" = usb ] && [ "$rm_" = 1 ] || continue
-            DISK="/dev/$name"; N=$((N+1))
-            say "found USB stick: /dev/$name  $size"
-        done < <(lsblk -dno NAME,SIZE,TRAN,RM,TYPE)
+        for d in $(lsblk -dnpo NAME 2>/dev/null); do
+            [ -z "$(stick_refusal "$d")" ] || continue
+            sz=$(lsq "$d" SIZE)
+            [ "${sz:-0}" -gt 0 ] && [ "$sz" -lt "$MAX_BYTES" ] \
+                || { say "skipping $d: $(( ${sz:-0} / 1000000000 )) GB is over the ${MAX_GB} GiB cap for a stick"; continue; }
+            DISK="$d"; N=$((N+1))
+            say "found USB stick: $d  $((sz/1000000000)) GB"
+        done
+        [ "$N" -eq 0 ] && no_stick "Plug one in and run this again."
         [ "$N" -eq 1 ] || die "expected exactly one USB stick plugged in, found $N — plug in one, or name it: --device /dev/sdX"
     fi
 
-    for m in / /boot /boot/efi; do
-        src=$(findmnt -no SOURCE "$m" 2>/dev/null) || continue
-        pk=$(lsblk -no PKNAME "$src" 2>/dev/null | head -1)
-        [ -n "$pk" ] && [ "/dev/$pk" = "$DISK" ] && die "$DISK CARRIES THE RUNNING SYSTEM — refusing"
+    # Never the disk the system runs from.  Walk each system mount up to its
+    # whole disk(s) with lsblk -s, so a root on LVM, LUKS or md is caught too
+    # (its own PKNAME is a dm or md device, not the disk).
+    for m in / /boot /boot/efi /usr /var /home; do
+        src=$(findmnt -nvo SOURCE "$m" 2>/dev/null) || continue
+        [ -n "$src" ] || continue
+        for top in $(lsblk -nsrpo NAME,TYPE "$src" 2>/dev/null | awk '$2=="disk"{print $1}'); do
+            [ "$top" = "$DISK" ] && die "$DISK CARRIES THE RUNNING SYSTEM ($m) — refusing"
+        done
     done
     BUSY=""
     while read -r part mp; do
@@ -362,8 +401,8 @@ else
     done < <(lsblk -nro NAME,MOUNTPOINT "$DISK" 2>/dev/null | tail -n +2)
     [ -z "$BUSY" ] || die "$DISK has partitions mounted in service:$BUSY — refusing"
 
-    offer_nopasswd_sudo
-    DBYTES=$(sudo blockdev --getsize64 "$DISK") || die "cannot read the size of $DISK (needs sudo)"
+    DBYTES=$(lsq "$DISK" SIZE)
+    [ "${DBYTES:-0}" -gt 0 ] || die "cannot read the size of $DISK"
     [ "$BYTES" -le "$DBYTES" ] || die "the image ($((BYTES/1048576)) MiB) does not fit on $DISK ($((DBYTES/1048576)) MiB)"
     MODEL=$(lsblk -dno VENDOR,MODEL "$DISK" 2>/dev/null | tr -s ' ' | sed 's/^ //;s/ $//')
 
@@ -379,6 +418,7 @@ else
         [ -t 0 ] || die "no terminal to confirm on — run the downloaded script directly (bash sigmond-flash-latest.sh), or set FORCE=1"
         confirm_erase
     fi
+    need_sudo
 
     # ── 4. write ────────────────────────────────────────────────────────────────
     for p in $(lsblk -nro NAME "$DISK" | tail -n +2); do
