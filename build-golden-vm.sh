@@ -235,12 +235,30 @@ $SSH "for d in /opt/git/sigmond/*/; do printf '%s %s\n' \"\$(basename \$d)\" \"\
 # we are still inside the build VM and the network is up, and refuse to bless
 # a template that is behind.
 say "checking every component against its remote's latest commit"
+# safe.directory: the native sources (onion, wsjtx, ubersdr_wsprd, ft8_lib) are
+# root-owned, and git refused them to this user, so they used to read NOGIT.
+# A detached checkout (ka9q-radio and the natives build at a commit) is
+# compared with its remote's default branch: under SIGMOND_TRACK_MAIN=1 it
+# must sit at that tip like everything else.
 $SSH 'for d in /opt/git/sigmond/*/; do
         n=$(basename "$d")
-        loc=$(git -C "$d" rev-parse HEAD 2>/dev/null) || { printf "%s - - NOGIT\n" "$n"; continue; }
-        br=$(git -C "$d" symbolic-ref --short HEAD 2>/dev/null)
-        if [ -z "$br" ]; then printf "%s %.7s - DETACHED\n" "$n" "$loc"; continue; fi
-        rem=$(git -C "$d" ls-remote origin "refs/heads/$br" 2>/dev/null | awk "{print \$1; exit}")
+        g="git -c safe.directory=* -C $d"
+        loc=$($g rev-parse HEAD 2>/dev/null) || { printf "%s - - NOGIT\n" "$n"; continue; }
+        # Pinned on purpose (sigmond provenance.PINNED_ON_PURPOSE): fallback
+        # decoders held at one commit; an image never moves them.
+        case "$n" in wsjtx|ft8_lib) printf "%s %.7s - PINNED\n" "$n" "$loc"; continue ;; esac
+        # ka9q-radio has one owner, ka9q-python: it must sit at ka9q-python
+        # main'"'"'s compat commit, which is how radiod'"'"'s newest main reaches an image.
+        if [ "$n" = ka9q-radio ]; then
+            rem=$(cat /opt/git/sigmond/ka9q-python/ka9q_radio_compat 2>/dev/null | tr -d "[:space:]")
+            if [ -z "$rem" ]; then printf "%s %.7s - UNREACHABLE\n" "$n" "$loc"
+            elif [ "$loc" = "$rem" ]; then printf "%s %.7s %.7s CURRENT\n" "$n" "$loc" "$rem"
+            else printf "%s %.7s %.7s BEHIND\n" "$n" "$loc" "$rem"; fi
+            continue
+        fi
+        br=$($g symbolic-ref --short HEAD 2>/dev/null)
+        if [ -z "$br" ]; then ref=HEAD; else ref="refs/heads/$br"; fi
+        rem=$($g ls-remote origin "$ref" 2>/dev/null | awk "{print \$1; exit}")
         if [ -z "$rem" ]; then printf "%s %.7s - UNREACHABLE\n" "$n" "$loc"; continue; fi
         if [ "$loc" = "$rem" ]; then printf "%s %.7s %.7s CURRENT\n" "$n" "$loc" "$rem"
         else printf "%s %.7s %.7s BEHIND\n" "$n" "$loc" "$rem"; fi

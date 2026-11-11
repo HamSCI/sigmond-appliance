@@ -146,7 +146,15 @@ if [ -n "${MISSING// }" ]; then
 fi
 echo "### topology covers the dasi2 profile ✓"
 echo "### smd install  (self-elevates; compiles ka9q-radio — long) ..."
-smd install --yes
+# SIGMOND_TRACK_MAIN=1: onion and ubersdr_wsprd, pinned in code in bin/smd,
+# build from their remote's newest main commit too, and land in
+# /etc/sigmond/component-pins.toml, which the image ships.  ka9q-radio builds
+# at ka9q-python main's compat commit (its one owner), so radiod's newest main
+# arrives when ka9q-python's main moves to it.  wsjtx and ft8_lib are
+# fallback decoders, pinned on purpose.  rob, 2026-11-11: each image is the newest main of every
+# repo, tested by the ladder, and stations stay pinned to that set.
+echo "### SIGMOND_TRACK_MAIN=1: every component at its newest main commit"
+SIGMOND_TRACK_MAIN=1 smd install --yes
 RC=$?
 echo "### smd install exit=$RC"
 # The client installers run as root and leave egg-info / build products
