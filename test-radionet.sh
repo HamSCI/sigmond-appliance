@@ -127,6 +127,17 @@ chk "pinned local rebuilt"             "$(j vxlan '"id":4159,"port":4789,"link":
 chk "not a vxlan rebuilt"              "$(j dummy '"id":4159' | vx)" rebuild
 chk "no such link rebuilt"             "$(printf '' | vx)" rebuild
 
+echo "the tunnel's family matches the peers'"
+ja(){ printf '[{"ifname":"vxradio","ifalias":"%s","linkinfo":{"info_kind":"vxlan","info_data":{"id":4159,"port":4789,"link":"vmbr0"}}}]' "$1"; }
+vx6(){ fn radionet_vx_ok 4159 4789 vmbr0 inet6 && echo ok || echo rebuild; }
+chk "IPv6 tunnel kept for IPv6 peers"  "$(ja 'sigmond-radionet inet6' | vx6)" ok
+chk "old alias-less tunnel rebuilt for IPv6 peers" "$(j vxlan '"id":4159,"port":4789,"link":"vmbr0"' | vx6)" rebuild
+chk "IPv4 tunnel rebuilt for IPv6 peers" "$(ja 'sigmond-radionet inet' | vx6)" rebuild
+chk "IPv6 tunnel rebuilt for IPv4 peers" "$(ja 'sigmond-radionet inet6' | vx)" rebuild
+chk "alias-less IPv4 tunnel kept (KFS, KPH)" "$(j vxlan '"id":4159,"port":4789,"link":"vmbr0"' | vx)" ok
+chk "IPv6 peers: tunnel made with local ::" "$(grep -c '_fam_arg="local ::"' "$S")" 1
+chk "family written to the alias"      "$(grep -c 'ip link set "\$VX" alias "sigmond-radionet \$FAM"' "$S")" 1
+
 echo "end to end with stubs (configured)"
 sed -e "s|^CONF=.*|CONF=$WORK/radionet.conf|" -e "s|/sys/class/net/|$WORK/sys/|g" \
     -e "s|^nicstate=.*|nicstate=$WORK/nicstate|" -e "s|^state=/run/.*|state=$WORK/igmpstate|" "$S" > "$WORK/rn-conf"

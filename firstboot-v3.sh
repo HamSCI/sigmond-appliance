@@ -1951,17 +1951,27 @@ radionet_nft_rules() { # <port> <peer>...
 # Is the existing tunnel the one we would build?  Reads `ip -d -j link show`
 # JSON on stdin and compares fields, not text, so a different iproute2
 # wording does not make every run tear it down and rebuild it.
-radionet_vx_ok() { # <vni> <port> <uplink>
+# The tunnel's address family is not in that JSON: a tunnel made with
+# `local ::` reports no local at all, exactly like an IPv4 one.  So the family
+# is written into the link's alias when it is made, and checked here.  A
+# tunnel with no alias is an IPv4 one from before this check (KFS, KPH), and
+# is kept when IPv4 is what is wanted.
+radionet_vx_ok() { # <vni> <port> <uplink> [inet|inet6]
     python3 -c '
 import json, sys
 vni, port, dev = int(sys.argv[1]), int(sys.argv[2]), sys.argv[3]
+fam = sys.argv[4] if len(sys.argv) > 4 else "inet"
 try:
-    li = json.load(sys.stdin)[0]["linkinfo"]
+    link = json.load(sys.stdin)[0]
+    li = link["linkinfo"]
     i = li["info_data"]
+    alias = link.get("ifalias", "")
+    fam_ok = (alias == "sigmond-radionet " + fam
+              or (fam == "inet" and alias == ""))
     ok = (li["info_kind"] == "vxlan" and i.get("id") == vni
           and i.get("port") == port and i.get("link") == dev
           and i.get("local", "0.0.0.0") == "0.0.0.0"
-          and i.get("local6", "::") == "::")
+          and i.get("local6", "::") == "::" and fam_ok)
 except Exception:
     ok = False
 sys.exit(0 if ok else 1)' "$@"
@@ -2019,7 +2029,7 @@ ip link show "$BR" >/dev/null 2>&1 || { echo "sigmond-radionet: bridge $BR missi
 
 # One family for the whole tunnel: IPv6 if the peers are IPv6.  VXLAN adds
 # 50 bytes over IPv4, 70 over IPv6; the radio net's MTU is what is left.
-case "$PEERS" in *:*) MTU=1430 ;; *) MTU=1450 ;; esac
+case "$PEERS" in *:*) MTU=1430 FAM=inet6 ;; *) MTU=1450 FAM=inet ;; esac
 
 # The peer filter first, and fail closed: no filter, no tunnel.
 # shellcheck disable=SC2086  # PEERS is a word list
@@ -2029,13 +2039,20 @@ if ! radionet_nft_rules "$VXPORT" $PEERS | nft -f -; then
     exit 1
 fi
 
-if ! ip -d -j link show "$VX" 2>/dev/null | radionet_vx_ok "$VNI" "$VXPORT" "$UP"; then
+if ! ip -d -j link show "$VX" 2>/dev/null | radionet_vx_ok "$VNI" "$VXPORT" "$UP" "$FAM"; then
     ip link del "$VX" 2>/dev/null
-    # No 'local': the source follows the uplink's current address, so a DHCP
-    # change on this host needs no action here.
-    ip link add "$VX" mtu "$MTU" type vxlan id "$VNI" dstport "$VXPORT" dev "$UP" \
+    # No fixed 'local': the source follows the uplink's current address, so a
+    # DHCP or SLAAC change on this host needs no action here.
+    # ⛔ BUT AN IPv6 TUNNEL NEEDS `local ::`.  With no local at all the kernel
+    # makes an IPv4 tunnel, and every IPv6 peer is then refused ("Address
+    # family not supported by protocol"): the IPv6-only lab, 2026-11-11, got a
+    # tunnel with no peers at all.  `local ::` is "IPv6, any source".
+    _fam_arg=""; [ "$FAM" = inet6 ] && _fam_arg="local ::"
+    # shellcheck disable=SC2086  # _fam_arg is two words or none
+    ip link add "$VX" mtu "$MTU" type vxlan id "$VNI" dstport "$VXPORT" dev "$UP" $_fam_arg \
         || { echo "sigmond-radionet: cannot create $VX"; exit 1; }
-    echo "sigmond-radionet: created $VX (VNI $VNI over $UP)"
+    ip link set "$VX" alias "sigmond-radionet $FAM"
+    echo "sigmond-radionet: created $VX (VNI $VNI over $UP, $FAM)"
 fi
 ip link set "$VX" mtu "$MTU" master "$BR"
 ip link set "$BR" mtu "$MTU"
