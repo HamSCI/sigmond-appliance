@@ -9,9 +9,13 @@ safety rules are the bash script's:
   * the newest version with both an .img and its .sha256 is chosen;
   * the download resumes if interrupted and is checked against the .sha256
     (a copy already downloaded and verified is reused);
-  * the stick is found by attribute: USB bus AND Windows' "Removable Media".
-    An external USB hard disk reports "External hard disk media" and is never
-    picked; the boot and system disks are always refused;
+  * the stick is found by attribute: a whole disk on the USB bus AND
+    Windows' "Removable Media" AND under the size cap (1024 GiB).  An
+    external USB hard disk reports "External hard disk media" and is never
+    picked; a disk named with -Disk must pass the same checks (all but the
+    cap); the boot and system disks are always refused;
+  * no stick plugged in exits 2 (nothing to write to; not a failure);
+  * nothing on this machine changes but the stick: no policy, no settings;
   * you answer y to confirm; the whole image is read back.
 
 Run from a PowerShell opened with "Run as administrator" (writing a whole
@@ -25,9 +29,10 @@ disk needs it):
   ... -DryRun            every check, no write
 
 Environment: SIGMOND_IMAGE_DIR (default %USERPROFILE%\sigmond-images),
-SIGMOND_IMAGE_FOLDER (Drive folder id), ALLOW_FIXED=1 (allow a disk that is
-not "Removable Media"; only with -Disk).  Works in Windows PowerShell 5.1 and
-PowerShell 7.
+SIGMOND_IMAGE_FOLDER (Drive folder id), SIGMOND_FLASH_MAX_GB (size cap for
+the automatic pick, GiB, default 1024), ALLOW_FIXED=1 (allow a USB disk that
+is not "Removable Media"; only with -Disk; never lifts the USB check).
+Works in Windows PowerShell 5.1 and PowerShell 7.
 #>
 [CmdletBinding()]
 param(
@@ -137,16 +142,28 @@ function IsRemovable([int]$num) {
     $dd = Get-CimInstance Win32_DiskDrive | Where-Object { $_.Index -eq $num }
     return ($dd -and $dd.MediaType -eq 'Removable Media')
 }
+# Get-Disk lists whole disks only, so a partition can never be chosen here.
+$MaxGB = if ($env:SIGMOND_FLASH_MAX_GB) { $env:SIGMOND_FLASH_MAX_GB } else { '1024' }
+if ($MaxGB -notmatch '^[0-9]+$') { Die 'SIGMOND_FLASH_MAX_GB must be a whole number of GiB' }
+$MaxBytes = [long]$MaxGB * 1GB
 if ($Disk -ge 0) {
     $D = Get-Disk -Number $Disk -ErrorAction SilentlyContinue
     if (-not $D) { Die "no disk number $Disk (see Get-Disk)" }
+    if ($D.BusType -ne 'USB') { Die "disk $Disk is not on USB (bus: $($D.BusType)); refusing" }
     if (-not (IsRemovable $Disk)) {
         if ($env:ALLOW_FIXED -ne '1') { Die "disk $Disk is not removable (a fixed disk, not a stick); refusing" }
         Say 'ALLOW_FIXED=1 - proceeding against a FIXED disk'
     }
 } else {
-    $Cands = @(Get-Disk | Where-Object { $_.BusType -eq 'USB' -and (IsRemovable $_.Number) })
+    $Cands = @(Get-Disk | Where-Object { $_.BusType -eq 'USB' -and (IsRemovable $_.Number) } | Where-Object {
+        if ($_.Size -gt 0 -and $_.Size -lt $MaxBytes) { $true }
+        else { Say "skipping disk $($_.Number): $([math]::Round($_.Size/1e9)) GB is over the $MaxGB GiB cap for a stick"; $false }
+    })
     foreach ($cand in $Cands) { Say "found USB stick: disk $($cand.Number)  $([math]::Round($cand.Size/1e9)) GB  $($cand.FriendlyName)" }
+    if ($Cands.Count -eq 0) {
+        Say 'NO USB STICK FOUND - nothing written.  Plug one in and run this again.'
+        exit 2      # distinct from a failure, as in rig-flash.sh: nothing to write to
+    }
     if ($Cands.Count -ne 1) { Die "expected exactly one USB stick plugged in, found $($Cands.Count) - plug in one, or name it: -Disk N (see Get-Disk)" }
     $D = $Cands[0]
 }
