@@ -25,6 +25,7 @@ SHA=$(sha256sum "$IMGS/$STEM.img" | awk '{print $1}')
 
 cat > "$BIN/curl" <<EOF
 #!/bin/bash
+[ -n "\${CURLLOG:-}" ] && echo "curl \$*" >> "\$CURLLOG"
 case "\$*" in
   *embeddedfolderview*)
     printf '%s' '<div class="flip-entry" id="entry-IMGID"><div class="flip-entry-title">$STEM.img</div></div>'
@@ -89,9 +90,9 @@ chmod +x "$BIN"/*
 # run <disk table> <root source> <args...> — sets OUT and RC.
 run(){
     printf '%s\n' "$1" > "$W/disks"; local root=$2; shift 2
-    : > "$W/calls"
-    OUT=$(FAKE_DISKS="$W/disks" FAKE_ROOT="$root" CALLS="$W/calls" \
-          PATH="$BIN:$PATH" SIGMOND_IMAGE_DIR="$IMGS" SIGMOND_NO_UPDATE=1 DRY_RUN=1 \
+    : > "$W/calls"; : > "$W/curl"
+    OUT=$(FAKE_DISKS="$W/disks" FAKE_ROOT="$root" CALLS="$W/calls" CURLLOG="$W/curl" \
+          PATH="$BIN:$PATH" SIGMOND_IMAGE_DIR="${TEST_IMGS:-$IMGS}" SIGMOND_NO_UPDATE=1 DRY_RUN="${TEST_DRY:-1}" \
           timeout 20 bash "$REPO/sigmond-flash-latest.sh" "$@" </dev/null 2>&1)
     RC=$?
 }
@@ -142,6 +143,21 @@ $STICK
 $STICK2" /dev/sda1;                       expect "two sticks are refused" 1 'exactly one USB stick.*found 2'
 run "$SYS
 $USBSSD" /dev/sda1;                       expect "a non-removable USB disk is never auto-picked" 2 'NO USB STICK FOUND'
+
+echo "questions before the download"
+# The download can take an hour: the stick must be found, and the erase
+# question asked, before any byte of the image is fetched (rob, 2026-11-11).
+mkdir -p "$W/empty"
+fetched(){ grep -q 'id=IMGID' "$W/curl"; }
+TEST_IMGS=$W/empty run "$SYS" /dev/sda1;  expect "no stick stops before the download" 2 'NO USB STICK FOUND'
+fetched && bad "no stick: the image was fetched anyway" || ok "no stick: the image was never fetched"
+TEST_IMGS=$W/empty TEST_DRY=0 run "$SYS
+$STICK" /dev/sda1
+expect "the erase question comes before the download" 1 'no terminal to confirm.*--yes'
+grep -q -- '-o .*\.part' "$W/curl" && bad "the image download started before the erase question" \
+    || ok "nothing was downloaded before the erase question"
+run "$SYS
+$STICK" /dev/sda1 --yes;                  expect "--yes is accepted" 0 'every check passed'
 
 echo "sudo policy"
 if grep -q 'NOPASSWD\|sudoers' sigmond-flash-latest.sh; then bad "the flasher mentions NOPASSWD/sudoers"

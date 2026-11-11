@@ -18,12 +18,17 @@
 #   bash sigmond-flash-latest.sh --version v3.85  # a specific published version
 #   bash sigmond-flash-latest.sh --device /dev/sdb     (macOS: /dev/disk5)
 #   bash sigmond-flash-latest.sh --download-only  # fetch and verify, no stick
+#   bash sigmond-flash-latest.sh --yes            # erase the stick without asking
 #   DRY_RUN=1 bash sigmond-flash-latest.sh        # every check, no write
+#
+# Every question comes in the first seconds, before the download: which stick
+# it found, "erase it?", and sudo's password.  After that it runs to the end
+# unattended, so you can walk away.
 #
 # Environment:
 #   SIGMOND_IMAGE_DIR     where images are kept   (default ~/sigmond-images)
 #   SIGMOND_IMAGE_FOLDER  Drive folder id          (default: the HamSCI release folder)
-#   FORCE=1               skip the "erase it? [y/N]" confirmation
+#   FORCE=1               same as --yes: skip the "erase it? [y/N]" confirmation
 #   ALLOW_FIXED=1         with --device only: accept a USB whole disk that does
 #                         not report itself removable (never needed for a stick)
 #   SIGMOND_FLASH_MAX_GB  size cap for the automatic pick, in GiB (default 1024)
@@ -43,7 +48,7 @@
 set -uo pipefail
 
 # Bump on every published change: the self-update below compares this.
-FLASH_VERSION=2026.11.11.1
+FLASH_VERSION=2026.11.11.2
 
 FOLDER_ID="${SIGMOND_IMAGE_FOLDER:-1Eym7xsP_qVvbGOVmlXER73K3jx6J7dQs}"
 IMG_DIR="${SIGMOND_IMAGE_DIR:-$HOME/sigmond-images}"
@@ -68,7 +73,8 @@ while [ $# -gt 0 ]; do
         --device)        WANT_DEV=$(argval "$@") || exit 1; shift 2 ;;
         --list)          LIST_ONLY=1; shift ;;
         --download-only) DL_ONLY=1; shift ;;
-        -h|--help)       sed -n '2,42p' "$0"; exit 0 ;;
+        -y|--yes)        FORCE=1; shift ;;
+        -h|--help)       sed -n '2,48p' "$0"; exit 0 ;;
         *)               die "unknown argument: $1 (try --help)" ;;
     esac
 done
@@ -210,7 +216,172 @@ STEM="sigmond-appliance-$VER-$DATE-release"
 IMG_NAME="$STEM.img"
 say "selected: $IMG_NAME  (version $VER, built $DATE)"
 
-# ── 2. the checksum, then the image (reused if already here and good) ──────
+# ── 2. the stick and every question, BEFORE the download ───────────────────
+# ⛔ ASK NOTHING AFTER THE DOWNLOAD.  The download can take an hour, and this
+# script used to find the stick and ask "erase it? [y/N]" only after it, so an
+# operator who started it and walked away came back to a prompt and an
+# unwritten stick (rob, 2026-11-11).  So the stick is found, checked, shown and
+# confirmed now (--yes skips the question), sudo is settled now, and sudo's
+# timestamp is kept fresh through the download.  After this nothing waits for
+# a person.
+
+# dinfo <disk> <key> — one field of `diskutil info -plist`.
+dinfo(){ diskutil info -plist "$1" 2>/dev/null | plutil -extract "$2" raw -o - - 2>/dev/null; }
+
+# pick_stick_macos / pick_stick_linux: find the stick by attribute, never by
+# letter; refuse anything that is not a whole removable USB disk under the cap
+# or that carries the running system; show it.  Set DISK, DBYTES, MODEL.
+pick_stick_macos(){
+    need $DISK_TOOLS
+    if [ -n "$WANT_DEV" ]; then
+        DISK="/dev/${WANT_DEV#/dev/}"; DISK="${DISK/rdisk/disk}"
+        diskutil info "$DISK" >/dev/null 2>&1 || die "$DISK is not a disk (see: diskutil list external)"
+        [ "$(dinfo "$DISK" WholeDisk)" = true ] || die "$DISK is not a whole disk (name the disk, e.g. /dev/disk5, not a partition)"
+        [ "$(dinfo "$DISK" VirtualOrPhysical)" = Virtual ] && die "$DISK is a virtual disk (an APFS container or disk image), not a stick; refusing"
+        [ "$(dinfo "$DISK" Internal)" = false ] || die "$DISK is not an external disk; refusing"
+        [ "$(dinfo "$DISK" BusProtocol)" = USB ] || die "$DISK is not on USB (bus: $(dinfo "$DISK" BusProtocol)); refusing"
+        if [ "$(dinfo "$DISK" RemovableMedia)" != true ]; then
+            [ "${ALLOW_FIXED:-0}" = 1 ] || die "$DISK is not removable (a fixed disk, not a stick); refusing"
+            say "ALLOW_FIXED=1 — proceeding against a FIXED disk"
+        fi
+    else
+        DISK=""; N=0
+        for d in $(diskutil list external physical | sed -nE 's#^(/dev/disk[0-9]+) .*#\1#p'); do
+            [ "$(dinfo "$d" WholeDisk)" = true ] && [ "$(dinfo "$d" BusProtocol)" = USB ] \
+                && [ "$(dinfo "$d" RemovableMedia)" = true ] && [ "$(dinfo "$d" Internal)" = false ] || continue
+            sz=$(dinfo "$d" TotalSize)
+            [ "${sz:-0}" -gt 0 ] && [ "$sz" -lt "$MAX_BYTES" ] \
+                || { say "skipping $d: $(( ${sz:-0} / 1000000000 )) GB is over the ${MAX_GB} GiB cap for a stick"; continue; }
+            DISK="$d"; N=$((N+1))
+            say "found USB stick: $d  $(( $(dinfo "$d" TotalSize) / 1000000000 )) GB  $(dinfo "$d" MediaName)"
+        done
+        # loginwindow ejects removable disks attached while the screen is
+        # locked (seen 2026-11-03): the stick is on the bus with no disk.
+        [ "$N" -eq 0 ] && no_stick "If one IS plugged in: macOS ejects a stick attached while the screen is locked — unplug it and plug it in again with the Mac unlocked."
+        [ "$N" -eq 1 ] || die "expected exactly one USB stick plugged in, found $N — plug in one, or name it: --device /dev/diskN (see: diskutil list external)"
+    fi
+    [ "$(dinfo "$DISK" Internal)" = true ] && die "$DISK is an internal disk; refusing"
+
+    # Never the disk macOS runs from: its APFS container's physical store.
+    BOOT=$(dinfo / ParentWholeDisk)
+    for i in 0 1 2 3; do
+        st=$(diskutil info -plist / | plutil -extract "APFSPhysicalStores.$i.APFSPhysicalStore" raw -o - - 2>/dev/null) || break
+        BOOT="$BOOT $(dinfo "$st" ParentWholeDisk)"
+    done
+    for b in $BOOT; do
+        [ "/dev/$b" = "$DISK" ] && die "$DISK CARRIES THE RUNNING SYSTEM — refusing"
+    done
+
+    DBYTES=$(dinfo "$DISK" TotalSize)
+    [ -n "$DBYTES" ] || die "cannot read the size of $DISK"
+    MODEL=$(dinfo "$DISK" MediaName)
+
+    say "the stick: $DISK (${MODEL:-unknown model}, $((DBYTES/1000000000)) GB):"
+    diskutil list "$DISK" 2>/dev/null | sed 's/^/          /'
+}
+
+lsq(){ lsblk -dnbo "$2" "$1" 2>/dev/null | head -1 | tr -d ' '; }
+# stick_refusal <dev> — why <dev> may not be written, or nothing if it may.
+# A whole disk, on USB, flagged removable; ALLOW_FIXED=1 lifts only the
+# removable flag, and only for a named --device.
+stick_refusal(){
+    local t
+    t=$(lsq "$1" TYPE)
+    [ -n "$t" ] || { echo "$1 is not a block device"; return; }
+    [ "$t" = disk ] || { echo "$1 is a $t, not a whole disk (name the disk, e.g. /dev/sdb, not /dev/sdb1)"; return; }
+    t=$(lsq "$1" TRAN)
+    [ "$t" = usb ] || { echo "$1 is not on USB (transport: ${t:-none}); refusing"; return; }
+    if [ "$(lsq "$1" RM)" != 1 ]; then
+        [ "${2:-}" = named ] && [ "${ALLOW_FIXED:-0}" = 1 ] && return
+        echo "$1 is not removable (a fixed disk, not a stick); refusing"
+    fi
+}
+pick_stick_linux(){
+    need $DISK_TOOLS
+    if [ -n "$WANT_DEV" ]; then
+        # The canonical name (a /dev/disk/by-id link becomes /dev/sdX), so the
+        # running-system comparison below sees the same string lsblk prints.
+        DISK=$(lsblk -dnpo NAME "$WANT_DEV" 2>/dev/null | head -1 | tr -d ' ')
+        [ -n "$DISK" ] || die "$WANT_DEV is not a block device"
+        why=$(stick_refusal "$DISK" named)
+        [ -z "$why" ] || die "$why"
+        [ "$(lsq "$DISK" RM)" = 1 ] || say "ALLOW_FIXED=1 — proceeding against a USB disk that is not flagged removable"
+    else
+        DISK=""; N=0
+        for d in $(lsblk -dnpo NAME 2>/dev/null); do
+            [ -z "$(stick_refusal "$d")" ] || continue
+            sz=$(lsq "$d" SIZE)
+            [ "${sz:-0}" -gt 0 ] && [ "$sz" -lt "$MAX_BYTES" ] \
+                || { say "skipping $d: $(( ${sz:-0} / 1000000000 )) GB is over the ${MAX_GB} GiB cap for a stick"; continue; }
+            DISK="$d"; N=$((N+1))
+            say "found USB stick: $d  $((sz/1000000000)) GB"
+        done
+        [ "$N" -eq 0 ] && no_stick "Plug one in and run this again."
+        [ "$N" -eq 1 ] || die "expected exactly one USB stick plugged in, found $N — plug in one, or name it: --device /dev/sdX"
+    fi
+
+    # Never the disk the system runs from.  Walk each system mount up to its
+    # whole disk(s) with lsblk -s, so a root on LVM, LUKS or md is caught too
+    # (its own PKNAME is a dm or md device, not the disk).
+    for m in / /boot /boot/efi /usr /var /home; do
+        src=$(findmnt -nvo SOURCE "$m" 2>/dev/null) || continue
+        [ -n "$src" ] || continue
+        for top in $(lsblk -nsrpo NAME,TYPE "$src" 2>/dev/null | awk '$2=="disk"{print $1}'); do
+            [ "$top" = "$DISK" ] && die "$DISK CARRIES THE RUNNING SYSTEM ($m) — refusing"
+        done
+    done
+    BUSY=""
+    while read -r part mp; do
+        [ -n "$mp" ] || continue
+        case "$mp" in /media/*|/mnt/*|/run/media/*) continue ;; esac
+        BUSY="$BUSY $part=$mp"
+    done < <(lsblk -nro NAME,MOUNTPOINT "$DISK" 2>/dev/null | tail -n +2)
+    [ -z "$BUSY" ] || die "$DISK has partitions mounted in service:$BUSY — refusing"
+
+    DBYTES=$(lsq "$DISK" SIZE)
+    [ "${DBYTES:-0}" -gt 0 ] || die "cannot read the size of $DISK"
+    MODEL=$(lsblk -dno VENDOR,MODEL "$DISK" 2>/dev/null | tr -s ' ' | sed 's/^ //;s/ $//')
+
+    say "the stick: $DISK (${MODEL:-unknown model}, $((DBYTES/1000000000)) GB):"
+    lsblk -o NAME,SIZE,FSTYPE,LABEL,MOUNTPOINT "$DISK" 2>/dev/null | sed 's/^/          /'
+}
+
+# The image's size before the download, when it is already here or the server
+# says: a stick too small is refused now, not after an hour.
+early_size(){
+    local f="$IMG_DIR/$IMG_NAME"
+    if [ -f "$f" ]; then fsize "$f"; return; fi
+    curl -fsIL --max-time 60 "${DL_URL}$(id_of "$IMG_NAME")" 2>/dev/null | tr -d '\r' \
+        | awk 'tolower($1)=="content-length:"{n=$2} END{print n+0}'
+}
+
+if [ "$DL_ONLY" != 1 ]; then
+    if [ "$OS" = Darwin ]; then pick_stick_macos; else pick_stick_linux; fi
+    ESIZE=$(early_size)
+    [ "${ESIZE:-0}" -gt 0 ] && [ "$ESIZE" -gt "$DBYTES" ] \
+        && die "the image ($((ESIZE/1048576)) MiB) does not fit on $DISK ($((DBYTES/1048576)) MiB)"
+    if [ "${DRY_RUN:-0}" = 1 ]; then
+        say "DRY_RUN=1 — this stick will not be written; checking the image next"
+    elif [ "${FORCE:-0}" = 1 ]; then
+        say "--yes: $DISK will be erased and written after the download, without asking"
+    else
+        # No terminal (e.g. `curl ... | bash`) means no one to confirm: refuse rather
+        # than erase a disk unasked.  Download the script and run it instead.
+        [ -t 0 ] || die "no terminal to confirm on — run the downloaded script directly (bash sigmond-flash-latest.sh), or add --yes"
+        confirm_erase
+    fi
+    if [ "${DRY_RUN:-0}" != 1 ]; then
+        need_sudo
+        # Keep sudo's timestamp fresh through the download, so the write after
+        # it never stops to ask for the password again.
+        ( while kill -0 $$ 2>/dev/null; do sudo -n -v 2>/dev/null; sleep 50; done ) &
+        SUDO_KEEPER=$!
+        trap 'kill "$SUDO_KEEPER" 2>/dev/null' EXIT
+        say "all questions answered — the rest runs unattended"
+    fi
+fi
+
+# ── 2b. the checksum, then the image (reused if already here and good) ─────
 mkdir -p "$IMG_DIR" || die "cannot create $IMG_DIR"
 IMG="$IMG_DIR/$IMG_NAME"
 WANT_SHA=$(curl -fsL --max-time 60 "${DL_URL}$(id_of "$STEM.sha256")" | awk 'NR==1{print $1}')
@@ -256,70 +427,21 @@ if [ "$DL_ONLY" = 1 ]; then
     exit 0
 fi
 
-# ── 3-5 on macOS: the same rules, from diskutil ─────────────────────────────
-# dinfo <disk> <key> — one field of `diskutil info -plist`.
-dinfo(){ diskutil info -plist "$1" 2>/dev/null | plutil -extract "$2" raw -o - - 2>/dev/null; }
+# ── 3. write and read back — nothing here waits for a person ───────────────
+[ "$BYTES" -le "$DBYTES" ] || die "the image ($((BYTES/1048576)) MiB) does not fit on $DISK ($((DBYTES/1048576)) MiB)"
+if [ "${DRY_RUN:-0}" = 1 ]; then
+    say "DRY_RUN=1 — every check passed; nothing written"
+    exit 0
+fi
+# The stick was chosen before the download; make sure it is still that one
+# (an hour is long enough to unplug it or swap it).
+if [ "$OS" = Darwin ]; then
+    [ "$(dinfo "$DISK" TotalSize)" = "$DBYTES" ] && [ "$(dinfo "$DISK" MediaName)" = "$MODEL" ]
+else
+    [ "$(lsq "$DISK" SIZE)" = "$DBYTES" ]
+fi || die "$DISK is no longer the stick confirmed before the download (unplugged or swapped?) — nothing written; rerun"
 
-flash_macos(){
-    need $DISK_TOOLS
-    if [ -n "$WANT_DEV" ]; then
-        DISK="/dev/${WANT_DEV#/dev/}"; DISK="${DISK/rdisk/disk}"
-        diskutil info "$DISK" >/dev/null 2>&1 || die "$DISK is not a disk (see: diskutil list external)"
-        [ "$(dinfo "$DISK" WholeDisk)" = true ] || die "$DISK is not a whole disk (name the disk, e.g. /dev/disk5, not a partition)"
-        [ "$(dinfo "$DISK" VirtualOrPhysical)" = Virtual ] && die "$DISK is a virtual disk (an APFS container or disk image), not a stick; refusing"
-        [ "$(dinfo "$DISK" Internal)" = false ] || die "$DISK is not an external disk; refusing"
-        [ "$(dinfo "$DISK" BusProtocol)" = USB ] || die "$DISK is not on USB (bus: $(dinfo "$DISK" BusProtocol)); refusing"
-        if [ "$(dinfo "$DISK" RemovableMedia)" != true ]; then
-            [ "${ALLOW_FIXED:-0}" = 1 ] || die "$DISK is not removable (a fixed disk, not a stick); refusing"
-            say "ALLOW_FIXED=1 — proceeding against a FIXED disk"
-        fi
-    else
-        DISK=""; N=0
-        for d in $(diskutil list external physical | sed -nE 's#^(/dev/disk[0-9]+) .*#\1#p'); do
-            [ "$(dinfo "$d" WholeDisk)" = true ] && [ "$(dinfo "$d" BusProtocol)" = USB ] \
-                && [ "$(dinfo "$d" RemovableMedia)" = true ] && [ "$(dinfo "$d" Internal)" = false ] || continue
-            sz=$(dinfo "$d" TotalSize)
-            [ "${sz:-0}" -gt 0 ] && [ "$sz" -lt "$MAX_BYTES" ] \
-                || { say "skipping $d: $(( ${sz:-0} / 1000000000 )) GB is over the ${MAX_GB} GiB cap for a stick"; continue; }
-            DISK="$d"; N=$((N+1))
-            say "found USB stick: $d  $(( $(dinfo "$d" TotalSize) / 1000000000 )) GB  $(dinfo "$d" MediaName)"
-        done
-        # loginwindow ejects removable disks attached while the screen is
-        # locked (seen 2026-11-03): the stick is on the bus with no disk.
-        [ "$N" -eq 0 ] && no_stick "If one IS plugged in: macOS ejects a stick attached while the screen is locked — unplug it and plug it in again with the Mac unlocked."
-        [ "$N" -eq 1 ] || die "expected exactly one USB stick plugged in, found $N — plug in one, or name it: --device /dev/diskN (see: diskutil list external)"
-    fi
-    [ "$(dinfo "$DISK" Internal)" = true ] && die "$DISK is an internal disk; refusing"
-
-    # Never the disk macOS runs from: its APFS container's physical store.
-    BOOT=$(dinfo / ParentWholeDisk)
-    for i in 0 1 2 3; do
-        st=$(diskutil info -plist / | plutil -extract "APFSPhysicalStores.$i.APFSPhysicalStore" raw -o - - 2>/dev/null) || break
-        BOOT="$BOOT $(dinfo "$st" ParentWholeDisk)"
-    done
-    for b in $BOOT; do
-        [ "/dev/$b" = "$DISK" ] && die "$DISK CARRIES THE RUNNING SYSTEM — refusing"
-    done
-
-    DBYTES=$(dinfo "$DISK" TotalSize)
-    [ -n "$DBYTES" ] || die "cannot read the size of $DISK"
-    [ "$BYTES" -le "$DBYTES" ] || die "the image ($((BYTES/1048576)) MiB) does not fit on $DISK ($((DBYTES/1048576)) MiB)"
-    MODEL=$(dinfo "$DISK" MediaName)
-
-    say "about to ERASE $DISK (${MODEL:-unknown model}, $((DBYTES/1000000000)) GB):"
-    diskutil list "$DISK" 2>/dev/null | sed 's/^/          /'
-    if [ "${DRY_RUN:-0}" = 1 ]; then
-        say "DRY_RUN=1 — every check passed; nothing written"
-        exit 0
-    fi
-    # No terminal (e.g. `curl ... | bash`) means no one to confirm: refuse rather
-    # than erase a disk unasked.  Download the script and run it instead.
-    if [ "${FORCE:-0}" != 1 ]; then
-        [ -t 0 ] || die "no terminal to confirm on — run the downloaded script directly (bash sigmond-flash-latest.sh), or set FORCE=1"
-        confirm_erase
-    fi
-    need_sudo
-
+write_macos(){
     diskutil unmountDisk "$DISK" >/dev/null || die "cannot unmount $DISK (close any Finder windows on it)"
     # The raw node (/dev/rdiskN) skips the buffer cache: several times faster.
     RAW="${DISK/disk/rdisk}"
@@ -338,88 +460,7 @@ flash_macos(){
     BACK=$(sudo dd if="$RAW" bs=1048576 count="$BLKS" 2>/dev/null | head -c "$BYTES" | sha256 | awk '{print $1}')
 }
 
-if [ "$OS" = Darwin ]; then
-    flash_macos
-else
-    need $DISK_TOOLS
-    # ── 3. the stick, found by attribute and never by letter ───────────────────
-    # lsq <dev> <column> — one lsblk column for the device itself (not its
-    # partitions), trimmed.
-    lsq(){ lsblk -dnbo "$2" "$1" 2>/dev/null | head -1 | tr -d ' '; }
-    # stick_refusal <dev> — why <dev> may not be written, or nothing if it may.
-    # A whole disk, on USB, flagged removable; ALLOW_FIXED=1 lifts only the
-    # removable flag, and only for a named --device.
-    stick_refusal(){
-        local t
-        t=$(lsq "$1" TYPE)
-        [ -n "$t" ] || { echo "$1 is not a block device"; return; }
-        [ "$t" = disk ] || { echo "$1 is a $t, not a whole disk (name the disk, e.g. /dev/sdb, not /dev/sdb1)"; return; }
-        t=$(lsq "$1" TRAN)
-        [ "$t" = usb ] || { echo "$1 is not on USB (transport: ${t:-none}); refusing"; return; }
-        if [ "$(lsq "$1" RM)" != 1 ]; then
-            [ "${2:-}" = named ] && [ "${ALLOW_FIXED:-0}" = 1 ] && return
-            echo "$1 is not removable (a fixed disk, not a stick); refusing"
-        fi
-    }
-    if [ -n "$WANT_DEV" ]; then
-        # The canonical name (a /dev/disk/by-id link becomes /dev/sdX), so the
-        # running-system comparison below sees the same string lsblk prints.
-        DISK=$(lsblk -dnpo NAME "$WANT_DEV" 2>/dev/null | head -1 | tr -d ' ')
-        [ -n "$DISK" ] || die "$WANT_DEV is not a block device"
-        why=$(stick_refusal "$DISK" named)
-        [ -z "$why" ] || die "$why"
-        [ "$(lsq "$DISK" RM)" = 1 ] || say "ALLOW_FIXED=1 — proceeding against a USB disk that is not flagged removable"
-    else
-        DISK=""; N=0
-        for d in $(lsblk -dnpo NAME 2>/dev/null); do
-            [ -z "$(stick_refusal "$d")" ] || continue
-            sz=$(lsq "$d" SIZE)
-            [ "${sz:-0}" -gt 0 ] && [ "$sz" -lt "$MAX_BYTES" ] \
-                || { say "skipping $d: $(( ${sz:-0} / 1000000000 )) GB is over the ${MAX_GB} GiB cap for a stick"; continue; }
-            DISK="$d"; N=$((N+1))
-            say "found USB stick: $d  $((sz/1000000000)) GB"
-        done
-        [ "$N" -eq 0 ] && no_stick "Plug one in and run this again."
-        [ "$N" -eq 1 ] || die "expected exactly one USB stick plugged in, found $N — plug in one, or name it: --device /dev/sdX"
-    fi
-
-    # Never the disk the system runs from.  Walk each system mount up to its
-    # whole disk(s) with lsblk -s, so a root on LVM, LUKS or md is caught too
-    # (its own PKNAME is a dm or md device, not the disk).
-    for m in / /boot /boot/efi /usr /var /home; do
-        src=$(findmnt -nvo SOURCE "$m" 2>/dev/null) || continue
-        [ -n "$src" ] || continue
-        for top in $(lsblk -nsrpo NAME,TYPE "$src" 2>/dev/null | awk '$2=="disk"{print $1}'); do
-            [ "$top" = "$DISK" ] && die "$DISK CARRIES THE RUNNING SYSTEM ($m) — refusing"
-        done
-    done
-    BUSY=""
-    while read -r part mp; do
-        [ -n "$mp" ] || continue
-        case "$mp" in /media/*|/mnt/*|/run/media/*) continue ;; esac
-        BUSY="$BUSY $part=$mp"
-    done < <(lsblk -nro NAME,MOUNTPOINT "$DISK" 2>/dev/null | tail -n +2)
-    [ -z "$BUSY" ] || die "$DISK has partitions mounted in service:$BUSY — refusing"
-
-    DBYTES=$(lsq "$DISK" SIZE)
-    [ "${DBYTES:-0}" -gt 0 ] || die "cannot read the size of $DISK"
-    [ "$BYTES" -le "$DBYTES" ] || die "the image ($((BYTES/1048576)) MiB) does not fit on $DISK ($((DBYTES/1048576)) MiB)"
-    MODEL=$(lsblk -dno VENDOR,MODEL "$DISK" 2>/dev/null | tr -s ' ' | sed 's/^ //;s/ $//')
-
-    say "about to ERASE $DISK (${MODEL:-unknown model}, $((DBYTES/1000000000)) GB):"
-    lsblk -o NAME,SIZE,FSTYPE,LABEL,MOUNTPOINT "$DISK" 2>/dev/null | sed 's/^/          /'
-    if [ "${DRY_RUN:-0}" = 1 ]; then
-        say "DRY_RUN=1 — every check passed; nothing written"
-        exit 0
-    fi
-    # No terminal (e.g. `curl ... | bash`) means no one to confirm: refuse rather
-    # than erase a disk unasked.  Download the script and run it instead.
-    if [ "${FORCE:-0}" != 1 ]; then
-        [ -t 0 ] || die "no terminal to confirm on — run the downloaded script directly (bash sigmond-flash-latest.sh), or set FORCE=1"
-        confirm_erase
-    fi
-    need_sudo
-
+write_linux(){
     # ── 4. write ────────────────────────────────────────────────────────────────
     for p in $(lsblk -nro NAME "$DISK" | tail -n +2); do
         sudo umount "/dev/$p" 2>/dev/null && say "unmounted /dev/$p"
@@ -437,7 +478,9 @@ else
     say "reading the stick back and comparing"
     sudo blockdev --flushbufs "$DISK" 2>/dev/null
     BACK=$(sudo head -c "$BYTES" "$DISK" | sha256sum | awk '{print $1}')
-fi
+}
+
+if [ "$OS" = Darwin ]; then write_macos; else write_linux; fi
 if [ "$BACK" = "$WANT_SHA" ]; then
     echo
     say "VERIFIED — $DISK matches the published image byte for byte"
