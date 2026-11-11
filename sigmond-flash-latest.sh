@@ -16,6 +16,9 @@
 #   bash sigmond-flash-latest.sh                  # newest image, auto-find the stick
 #   bash sigmond-flash-latest.sh --list           # show what is published, write nothing
 #   bash sigmond-flash-latest.sh --version v3.85  # a specific published version
+#   bash sigmond-flash-latest.sh --pending        # newest build, tested or not: also
+#                                                 # reads pending/, where the rig puts
+#                                                 # each image before its tests end
 #   bash sigmond-flash-latest.sh --device /dev/sdb     (macOS: /dev/disk5)
 #   bash sigmond-flash-latest.sh --download-only  # fetch and verify, no stick
 #   bash sigmond-flash-latest.sh --yes            # erase the stick without asking
@@ -48,7 +51,7 @@
 set -uo pipefail
 
 # Bump on every published change: the self-update below compares this.
-FLASH_VERSION=2026.11.11.2
+FLASH_VERSION=2026.11.11.3
 
 FOLDER_ID="${SIGMOND_IMAGE_FOLDER:-1Eym7xsP_qVvbGOVmlXER73K3jx6J7dQs}"
 IMG_DIR="${SIGMOND_IMAGE_DIR:-$HOME/sigmond-images}"
@@ -59,7 +62,7 @@ ts(){ date -u '+%H:%M:%SZ'; }
 say(){ printf '%s  %s\n' "$(ts)" "$*"; }
 die(){ printf '%s  ABORT: %s\n' "$(ts)" "$*" >&2; exit 1; }
 
-WANT_VER="" WANT_DEV="" LIST_ONLY=0 DL_ONLY=0
+WANT_VER="" WANT_DEV="" LIST_ONLY=0 DL_ONLY=0 PENDING=0
 # argval <option> <rest of argv...> -- the option's value, or die.  A missing
 # value used to leave `shift 2` failing on the last argument, so the loop
 # never advanced and the script hung.
@@ -73,8 +76,9 @@ while [ $# -gt 0 ]; do
         --device)        WANT_DEV=$(argval "$@") || exit 1; shift 2 ;;
         --list)          LIST_ONLY=1; shift ;;
         --download-only) DL_ONLY=1; shift ;;
+        --pending)       PENDING=1; shift ;;
         -y|--yes)        FORCE=1; shift ;;
-        -h|--help)       sed -n '2,48p' "$0"; exit 0 ;;
+        -h|--help)       awk 'NR>1 && /^#/{print; next} NR>1{exit}' "$0"; exit 0 ;;
         *)               die "unknown argument: $1 (try --help)" ;;
     esac
 done
@@ -145,8 +149,8 @@ no_stick(){
 # ── 1. what is published ────────────────────────────────────────────────────
 # The embedded folder view is plain HTML, one <div class="flip-entry"
 # id="entry-<FILEID>"> per file with its name in flip-entry-title.  Only the
-# folder's top level is read: pending/ (untested builds) is a subfolder and
-# never offered.
+# folder's top level is read, unless --pending also asks for pending/ (untested
+# builds, a subfolder); see below.
 say "reading the published image list"
 LISTING=$(curl -fsL --max-time 60 "$LIST_URL") || die "cannot read the download folder ($LIST_URL)"
 ENTRIES=$(printf '%s' "$LISTING" | sed 's/<div class="flip-entry" id="entry-/\n@@/g' \
@@ -191,6 +195,32 @@ self_update(){
 mkdir -p "$IMG_DIR" 2>/dev/null
 self_update
 
+# ── --pending: also the rig's untested builds ──────────────────────────────
+# build-usb-v3.sh ships each image into pending/ as soon as it is built, while
+# the nested and update tests still run; bless-release.sh later publishes it at
+# the top level.  A developer who wants to test in parallel with the rig asks
+# for --pending: the newest of pending/ AND the published images is picked, so
+# it is never older than the newest blessed release.  Published entries come
+# first, so a name in both folders is fetched from the blessed copy.  Read
+# after self_update, so only the published copy of this script can replace it.
+PENDING_NAMES=""
+PUB_NAMES=$(printf '%s\n' "$ENTRIES" | awk '{print $2}')
+if [ "$PENDING" = 1 ]; then
+    PID=$(id_of pending)
+    [ -n "$PID" ] || die "--pending: the download folder has no pending/ subfolder"
+    say "reading pending/ (untested builds)"
+    PLISTING=$(curl -fsL --max-time 60 "https://drive.google.com/embeddedfolderview?id=${PID}") \
+        || die "cannot read the pending folder"
+    PENTRIES=$(printf '%s' "$PLISTING" | sed 's/<div class="flip-entry" id="entry-/\n@@/g' \
+        | sed -nE 's/^@@([A-Za-z0-9_-]+)".*flip-entry-title">([^<]+)<.*/\1 \2/p')
+    PENDING_NAMES=$(printf '%s\n' "$PENTRIES" | awk '{print $2}')
+    [ -n "$PENTRIES" ] && ENTRIES=$(printf '%s\n%s\n' "$ENTRIES" "$PENTRIES")
+fi
+# is_pending <file name> — in pending/ and not (yet) published.
+is_pending(){
+    printf '%s\n' "$PENDING_NAMES" | grep -qxF "$1" && ! printf '%s\n' "$PUB_NAMES" | grep -qxF "$1"
+}
+
 # Versions with BOTH an image and its checksum, newest last.
 VERSIONS=$(printf '%s\n' "$ENTRIES" | awk '{print $2}' \
     | sed -nE 's/^sigmond-appliance-(v[0-9.]+)-([0-9]{8})-release\.img$/\1 \2/p' \
@@ -200,14 +230,21 @@ VERSIONS=$(printf '%s\n' "$ENTRIES" | awk '{print $2}' \
 [ -n "$VERSIONS" ] || die "no published image with a checksum found"
 
 if [ "$LIST_ONLY" = 1 ]; then
-    say "published images (newest last):"
-    printf '%s\n' "$VERSIONS" | sed 's/^/          /'
+    if [ "$PENDING" = 1 ]; then say "published and pending images (newest last):"
+    else say "published images (newest last):"; fi
+    printf '%s\n' "$VERSIONS" | while read -r v d; do
+        if is_pending "sigmond-appliance-$v-$d-release.img"; then
+            echo "          $v $d  PENDING (untested)"
+        else
+            echo "          $v $d"
+        fi
+    done
     exit 0
 fi
 
 if [ -n "$WANT_VER" ]; then
     PICK=$(printf '%s\n' "$VERSIONS" | awk -v v="$WANT_VER" '$1==v' | tail -1)
-    [ -n "$PICK" ] || die "$WANT_VER is not published; published: $(printf '%s\n' "$VERSIONS" | awk '{print $1}' | tr '\n' ' ')"
+    [ -n "$PICK" ] || die "$WANT_VER is not published$([ "$PENDING" = 1 ] && echo " or pending"); found: $(printf '%s\n' "$VERSIONS" | awk '{print $1}' | tr '\n' ' ')$([ "$PENDING" = 1 ] || echo "(add --pending for untested builds)")"
 else
     PICK=$(printf '%s\n' "$VERSIONS" | tail -1)
 fi
@@ -215,6 +252,8 @@ VER=${PICK% *}; DATE=${PICK#* }
 STEM="sigmond-appliance-$VER-$DATE-release"
 IMG_NAME="$STEM.img"
 say "selected: $IMG_NAME  (version $VER, built $DATE)"
+is_pending "$IMG_NAME" \
+    && say "  ⚠ PENDING: an untested build from pending/ — not blessed; the rig may still be testing it"
 
 # ── 2. the stick and every question, BEFORE the download ───────────────────
 # ⛔ ASK NOTHING AFTER THE DOWNLOAD.  The download can take an hour, and this

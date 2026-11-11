@@ -22,15 +22,24 @@ BIN=$W/bin IMGS=$W/images; mkdir -p "$BIN" "$IMGS"
 STEM=sigmond-appliance-v9.99-20260101-release
 printf 'x' > "$IMGS/$STEM.img"
 SHA=$(sha256sum "$IMGS/$STEM.img" | awk '{print $1}')
+# A newer, untested build that only pending/ holds.
+PSTEM=sigmond-appliance-v9.100-20260102-release
+printf 'y' > "$IMGS/$PSTEM.img"
+PSHA=$(sha256sum "$IMGS/$PSTEM.img" | awk '{print $1}')
 
 cat > "$BIN/curl" <<EOF
 #!/bin/bash
 [ -n "\${CURLLOG:-}" ] && echo "curl \$*" >> "\$CURLLOG"
 case "\$*" in
+  *embeddedfolderview*id=PENDID*)
+    printf '%s' '<div class="flip-entry" id="entry-PIMGID"><div class="flip-entry-title">$PSTEM.img</div></div>'
+    printf '%s' '<div class="flip-entry" id="entry-PSHAID"><div class="flip-entry-title">$PSTEM.sha256</div></div>' ;;
   *embeddedfolderview*)
+    printf '%s' '<div class="flip-entry" id="entry-PENDID"><div class="flip-entry-title">pending</div></div>'
     printf '%s' '<div class="flip-entry" id="entry-IMGID"><div class="flip-entry-title">$STEM.img</div></div>'
     printf '%s' '<div class="flip-entry" id="entry-SHAID"><div class="flip-entry-title">$STEM.sha256</div></div>' ;;
   *id=SHAID*) echo "$SHA  $STEM.img" ;;
+  *id=PSHAID*) echo "$PSHA  $PSTEM.img" ;;
   *) exit 22 ;;
 esac
 EOF
@@ -158,6 +167,23 @@ grep -q -- '-o .*\.part' "$W/curl" && bad "the image download started before the
     || ok "nothing was downloaded before the erase question"
 run "$SYS
 $STICK" /dev/sda1 --yes;                  expect "--yes is accepted" 0 'every check passed'
+
+echo "--pending (untested builds from pending/)"
+run "$SYS" /dev/sda1 --list;              expect "--list alone never shows a pending build" 0 'v9\.99 20260101'
+printf '%s' "$OUT" | grep -q 'v9\.100' && bad "--list alone showed the pending v9.100" || ok "--list alone leaves pending/ out"
+grep -q 'id=PENDID' "$W/curl" && bad "pending/ was read without --pending" || ok "pending/ is not read without --pending"
+run "$SYS" /dev/sda1 --pending --list;    expect "--pending --list marks the pending build" 0 'v9\.100 20260102  PENDING \(untested\)'
+run "$SYS
+$STICK" /dev/sda1 --pending;              expect "--pending picks the newest build, the pending one" 0 'selected: '"$PSTEM"'\.img'
+printf '%s' "$OUT" | grep -q 'PENDING: an untested build' && ok "--pending says the pick is untested" || bad "--pending did not say the pick is untested"
+run "$SYS
+$STICK" /dev/sda1;                        expect "without --pending the newest published build is picked" 0 'selected: '"$STEM"'\.img'
+run "$SYS
+$STICK" /dev/sda1 --version v9.100;       expect "--version of a pending build without --pending says to add it" 1 'not published.*add --pending'
+run "$SYS
+$STICK" /dev/sda1 --pending --version v9.99
+                                          expect "--pending --version can still pick a published build, unmarked" 0 'selected: '"$STEM"'\.img'
+printf '%s' "$OUT" | grep -q 'PENDING:' && bad "a published pick was marked PENDING" || ok "a published pick is not marked PENDING"
 
 echo "sudo policy"
 if grep -q 'NOPASSWD\|sudoers' sigmond-flash-latest.sh; then bad "the flasher mentions NOPASSWD/sudoers"
