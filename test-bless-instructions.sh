@@ -139,6 +139,7 @@ sc_reset() {
     SC_LOCAL_INSTALL=""; SC_LOCAL_PAGE=""  # an UNPUSHED commit in the checkout
     SC_NOIMAGE=0; SC_NOPENDING=""
     SC_FLASHER=""                         # sigmond-flash-latest.sh pushed to origin/main ("" = none)
+    SC_FLASHER_PS1=""                     # sigmond-flash-latest.ps1 pushed to origin/main ("" = none)
 }
 
 # mkscene <name> — builds $T/<name>/{origin.git,seed,repo,rig,bless,remote,tmp}.
@@ -179,6 +180,11 @@ mkscene() {
         if [ -n "$SC_FLASHER" ]; then
             printf '%s\n' "$SC_FLASHER" > sigmond-flash-latest.sh
             git add -A && git commit -q -m "sigmond-flash-latest.sh"
+            git push -q origin main 2>/dev/null
+        fi
+        if [ -n "$SC_FLASHER_PS1" ]; then
+            printf '%s\n' "$SC_FLASHER_PS1" > sigmond-flash-latest.ps1
+            git add -A && git commit -q -m "sigmond-flash-latest.ps1"
             git push -q origin main 2>/dev/null
         fi
     )
@@ -469,6 +475,19 @@ n_mv="$(grep -n "moveto -q gdrive:sigmond-images/pending/$IMG" "$T/flash/calls" 
 n_fl="$(grep -n "copyto -q .*sigmond-flash-latest.sh gdrive:sigmond-images/sigmond-flash-latest.sh" "$T/flash/calls" | head -1 | cut -d: -f1)"
 chk "[rob] the image lands before the flasher" "$([ -n "$n_mv" ] && [ -n "$n_fl" ] && [ "$n_mv" -lt "$n_fl" ] && echo before || echo "mv=$n_mv fl=$n_fl")" "before"
 chk "no temp files left" "$(leftover flash)" "0"
+
+echo "--apply: the Windows flasher rides along under its own fixed name"
+sc_reset; SC_INSTALL="$GOOD_INST"; SC_PAGE="$GOOD_PAGE"; SC_FLASHER="$GOOD_FLASHER"
+SC_FLASHER_PS1='Write-Host "flash the newest image"'; mkscene flashps1; run_bless flashps1 1
+R="$T/flashps1/remote"
+chk   "the bless exits 0" "$RC" "0"
+for pair in "rob:$R/gdrive/sigmond-images" "wd30:$R/home-wd30"; do
+    lab="${pair%%:*}"; dir="${pair#*:}"
+    chk "[$lab] sigmond-flash-latest.ps1 arrived, byte for byte from origin/main" \
+        "$(git -C "$T/flashps1/origin.git" show main:sigmond-flash-latest.ps1 | cmp -s - "$dir/sigmond-flash-latest.ps1" && echo same || echo differ)" "same"
+    has "[$lab] the log names the Windows flasher" "$OUT" "[$lab] flasher: sigmond-flash-latest.ps1"
+done
+chk "no temp files left" "$(leftover flashps1)" "0"
 
 echo "--apply: no flasher on origin/main is a NOTE, not a failure"
 sc_reset; SC_INSTALL="$GOOD_INST"; SC_PAGE="$GOOD_PAGE"; mkscene noflash; run_bless noflash 1
