@@ -1808,12 +1808,111 @@ cat > /usr/local/sbin/sigmond-radionet <<'RADIONETEOF'
 #   RADIONET_VNI=4159
 #   RADIONET_UPLINK=vmbr0          # the site-LAN bridge
 #   RADIONET_PEERS="10.2.80.20 10.2.80.11"   # the other hosts, IPv4 or IPv6
+#
+# Who may send into the tunnel: only the listed peers.  The VXLAN socket
+# listens on UDP 4789 on every address of this host, and any LAN machine
+# that guesses the VNI could otherwise inject frames into the radio bridge,
+# radiod control included.  An nftables table of its own (inet
+# sigmond_radionet) accepts UDP 4789 from the peers and drops it from
+# everyone else; it goes in before the tunnel comes up, and it goes away
+# with the tunnel when radionet.conf does.  No other nft table is touched.
+#
+# MTU: the radio bridge runs at 1450 (1430 for IPv6 peers), because VXLAN
+# needs the rest.  A VM NIC on the bridge at 1500 sends frames the tunnel
+# drops without a word, so every virtio NIC on the bridge gets Proxmox's
+# mtu=1 (inherit the bridge MTU); on a running VM that takes effect at its
+# next start.  A NIC of another model cannot inherit, and is logged once.
 set -u
 CONF=/etc/sigmond/radionet.conf
-[ -r "$CONF" ] || { echo "sigmond-radionet: no $CONF; nothing to do"; exit 0; }
+VX=vxradio
+VXPORT=4789
+NFT_TABLE="inet sigmond_radionet"
+QEMU_CONF_DIR=${RADIONET_QEMU_CONF_DIR:-/etc/pve/qemu-server}
+
+# ---- radionet functions (test-radionet.sh runs these) ----
+# The nft script for the peer filter: accept $port from the peers, drop the rest.
+radionet_nft_rules() { # <port> <peer>...
+    local port=$1 p v4= v6=; shift
+    for p in "$@"; do
+        case $p in *:*) v6="$v6${v6:+, }$p" ;; *) v4="$v4${v4:+, }$p" ;; esac
+    done
+    echo "table $NFT_TABLE"
+    echo "delete table $NFT_TABLE"
+    echo "table $NFT_TABLE {"
+    echo "  chain vxlan_in {"
+    echo "    type filter hook input priority -10; policy accept;"
+    [ -n "$v4" ] && echo "    ip saddr { $v4 } udp dport $port accept"
+    [ -n "$v6" ] && echo "    ip6 saddr { $v6 } udp dport $port accept"
+    echo "    udp dport $port counter drop"
+    echo "  }"
+    echo "}"
+}
+# Is the existing tunnel the one we would build?  Reads `ip -d -j link show`
+# JSON on stdin and compares fields, not text, so a different iproute2
+# wording does not make every run tear it down and rebuild it.
+radionet_vx_ok() { # <vni> <port> <uplink>
+    python3 -c '
+import json, sys
+vni, port, dev = int(sys.argv[1]), int(sys.argv[2]), sys.argv[3]
+try:
+    li = json.load(sys.stdin)[0]["linkinfo"]
+    i = li["info_data"]
+    ok = (li["info_kind"] == "vxlan" and i.get("id") == vni
+          and i.get("port") == port and i.get("link") == dev
+          and i.get("local", "0.0.0.0") == "0.0.0.0"
+          and i.get("local6", "::") == "::")
+except Exception:
+    ok = False
+sys.exit(0 if ok else 1)' "$@"
+}
+# VM NICs on the bridge whose MTU exceeds it.  One line each:
+#   fix  <vmid> <netN> <new value with mtu=1>   (virtio: can inherit)
+#   warn <vmid> <netN> <model>                  (cannot inherit)
+# A [PENDING] value wins over the running one; snapshot sections are ignored.
+radionet_nic_fixes() { # <qemu-server dir> <bridge> <bridge mtu>
+    local f
+    for f in "$1"/*.conf; do
+        [ -e "$f" ] || continue
+        awk -v br="$2" -v brmtu="$3" -v vmid="$(basename "$f" .conf)" '
+            /^\[/ { sec = $0; next }
+            (sec == "" || sec == "[PENDING]") && /^net[0-9]+: / {
+                k = $1; sub(/:$/, "", k); v = $0; sub(/^net[0-9]+: /, "", v); val[k] = v }
+            END {
+                for (k in val) {
+                    n = split(val[k], a, ","); onbr = 0; mtu = ""; rest = ""
+                    split(a[1], m, "="); model = m[1]
+                    for (i = 1; i <= n; i++) {
+                        split(a[i], kv, "=")
+                        if (kv[1] == "bridge" && kv[2] == br) onbr = 1
+                        if (kv[1] == "mtu") { mtu = kv[2]; continue }
+                        rest = rest (rest == "" ? "" : ",") a[i]
+                    }
+                    if (!onbr || (mtu != "" && mtu + 0 <= brmtu + 0)) continue
+                    if (model == "virtio") print "fix", vmid, k, rest ",mtu=1"
+                    else print "warn", vmid, k, model
+                }
+            }' "$f"
+    done
+}
+# ---- end radionet functions ----
+
+# Not configured: stay silent, but take down anything an earlier
+# configuration left, so no tunnel listens without its peer filter.
+if [ ! -r "$CONF" ]; then
+    if ip link show "$VX" >/dev/null 2>&1; then
+        ip link del "$VX" && echo "sigmond-radionet: no $CONF; removed $VX"
+    fi
+    if command -v nft >/dev/null 2>&1; then
+        for t in "$NFT_TABLE" "netdev radionet"; do
+            nft list table $t >/dev/null 2>&1 && nft delete table $t \
+                && echo "sigmond-radionet: no $CONF; removed nft table $t"
+        done
+    fi
+    rm -f /run/sigmond-radionet.igmp-ports
+    exit 0
+fi
 . "$CONF"
 BR=${RADIONET_BRIDGE:-vmbr9} VNI=${RADIONET_VNI:-4159} UP=${RADIONET_UPLINK:-vmbr0}
-VX=vxradio
 PEERS=${RADIONET_PEERS:-}
 ip link show "$BR" >/dev/null 2>&1 || { echo "sigmond-radionet: bridge $BR missing (ifup $BR)"; exit 1; }
 
@@ -1821,17 +1920,43 @@ ip link show "$BR" >/dev/null 2>&1 || { echo "sigmond-radionet: bridge $BR missi
 # 50 bytes over IPv4, 70 over IPv6; the radio net's MTU is what is left.
 case "$PEERS" in *:*) MTU=1430 ;; *) MTU=1450 ;; esac
 
-if ! ip -d link show "$VX" 2>/dev/null | grep -q "vxlan id $VNI .*dev $UP"; then
+# The peer filter first, and fail closed: no filter, no tunnel.
+# shellcheck disable=SC2086  # PEERS is a word list
+if ! radionet_nft_rules "$VXPORT" $PEERS | nft -f -; then
+    ip link del "$VX" 2>/dev/null
+    echo "sigmond-radionet: could not install the UDP $VXPORT peer filter; tunnel down"
+    exit 1
+fi
+
+if ! ip -d -j link show "$VX" 2>/dev/null | radionet_vx_ok "$VNI" "$VXPORT" "$UP"; then
     ip link del "$VX" 2>/dev/null
     # No 'local': the source follows the uplink's current address, so a DHCP
     # change on this host needs no action here.
-    ip link add "$VX" mtu "$MTU" type vxlan id "$VNI" dstport 4789 dev "$UP" \
+    ip link add "$VX" mtu "$MTU" type vxlan id "$VNI" dstport "$VXPORT" dev "$UP" \
         || { echo "sigmond-radionet: cannot create $VX"; exit 1; }
     echo "sigmond-radionet: created $VX (VNI $VNI over $UP)"
 fi
 ip link set "$VX" mtu "$MTU" master "$BR"
 ip link set "$BR" mtu "$MTU"
 ip link set "$VX" up
+
+# VM NICs larger than the bridge: give virtio ones mtu=1, report the others
+# once per boot.
+nicstate=/run/sigmond-radionet.nic-mtu
+radionet_nic_fixes "$QEMU_CONF_DIR" "$BR" "$MTU" | while read -r what vmid k val; do
+    key="$what $vmid $k"
+    grep -qxF "$key" "$nicstate" 2>/dev/null && continue
+    if [ "$what" = fix ] && qm set "$vmid" "--$k" "$val" >/dev/null 2>&1; then
+        echo "sigmond-radionet: VM $vmid $k on $BR set to mtu=1 (bridge MTU $MTU; a running VM takes it at its next start)"
+        echo "$key" >> "$nicstate"
+    elif [ "$what" = fix ]; then
+        echo "sigmond-radionet: VM $vmid $k on $BR exceeds MTU $MTU and qm set failed; run: qm set $vmid --$k $val"
+        echo "$key" >> "$nicstate"
+    else
+        echo "sigmond-radionet: VM $vmid $k on $BR is $val, which cannot inherit MTU $MTU; frames over $MTU bytes will be dropped -- set the guest MTU to $MTU or use virtio"
+        echo "$key" >> "$nicstate"
+    fi
+done
 
 # Flood list = exactly the configured peers.
 have=$(bridge fdb show dev "$VX" | awk '$1=="00:00:00:00:00:00"{print $3}' | sort)
