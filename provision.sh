@@ -47,6 +47,16 @@ if sudo apt-get install -y -qq sqlite3 lsof bc >/dev/null 2>&1; then
 else
     echo "### ERROR: could not install health-check prerequisites (sqlite3 lsof bc)"
 fi
+# smartmontools: `smd archive add` reads a USB archive drive's SMART health
+# before it erases it (archive-drive design 2026-11-12, part 1).  smartd is
+# masked: sigmond's hourly reading does the job, and smartd's own polling and
+# tests would spin the drive up on a schedule sigmond does not control.
+if sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq smartmontools >/dev/null 2>&1; then
+    sudo systemctl mask --now smartmontools.service >/dev/null 2>&1 || true
+    echo "### smartmontools installed (smartd masked)"
+else
+    echo "### ERROR: could not install smartmontools (archive drive health check)"
+fi
 echo "### install.sh finished (exit $?)"
 echo "### smd path: $(command -v smd || echo MISSING)"
 /usr/local/bin/smd --help >/dev/null 2>&1 && echo "### smd works" || echo "### smd NOT working"
