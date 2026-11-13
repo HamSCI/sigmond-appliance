@@ -64,8 +64,17 @@ enabled = true
 # before a station paid for it.
 [component.station-web]
 enabled = true
+
+# hfdl-recorder and codar-sounder joined the dasi2 core on 2026-11-12 (sigmond 5c00e99): every
+# station sends HFDL squitter and CODAR timing rows to sigmondb.  The guard below caught the
+# fifth drift at the v3.91 golden build.
+[component.hfdl-recorder]
+enabled = true
+
+[component.codar-sounder]
+enabled = true
 EOF
-echo "### topology enabled: dasi2 set (radiod ka9q-web igmp-querier gpsdo-monitor hf-timestd wspr-recorder psk-recorder mag-recorder gmag-webui meteor-scatter hamsci-physics station-web)"
+echo "### topology enabled: dasi2 set (radiod ka9q-web igmp-querier gpsdo-monitor hf-timestd wspr-recorder psk-recorder mag-recorder gmag-webui meteor-scatter hamsci-physics station-web hfdl-recorder codar-sounder)"
 
 # ⛔ The topology above restates the dasi2 profile BY HAND, and it has drifted
 # from the catalog four times: meteor-scatter (2026-08-08), gmag-webui
