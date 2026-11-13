@@ -130,7 +130,7 @@ in advance, they take two minutes to type. Only the first two are required.</p>
 <tr class="hi"><td><b>Magnetometer instrument number</b></td>
     <td>84<br><small>only if you have a magnetometer; it reports under the same station ID</small></td><td><span class="fill"></span></td></tr>
 <tr><td>Local NTP server</td>
-    <td>ntp.example.edu<br><small>a time server at your site; Enter takes the one your network offers, or none</small></td><td><span class="fill"></span></td></tr>
+    <td>ntp.example.edu<br><small>a time server at your site; Enter takes the one DHCP names, or a stratum-1 server the wizard finds on your network; with neither, a public pool</small></td><td><span class="fill"></span></td></tr>
 <tr><td>Station designator</td>
     <td>AC0G-B4<br><small>offered from your reporter ID; press Enter to accept</small></td><td><span class="fill"></span></td></tr>
 </tbody>
@@ -241,8 +241,9 @@ The decoder VM then installs itself automatically.</div>
     <li>A <b>review screen</b> shows every answer. Type a line number to change one, or
     <b>Y</b> to apply.</li>
   </ol>
-  <p>Give the wizard a local NTP server if your site has one. The station then sets its
-  clock from that server alone and asks no public server. Without one it uses a public
+  <p>Give the wizard a local NTP server if your site has one. When DHCP names none, the
+  wizard looks for a stratum-1 (GPS) time server on your network and offers the first it
+  finds. The station then sets its clock from that server alone and asks no public server. Without one it uses a public
   pool, capped at four servers, until its own timing comes up.</p>
   <p><b>Remote access comes up by itself.</b> The wizard asks nothing about it: every
   station registers with the fleet gateway and opens a tunnel, so that your fleet admin

@@ -57,7 +57,7 @@ missing does not stop the install; you add it later (§7).
 | PSWS station ID (optional, Enter to skip) | `S000170` |
 | — its GRAPE instrument ID | `171` |
 | — magnetometer instrument number (if any; same station ID) | `84` |
-| Local NTP server (Enter: the one your network offers, or none) | `ntp.example.edu` |
+| Local NTP server (Enter takes the server DHCP names, or a stratum-1 server the wizard finds on your network; with neither, a public pool) | `ntp.example.edu` |
 | Station designator (Enter accepts the suggestion) | `AC0G-B4` |
 
 ⚠ **Names beginning `DASI` followed by three digits are reserved** for the
