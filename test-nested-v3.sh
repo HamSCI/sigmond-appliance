@@ -2645,7 +2645,14 @@ else
         local t="$1" raw="$PWD/rr-$2.json" b64
         GQ_OUT="$PWD/rr-$2.out"; GQ_RC=""
         b64=$(printf '(\n%s\n) </dev/null > /tmp/rr.out 2>&1\nprintf "RRRC=%%s\\n" "$?"\ncat /tmp/rr.out\n' "$3" | base64 -w0)
-        $SSHN "qm guest exec $VMID --timeout $t -- bash -lc \"echo $b64 | base64 -d | bash\"" > "$raw" 2>&1
+        # The request runs in a transient unit of its own, outside the guest
+        # agent's MemoryMax=128M (sigmond's 50-sigmond-selfheal.conf), which
+        # covers everything a `qm guest exec` starts.  v3.91 attempt 4,
+        # 2026-11-13: `smd remote on` (72 MB) and a python3 child (57 MB)
+        # reached the cap and the kernel killed smd, exit 137, with 8.4 GB
+        # free.  test-update-v3.sh runs its heavy calls the same way.
+        unit="rig-rr-$(printf '%s' "$2" | tr -c 'A-Za-z0-9_-' '-')"
+        $SSHN "qm guest exec $VMID --timeout $t -- bash -lc \"echo $b64 | base64 -d > /tmp/$unit.sh; systemd-run --quiet --wait --pipe --collect --unit=$unit /bin/bash -l /tmp/$unit.sh\"" > "$raw" 2>&1
         python3 - "$raw" "$GQ_OUT" <<'PYEOF'
 import json, sys
 raw = open(sys.argv[1], errors="replace").read()
