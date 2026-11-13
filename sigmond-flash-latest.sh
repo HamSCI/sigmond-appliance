@@ -21,6 +21,9 @@
 #                                                 # each image before its tests end
 #   bash sigmond-flash-latest.sh --device /dev/sdb     (macOS: /dev/disk5)
 #   bash sigmond-flash-latest.sh --download-only  # fetch and verify, no stick
+#   bash sigmond-flash-latest.sh --about          # this script's version, the published
+#                                                 # one's, and the newest published and
+#                                                 # pending images; downloads no image
 #   bash sigmond-flash-latest.sh --yes            # erase the stick without asking
 #   DRY_RUN=1 bash sigmond-flash-latest.sh        # every check, no write
 #
@@ -36,7 +39,7 @@
 #                         not report itself removable (never needed for a stick)
 #   SIGMOND_FLASH_MAX_GB  size cap for the automatic pick, in GiB (default 1024)
 #
-# Exit status: 0 written and verified (or --list/--download-only/DRY_RUN done),
+# Exit status: 0 written and verified (or --list/--about/--download-only/DRY_RUN done),
 # 2 no USB stick plugged in (nothing to write to; not a failure), 1 any failure.
 #   SIGMOND_NO_UPDATE=1   do not replace this script with a newer published one
 #
@@ -50,8 +53,9 @@
 # adds the fetch.
 set -uo pipefail
 
-# Bump on every published change: the self-update below compares this.
-FLASH_VERSION=2026.11.11.3
+# Bump on every published change: the self-update below compares this, and
+# bless-release.sh will not publish a changed copy whose number did not go up.
+FLASH_VERSION=2026.11.13.1
 
 FOLDER_ID="${SIGMOND_IMAGE_FOLDER:-1Eym7xsP_qVvbGOVmlXER73K3jx6J7dQs}"
 IMG_DIR="${SIGMOND_IMAGE_DIR:-$HOME/sigmond-images}"
@@ -62,7 +66,7 @@ ts(){ date -u '+%H:%M:%SZ'; }
 say(){ printf '%s  %s\n' "$(ts)" "$*"; }
 die(){ printf '%s  ABORT: %s\n' "$(ts)" "$*" >&2; exit 1; }
 
-WANT_VER="" WANT_DEV="" LIST_ONLY=0 DL_ONLY=0 PENDING=0
+WANT_VER="" WANT_DEV="" LIST_ONLY=0 DL_ONLY=0 PENDING=0 ABOUT=0
 # argval <option> <rest of argv...> -- the option's value, or die.  A missing
 # value used to leave `shift 2` failing on the last argument, so the loop
 # never advanced and the script hung.
@@ -77,6 +81,7 @@ while [ $# -gt 0 ]; do
         --list)          LIST_ONLY=1; shift ;;
         --download-only) DL_ONLY=1; shift ;;
         --pending)       PENDING=1; shift ;;
+        --about)         ABOUT=1; shift ;;
         -y|--yes)        FORCE=1; shift ;;
         -h|--help)       awk 'NR>1 && /^#/{print; next} NR>1{exit}' "$0"; exit 0 ;;
         *)               die "unknown argument: $1 (try --help)" ;;
@@ -151,10 +156,15 @@ no_stick(){
 # id="entry-<FILEID>"> per file with its name in flip-entry-title.  Only the
 # folder's top level is read, unless --pending also asks for pending/ (untested
 # builds, a subfolder); see below.
+# parse_listing — "<file id> <name>" per file, from an embedded folder view on stdin.
+parse_listing(){
+    sed 's/<div class="flip-entry" id="entry-/\n@@/g' \
+        | sed -nE 's/^@@([A-Za-z0-9_-]+)".*flip-entry-title">([^<]+)<.*/\1 \2/p'
+}
+say "sigmond-flash-latest.sh $FLASH_VERSION"
 say "reading the published image list"
 LISTING=$(curl -fsL --max-time 60 "$LIST_URL") || die "cannot read the download folder ($LIST_URL)"
-ENTRIES=$(printf '%s' "$LISTING" | sed 's/<div class="flip-entry" id="entry-/\n@@/g' \
-    | sed -nE 's/^@@([A-Za-z0-9_-]+)".*flip-entry-title">([^<]+)<.*/\1 \2/p')
+ENTRIES=$(printf '%s' "$LISTING" | parse_listing)
 [ -n "$ENTRIES" ] || die "the download folder listing had no files (did Google change the page?)"
 
 id_of(){ printf '%s\n' "$ENTRIES" | awk -v n="$1" '$2==n{print $1; exit}'; }
@@ -164,35 +174,111 @@ id_of(){ printf '%s\n' "$ENTRIES" | awk -v n="$1" '$2==n{print $1; exit}'; }
 # FLASH_VERSION is newer than this one's, replace this file with it and ask for a rerun, so a
 # fix reaches everyone who kept an old copy.  The new copy must look like this
 # script and parse before it replaces anything.  SIGMOND_NO_UPDATE=1 skips this.
+# Every run says where it stands (latest, a development copy, or could not
+# check), so an operator never has to guess which flasher they ran.
+
+# fetch_published — download the published copy of this script into PUB_FILE
+# and its FLASH_VERSION into PUB_VER.  Non-zero (and a reason in PUB_WHY) when
+# there is none or it does not look like this script.
+PUB_FILE="" PUB_VER="" PUB_WHY=""
+fetch_published(){
+    local sid
+    sid=$(id_of sigmond-flash-latest.sh)
+    [ -n "$sid" ] || { PUB_WHY="no copy of this script in the download folder"; return 1; }
+    PUB_FILE=$(mktemp) || { PUB_WHY="no temporary file"; return 1; }
+    if ! curl -fsL --max-time 60 -o "$PUB_FILE" "${DL_URL}${sid}" \
+       || ! head -1 "$PUB_FILE" | grep -q '^#!/bin/bash' \
+       || ! grep -q 'sigmond-flash-latest' "$PUB_FILE" || ! bash -n "$PUB_FILE" 2>/dev/null; then
+        rm -f "$PUB_FILE"; PUB_FILE=""; PUB_WHY="could not read the published copy"; return 1
+    fi
+    PUB_VER=$(sed -n 's/^FLASH_VERSION=\([0-9.]*\).*/\1/p' "$PUB_FILE" | head -1)
+    [ -n "$PUB_VER" ] || { rm -f "$PUB_FILE"; PUB_FILE=""; PUB_WHY="the published copy carries no version"; return 1; }
+    return 0
+}
+# relation — how the published copy compares with this one: same, newer
+# (published is newer), or older (this copy is newer: a development copy).
+relation(){
+    if [ "$PUB_VER" = "$FLASH_VERSION" ]; then echo same
+    elif [ "$(printf '%s\n%s\n' "$PUB_VER" "$FLASH_VERSION" | sort -V | tail -1)" = "$PUB_VER" ]; then echo newer
+    else echo older; fi
+}
 self_update(){
-    [ "${SIGMOND_NO_UPDATE:-0}" = 1 ] && return 0
-    local sid self new
-    sid=$(id_of sigmond-flash-latest.sh); [ -n "$sid" ] || return 0
-    self=$0; [ -f "$self" ] || return 0
-    new=$(mktemp) || return 0
-    if ! curl -fsL --max-time 60 -o "$new" "${DL_URL}${sid}" \
-       || ! head -1 "$new" | grep -q '^#!/bin/bash' \
-       || ! grep -q 'sigmond-flash-latest' "$new" || ! bash -n "$new" 2>/dev/null; then
-        say "could not check for a newer version of this script; carrying on with this one"
-        rm -f "$new"; return 0
+    if [ "${SIGMOND_NO_UPDATE:-0}" = 1 ]; then
+        say "not checking for a newer version of this script (SIGMOND_NO_UPDATE=1)"; return 0
     fi
-    local pub
-    pub=$(sed -n 's/^FLASH_VERSION=\([0-9.]*\).*/\1/p' "$new" | head -1)
-    if [ -z "$pub" ] || [ "$pub" = "$FLASH_VERSION" ] \
-       || [ "$(printf '%s\n%s\n' "$pub" "$FLASH_VERSION" | sort -V | tail -1)" != "$pub" ]; then
-        rm -f "$new"; return 0      # published copy is not newer than this one
+    if ! fetch_published; then
+        say "could not check for a newer version of this script ($PUB_WHY); carrying on with this one"
+        return 0
     fi
-    if [ -w "$self" ] && cat "$new" > "$self"; then
-        rm -f "$new"
-        say "a newer version of this script ($pub; you had $FLASH_VERSION) was published; $self is now updated."
+    case "$(relation)" in
+        same)  rm -f "$PUB_FILE"; say "this is the latest published flasher ($FLASH_VERSION)"; return 0 ;;
+        older) rm -f "$PUB_FILE"
+               say "this copy ($FLASH_VERSION) is newer than the published one ($PUB_VER): a development copy"
+               return 0 ;;
+    esac
+    local self=$0
+    if [ -f "$self" ] && [ -w "$self" ] && cat "$PUB_FILE" > "$self"; then
+        rm -f "$PUB_FILE"
+        say "a newer version of this script ($PUB_VER; you had $FLASH_VERSION) was published; $self is now updated."
         say "Please run it again (same command)."
         exit 0
     fi
-    mv "$new" "$IMG_DIR/sigmond-flash-latest.sh.new" 2>/dev/null \
-        && say "a newer version of this script is at $IMG_DIR/sigmond-flash-latest.sh.new (cannot write $self); carrying on with this one"
+    if mv "$PUB_FILE" "$IMG_DIR/sigmond-flash-latest.sh.new" 2>/dev/null; then
+        say "a newer version of this script ($PUB_VER) is at $IMG_DIR/sigmond-flash-latest.sh.new (cannot write $self); carrying on with this one ($FLASH_VERSION)"
+    else
+        rm -f "$PUB_FILE"
+        say "a newer version of this script ($PUB_VER) is published; carrying on with this one ($FLASH_VERSION)"
+    fi
     return 0
 }
+
+# newest_of <file names, one per line> — "<version> <date>" of the newest
+# image whose .sha256 is listed beside it; nothing when there is none.
+newest_of(){
+    local names=$1
+    printf '%s\n' "$names" \
+        | sed -nE 's/^sigmond-appliance-(v[0-9.]+)-([0-9]{8})-release\.img$/\1 \2/p' \
+        | while read -r v d; do
+              printf '%s\n' "$names" | grep -qxF "sigmond-appliance-$v-$d-release.sha256" && echo "$v $d"
+          done | sort -V | tail -1
+}
+# --about: where this flasher stands and what it would fetch.  Reads the
+# folder listings and the published copy of this script; replaces nothing and
+# downloads no image.
+about(){
+    say "this script:      sigmond-flash-latest.sh $FLASH_VERSION ($0)"
+    if fetch_published; then
+        rm -f "$PUB_FILE"
+        case "$(relation)" in
+            same)  say "published script: $PUB_VER — this is the latest" ;;
+            newer) say "published script: $PUB_VER — newer; a normal run replaces this copy" ;;
+            older) say "published script: $PUB_VER — older; this is a development copy" ;;
+        esac
+    else
+        say "published script: unknown ($PUB_WHY)"
+    fi
+    say "                  (the published copy is refreshed each time an image is released)"
+    local pub pid pl pend
+    pub=$(newest_of "$(printf '%s\n' "$ENTRIES" | awk '{print $2}')")
+    if [ -n "$pub" ]; then say "newest published image: ${pub% *} (built ${pub#* })"
+    else say "newest published image: none with a checksum"; fi
+    pid=$(id_of pending)
+    if [ -z "$pid" ]; then
+        say "pending images:   none (no pending/ folder)"
+    elif ! pl=$(curl -fsL --max-time 60 "https://drive.google.com/embeddedfolderview?id=${pid}"); then
+        say "pending images:   could not read pending/"
+    else
+        pend=$(newest_of "$(printf '%s' "$pl" | parse_listing | awk '{print $2}')")
+        if [ -n "$pend" ] && [ "$(printf '%s\n%s\n' "$pub" "$pend" | sort -V | tail -1)" = "$pend" ] \
+           && [ "$pend" != "$pub" ]; then
+            say "newest pending image: ${pend% *} (built ${pend#* }) — untested; --pending fetches it"
+        else
+            say "pending images:   none newer than the published one"
+        fi
+    fi
+}
 mkdir -p "$IMG_DIR" 2>/dev/null
+[ "$ABOUT" = 1 ] && { about; exit 0; }
 self_update
 
 # ── --pending: also the rig's untested builds ──────────────────────────────
@@ -211,8 +297,7 @@ if [ "$PENDING" = 1 ]; then
     say "reading pending/ (untested builds)"
     PLISTING=$(curl -fsL --max-time 60 "https://drive.google.com/embeddedfolderview?id=${PID}") \
         || die "cannot read the pending folder"
-    PENTRIES=$(printf '%s' "$PLISTING" | sed 's/<div class="flip-entry" id="entry-/\n@@/g' \
-        | sed -nE 's/^@@([A-Za-z0-9_-]+)".*flip-entry-title">([^<]+)<.*/\1 \2/p')
+    PENTRIES=$(printf '%s' "$PLISTING" | parse_listing)
     PENDING_NAMES=$(printf '%s\n' "$PENTRIES" | awk '{print $2}')
     [ -n "$PENTRIES" ] && ENTRIES=$(printf '%s\n%s\n' "$ENTRIES" "$PENTRIES")
 fi

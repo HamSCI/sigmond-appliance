@@ -52,6 +52,18 @@ pub_put() {
     fi
 }
 
+# pub_cat <dest> <name> — print dest/<name> to stdout; non-zero when it is
+# absent or cannot be read.
+pub_cat() {
+    local d="$1" p="$2"
+    if _pub_is_ssh "$d"; then
+        local h dir; h="$(_pub_ssh_host "$d")"; dir="$(_pub_ssh_dir "$d")"
+        ssh -o BatchMode=yes "$h" "cat '${dir:+$dir/}$p'"
+    else
+        rclone cat "$(_pub_join "$d" "$p")"
+    fi
+}
+
 # pub_promote <dest> <name>... — move names from dest/pending/ up to dest/
 pub_promote() {
     local d="$1"; shift

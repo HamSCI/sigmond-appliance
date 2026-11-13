@@ -91,6 +91,7 @@ case "$op" in
     lsf)
         p=""; for x in "$@"; do case "$x" in --*) ;; *) p="$x" ;; esac; done
         d="$(map "$p")"; [ -d "$d" ] || exit 3; ls -1 "$d" ;;
+    cat) f="$(map "$1")"; [ -f "$f" ] || exit 3; cat "$f" ;;
     deletefile) rm -f "$(map "$1")" ;;
     purge) rm -rf "$(map "$1")" ;;
 esac
@@ -482,6 +483,46 @@ if then fi ('; mkscene badflash; run_bless badflash 1
 chk   "the bless exits 0" "$RC" "0"
 has   "the log warns" "$OUT" "sigmond-flash-latest.sh on origin/main fails bash -n"
 chk   "nothing named flash-latest was uploaded" "$(grep -c 'flash-latest' "$T/badflash/calls")" "0"
+
+# A changed flasher must carry a higher FLASH_VERSION than the copy already in
+# the folder: copies people hold only replace themselves when the number goes up.
+V1='#!/bin/bash
+FLASH_VERSION=2026.11.11.3
+echo one'
+V1B='#!/bin/bash
+FLASH_VERSION=2026.11.11.3
+echo one, changed'
+V2='#!/bin/bash
+FLASH_VERSION=2026.11.13.1
+echo two'
+seed_flasher() { # seed_flasher <scene> <content> — a copy already published in every folder
+    local d
+    for d in "gdrive/sigmond-images" "gdrive,root_folder_id=ABC123" "home-wd30" "gdrive/blessed-only"; do
+        mkdir -p "$T/$1/remote/$d"; printf '%s\n' "$2" > "$T/$1/remote/$d/sigmond-flash-latest.sh"
+    done
+}
+echo "--apply: a changed flasher without a FLASH_VERSION bump is not published"
+sc_reset; SC_INSTALL="$GOOD_INST"; SC_PAGE="$GOOD_PAGE"; SC_FLASHER="$V1B"; mkscene nobump; seed_flasher nobump "$V1"; run_bless nobump 1
+chk   "the bless exits 0" "$RC" "0"
+has   "the log warns about the bump" "$OUT" "[rob] WARNING: sigmond-flash-latest.sh on origin/main differs from the copy already published but its FLASH_VERSION (2026.11.11.3) is not above"
+chk   "nothing named flash-latest was uploaded" "$(grep -c 'copyto.*flash-latest' "$T/nobump/calls")" "0"
+chk   "[rob] the published copy is untouched" "$(cat "$T/nobump/remote/gdrive/sigmond-images/sigmond-flash-latest.sh")" "$V1"
+
+echo "--apply: a lower FLASH_VERSION is not published either"
+sc_reset; SC_INSTALL="$GOOD_INST"; SC_PAGE="$GOOD_PAGE"; SC_FLASHER="$V1"; mkscene lower; seed_flasher lower "$V2"; run_bless lower 1
+has   "the log warns" "$OUT" "is not above that copy's (2026.11.13.1)"
+chk   "nothing named flash-latest was uploaded" "$(grep -c 'copyto.*flash-latest' "$T/lower/calls")" "0"
+
+echo "--apply: a bumped flasher is published, and the log names its version"
+sc_reset; SC_INSTALL="$GOOD_INST"; SC_PAGE="$GOOD_PAGE"; SC_FLASHER="$V2"; mkscene bumped; seed_flasher bumped "$V1"; run_bless bumped 1
+has   "the log names the version" "$OUT" "[rob] flasher: sigmond-flash-latest.sh 2026.11.13.1"
+chk   "[rob] the new copy arrived" "$(cat "$T/bumped/remote/gdrive/sigmond-images/sigmond-flash-latest.sh")" "$V2"
+lacks "no bump warning" "$OUT" "is not above"
+
+echo "--apply: the same bytes again (a re-run) are published without complaint"
+sc_reset; SC_INSTALL="$GOOD_INST"; SC_PAGE="$GOOD_PAGE"; SC_FLASHER="$V1"; mkscene samefl; seed_flasher samefl "$V1"; run_bless samefl 1
+has   "the log names the flasher" "$OUT" "[rob] flasher: sigmond-flash-latest.sh 2026.11.11.3"
+lacks "no bump warning" "$OUT" "is not above"
 
 echo "--apply: a failing gate 7 blocks everything"
 sc_reset; mkscene blocked; run_bless blocked 1

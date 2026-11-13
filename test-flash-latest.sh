@@ -30,11 +30,16 @@ PSHA=$(sha256sum "$IMGS/$PSTEM.img" | awk '{print $1}')
 cat > "$BIN/curl" <<EOF
 #!/bin/bash
 [ -n "\${CURLLOG:-}" ] && echo "curl \$*" >> "\$CURLLOG"
+# FAKE_FLASHER: a published copy of the flasher, listed as FLASHID ("-o" honoured).
+out=""; prev=""; for a in "\$@"; do [ "\$prev" = -o ] && out=\$a; prev=\$a; done
 case "\$*" in
+  *id=FLASHID*) [ -n "\${FAKE_FLASHER:-}" ] || exit 22
+    if [ -n "\$out" ]; then cat "\$FAKE_FLASHER" > "\$out"; else cat "\$FAKE_FLASHER"; fi; exit 0 ;;
   *embeddedfolderview*id=PENDID*)
     printf '%s' '<div class="flip-entry" id="entry-PIMGID"><div class="flip-entry-title">$PSTEM.img</div></div>'
     printf '%s' '<div class="flip-entry" id="entry-PSHAID"><div class="flip-entry-title">$PSTEM.sha256</div></div>' ;;
   *embeddedfolderview*)
+    [ -n "\${FAKE_FLASHER:-}" ] && printf '%s' '<div class="flip-entry" id="entry-FLASHID"><div class="flip-entry-title">sigmond-flash-latest.sh</div></div>'
     printf '%s' '<div class="flip-entry" id="entry-PENDID"><div class="flip-entry-title">pending</div></div>'
     printf '%s' '<div class="flip-entry" id="entry-IMGID"><div class="flip-entry-title">$STEM.img</div></div>'
     printf '%s' '<div class="flip-entry" id="entry-SHAID"><div class="flip-entry-title">$STEM.sha256</div></div>' ;;
@@ -184,6 +189,36 @@ run "$SYS
 $STICK" /dev/sda1 --pending --version v9.99
                                           expect "--pending --version can still pick a published build, unmarked" 0 'selected: '"$STEM"'\.img'
 printf '%s' "$OUT" | grep -q 'PENDING:' && bad "a published pick was marked PENDING" || ok "a published pick is not marked PENDING"
+
+echo "version"
+THIS_V=$(sed -n 's/^FLASH_VERSION=\([0-9.]*\).*/\1/p' sigmond-flash-latest.sh)
+run "$SYS" /dev/sda1 --list;              expect "every run names its own version first" 0 "sigmond-flash-latest.sh $THIS_V"
+printf '%s' "$OUT" | grep -q 'SIGMOND_NO_UPDATE=1' && ok "a skipped check says it was skipped" || bad "a skipped check is silent"
+# runu <published copy> <args...> — a run that does check the published copy, on a scratch copy of the script.
+runu(){
+    local pubf=$1; shift
+    cp sigmond-flash-latest.sh "$W/flash.sh"
+    OUT=$(FAKE_DISKS="$W/disks" FAKE_ROOT=/dev/sda1 CALLS="$W/calls" FAKE_FLASHER="$pubf" \
+          PATH="$BIN:$PATH" SIGMOND_IMAGE_DIR="$IMGS" DRY_RUN=1 \
+          timeout 20 bash "$W/flash.sh" "$@" </dev/null 2>&1)
+    RC=$?
+}
+printf '%s\n' "$SYS" > "$W/disks"; : > "$W/calls"
+mkpub(){ sed "s/^FLASH_VERSION=.*/FLASH_VERSION=$1/" sigmond-flash-latest.sh > "$W/pub-$1.sh"; echo "$W/pub-$1.sh"; }
+runu "$(mkpub "$THIS_V")" --list;         expect "the same published version says it is the latest" 0 "this is the latest published flasher \($THIS_V\)"
+runu "$(mkpub 2000.1.1.1)" --list;        expect "an older published copy marks this one a development copy" 0 "newer than the published one \(2000\.1\.1\.1\): a development copy"
+runu "$(mkpub 2999.1.1.1)" --list;        expect "a newer published copy replaces this one and asks for a rerun" 0 "a newer version of this script \(2999\.1\.1\.1; you had $THIS_V\)"
+grep -q '^FLASH_VERSION=2999.1.1.1' "$W/flash.sh" && ok "the copy was replaced" || bad "the copy was not replaced"
+runu "" --list;                           expect "no published copy keeps the could-not-check line" 0 "could not check for a newer version of this script \(no copy of this script"
+
+echo "--about"
+runu "$(mkpub "$THIS_V")" --about;        expect "--about names this script" 0 "this script: +sigmond-flash-latest.sh $THIS_V"
+printf '%s' "$OUT" | grep -q "published script: $THIS_V — this is the latest" && ok "--about compares with the published copy" || bad "--about did not compare"
+printf '%s' "$OUT" | grep -q 'newest published image: v9.99 (built 20260101)' && ok "--about names the newest published image" || bad "--about missed the published image"
+printf '%s' "$OUT" | grep -q 'newest pending image: v9.100 (built 20260102)' && ok "--about names the newer pending image" || bad "--about missed the pending image"
+printf '%s' "$OUT" | grep -q 'selected:' && bad "--about selected an image" || ok "--about selects and downloads nothing"
+runu "$(mkpub 2999.1.1.1)" --about;       expect "--about never replaces the script" 0 "published script: 2999\.1\.1\.1 — newer"
+grep -q "^FLASH_VERSION=$THIS_V" "$W/flash.sh" && ok "--about left the copy alone" || bad "--about replaced the copy"
 
 echo "sudo policy"
 if grep -q 'NOPASSWD\|sudoers' sigmond-flash-latest.sh; then bad "the flasher mentions NOPASSWD/sudoers"

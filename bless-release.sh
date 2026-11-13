@@ -408,12 +408,34 @@ FLASHER_NOTE=""
 if git -C "$REPO" show "origin/main:sigmond-flash-latest.sh" > "$INSTR_DIR/sigmond-flash-latest.sh" 2>/dev/null; then
     if bash -n "$INSTR_DIR/sigmond-flash-latest.sh" 2>/dev/null; then
         FLASHER="$INSTR_DIR/sigmond-flash-latest.sh"
+        _fv="$(sed -n 's/^FLASH_VERSION=\([0-9.]*\).*/\1/p' "$FLASHER" | head -1)"
     else
         FLASHER_NOTE="WARNING: sigmond-flash-latest.sh on origin/main fails bash -n -- not publishing it; each folder keeps its previous copy"
     fi
 else
     FLASHER_NOTE="NOTE: no sigmond-flash-latest.sh on origin/main -- the flasher in the download folders was not refreshed"
 fi
+# flasher_vs_published <dest> — why the flasher must NOT go to <dest>, or
+# nothing when it may.  Copies people already hold replace themselves only
+# when the published FLASH_VERSION is higher than theirs, so a changed flasher
+# published under the same (or a lower) number would never reach them, and
+# the folder would hold two different scripts claiming one version.  The same
+# bytes (a re-run) or no copy there yet are fine.
+_flash_ver() { sed -n 's/^FLASH_VERSION=\([0-9.]*\).*/\1/p' "$1" | head -1; }
+flasher_vs_published() {
+    local old new_v old_v
+    old="$(mktemp)" || return 0
+    if ! pub_cat "$1" sigmond-flash-latest.sh > "$old" 2>/dev/null || [ ! -s "$old" ] \
+       || cmp -s "$old" "$FLASHER"; then
+        rm -f "$old"; return 0
+    fi
+    new_v="$(_flash_ver "$FLASHER")"; old_v="$(_flash_ver "$old")"; rm -f "$old"
+    if [ -n "$new_v" ] && [ "$new_v" != "$old_v" ] \
+       && [ "$(printf '%s\n%s\n' "$old_v" "$new_v" | sort -V | tail -1)" = "$new_v" ]; then
+        return 0
+    fi
+    echo "sigmond-flash-latest.sh on origin/main differs from the copy already published but its FLASH_VERSION (${new_v:-none}) is not above that copy's (${old_v:-none}) -- not publishing it here, since copies people hold would never update to it; bump FLASH_VERSION on main and re-run the bless"
+}
 
 if [ $_have_inst -eq 0 ]; then
     G7_BAD+=("INSTALL.md is not readable at origin/main")
@@ -934,8 +956,12 @@ if [ $RC -eq 0 ]; then
                 # the same name updates the Drive file in place, so its id and link
                 # stay.  Only after the image landed, like the instructions.
                 if [ -n "$FLASHER" ]; then
-                    if pub_put "$_d" "" "$FLASHER" 2>/dev/null; then
-                        say "  [$_lab] flasher: sigmond-flash-latest.sh"
+                    _fwhy="$(flasher_vs_published "$_d")"
+                    if [ -n "$_fwhy" ]; then
+                        _allok=0
+                        say "  [$_lab] WARNING: $_fwhy"
+                    elif pub_put "$_d" "" "$FLASHER" 2>/dev/null; then
+                        say "  [$_lab] flasher: sigmond-flash-latest.sh${_fv:+ $_fv}"
                     else
                         _allok=0
                         say "  [$_lab] WARNING: could not publish sigmond-flash-latest.sh to $_d"
