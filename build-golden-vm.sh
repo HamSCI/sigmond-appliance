@@ -250,7 +250,8 @@ $SSH 'for d in /opt/git/sigmond/*/; do
         # ka9q-radio has one owner, ka9q-python: it must sit at ka9q-python
         # main'"'"'s compat commit, which is how radiod'"'"'s newest main reaches an image.
         if [ "$n" = ka9q-radio ]; then
-            rem=$(cat /opt/git/sigmond/ka9q-python/ka9q_radio_compat 2>/dev/null | tr -d "[:space:]")
+            # The file opens with "#" comment lines; the commit sits on its own line.
+            rem=$(grep -v "^[[:space:]]*#" /opt/git/sigmond/ka9q-python/ka9q_radio_compat 2>/dev/null | tr -d "[:space:]")
             if [ -z "$rem" ]; then printf "%s %.7s - UNREACHABLE\n" "$n" "$loc"
             elif [ "$loc" = "$rem" ]; then printf "%s %.7s %.7s CURRENT\n" "$n" "$loc" "$rem"
             else printf "%s %.7s %.7s BEHIND\n" "$n" "$loc" "$rem"; fi
