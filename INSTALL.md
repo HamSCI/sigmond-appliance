@@ -119,7 +119,8 @@ every byte:
 ```
 
 **Any OS, graphical:** balenaEtcher (balena.io/etcher) or Raspberry Pi Imager
-("Use custom"). Both verify the write.
+("Use custom"). Both verify the write. On a Mac, the step-by-step Imager
+handout is [docs/flash-usb-mac.md](docs/flash-usb-mac.md).
 
 **Command line (Linux):**
 ```
