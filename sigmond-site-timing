@@ -13,6 +13,10 @@
 #   6. hs-uploader key ownership repair (sigmond#41 family, until upstream fix)
 set -u
 say(){ echo "[site-timing] $*" | systemd-cat -t sigmond-site-timing -p notice; }
+# smd refuses to run when SUDO_USER is set, and a person runs this script with
+# sudo.  Every smd call below goes through this wrapper, which clears SUDO_*
+# (sigmond-location-check does the same for `smd config render`).
+smd(){ env -u SUDO_USER -u SUDO_UID -u SUDO_GID -u SUDO_COMMAND smd "$@"; }
 command -v timestd >/dev/null 2>&1 || { say "hf-timestd not installed - skipping"; exit 0; }
 CFG=/etc/hf-timestd/timestd-config.toml
 SUBNET=$(ip -4 route | awk '/proto kernel/{print $1; exit}')

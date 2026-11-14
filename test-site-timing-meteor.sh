@@ -21,6 +21,11 @@ awk '/^# ── 4\.5 meteor-scatter/{f=1} /^# ── 4\.7 ka9q-web/{f=0} f' \
           -e "s#/etc/meteor-scatter/#$T/meteor-scatter/#g" \
           -e "s#/opt/git/sigmond/meteor-scatter#$T/opt-meteor#g" > "$T/step.sh"
 grep -q 'meteor-scatter' "$T/step.sh" || { echo "FAIL: step 4.5 not found in sigmond-site-timing"; exit 1; }
+# smd refuses to run under sudo (SUDO_USER set); a person runs site-timing
+# with sudo.  The script's smd wrapper must clear SUDO_* -- the stub below
+# refuses like smd does, and the whole run goes under a sudo-like env.
+export SUDO_USER=rob SUDO_UID=1001 SUDO_GID=1001 SUDO_COMMAND=/usr/local/sbin/sigmond-site-timing
+{ grep '^smd()' "$HERE/sigmond-site-timing"; cat "$T/step.sh"; } > "$T/step2.sh" && mv "$T/step2.sh" "$T/step.sh"
 mkdir -p "$T/bin" "$T/radio" "$T/meteor-scatter" "$T/opt-meteor"
 : > "$T/radio/radiod@b4.conf"
 
@@ -29,6 +34,7 @@ mkdir -p "$T/bin" "$T/radio" "$T/meteor-scatter" "$T/opt-meteor"
 # which is also what an smd older than v3.72 does with the unknown verb.
 cat > "$T/bin/smd" <<EOF
 #!/bin/bash
+if [ -n "\${SUDO_USER:-}" ]; then echo "smd: refusing to run under sudo" >&2; exit 1; fi
 echo "\$*" >> "$T/smd.log"
 case "\$*" in
   "admin instance canonical AC0G/B4"|"admin instance canonical ac0g/b4") echo 'AC0G=B4' ;;
