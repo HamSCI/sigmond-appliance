@@ -127,18 +127,76 @@ if [ -f "$CFG" ] && { [ -f "$LTS" ] || [ -f "$WIZ" ]; }; then
     T4OK=""
     T4CAND=$( { [ -f "$LTS" ] && awk '$1 ~ /^(server|pool|peer)$/ {print $2}' "$LTS"
                 [ -f "$WIZ" ] && awk '$1 ~ /^(server|peer)$/ {print $2}' "$WIZ"; } | awk '!seen[$0]++')
+    # ⛔ Judge chrony AFTER it settles.  This step runs right after chrony
+    # restarts (a boot, `sigmond-setup --ntp`), when the LAN server still
+    # shows `^?` -- not yet selected, stratum 0, leap ?, refid ? -- and the
+    # one-shot judgement logged "NOT declared" and nothing reran it: N8UR
+    # needed a manual rerun (2026-11-14); SIGMA sat on T2 for days with
+    # `^* 192.168.1.80` stratum 1.  So: a server that is merely UNSELECTED
+    # is waited for (bounded); one that is clearly disqualified (stratum
+    # above 1, leap alarm, LOCL/INIT, falseticker, absent) is judged at once.
+    # Only the timing of the judgement changed -- the rules are the same.
+    T4_WAIT_S=${SITE_TIMING_T4_WAIT_S:-180}
+    T4_POLL_S=${SITE_TIMING_T4_POLL_S:-10}
+    T4_RETRY_AFTER=${SITE_TIMING_T4_RETRY_AFTER:-10min}
+    T4_RETRY_CMD=${SITE_TIMING_T4_RETRY_CMD:-/usr/local/sbin/sigmond-site-timing}
+    T4_RETRY_UNIT=sigmond-site-timing-retry
+    t4_probe() {   # chrony's view of server $1 -> T4_ADDR T4_ST T4_STRATUM T4_LEAP T4_REFID
+        local ip=$1 nd src
+        T4_ADDR=$ip
+        [[ "$ip" =~ ^[0-9.]+$|: ]] || T4_ADDR=$(getent ahostsv4 "$ip" 2>/dev/null | awk 'NR==1 {print $1}')
+        src=$(chronyc -n sources 2>/dev/null); T4_SRC_RC=$?
+        read -r T4_ST T4_STRATUM <<<"$(printf '%s\n' "$src" | awk -v ip="${T4_ADDR:-$ip}" '$2 == ip {print $1, $3; exit}')"
+        nd=$(chronyc -n ntpdata "${T4_ADDR:-$ip}" 2>/dev/null)
+        T4_LEAP=$(printf '%s\n' "$nd" | sed -n 's/^Leap status *: *//p' | head -1)
+        T4_REFID=$(printf '%s\n' "$nd" | sed -n 's/^Reference ID *: *[0-9A-Fa-f]* *(\(.*\)).*/\1/p' | head -1)
+    }
+    t4_verdict() {   # after t4_probe: OK (declare), WAIT (merely unselected), NO (disqualified)
+        if [[ "${T4_ST:-}" == "^*" || "${T4_ST:-}" == "^+" ]] && [ "${T4_STRATUM:-}" = 1 ] \
+           && [ "$T4_LEAP" = Normal ] && [ -n "$T4_REFID" ] && [ "$T4_REFID" != LOCL ] && [ "$T4_REFID" != INIT ]; then
+            echo OK; return
+        fi
+        # chronyc not answering yet (chrony still starting): settling
+        if [ "$T4_SRC_RC" != 0 ]; then echo WAIT; return; fi
+        if [ "${T4_ST:-}" = "^?" ] && [[ "${T4_STRATUM:-0}" == [01] ]] \
+           && { [ -z "$T4_LEAP" ] || [ "$T4_LEAP" = Normal ]; } \
+           && [ "$T4_REFID" != LOCL ] && [ "$T4_REFID" != INIT ]; then
+            echo WAIT; return
+        fi
+        echo NO
+    }
+    t4_any_waiting() { local c; for c in $T4CAND; do t4_probe "$c"; [ "$(t4_verdict)" = WAIT ] && return 0; done; return 1; }
+    if t4_any_waiting && [ "$T4_WAIT_S" -gt 0 ] 2>/dev/null; then
+        T4_T0=$SECONDS
+        say "LAN server(s) not yet selected by chrony - waiting up to ${T4_WAIT_S}s (polling every ${T4_POLL_S}s) before judging T4"
+        while [ $((SECONDS - T4_T0)) -lt "$T4_WAIT_S" ]; do
+            sleep "$T4_POLL_S"
+            t4_any_waiting || { say "chrony settled after $((SECONDS - T4_T0))s - judging T4 now"; T4_T0=; break; }
+        done
+        [ -n "$T4_T0" ] && say "chrony still had not selected the LAN server(s) after $((SECONDS - T4_T0))s - gave up waiting"
+    fi
+    T4_RETRY_NOTE=""
+    t4_arm_retry() {   # ONE bounded retry, never stacked; the retry itself never re-arms
+        [ -n "$T4_RETRY_NOTE" ] && return
+        if [ -n "${SITE_TIMING_NO_RETRY:-}" ]; then
+            T4_RETRY_NOTE="this was the retry; rerun: sudo $T4_RETRY_CMD"
+        elif systemctl is-active --quiet "$T4_RETRY_UNIT.timer" "$T4_RETRY_UNIT.service" 2>/dev/null; then
+            T4_RETRY_NOTE="a retry is already pending ($T4_RETRY_UNIT)"
+        elif systemd-run --quiet --on-active="$T4_RETRY_AFTER" --unit="$T4_RETRY_UNIT" \
+                 --setenv=SITE_TIMING_NO_RETRY=1 "$T4_RETRY_CMD" >/dev/null 2>&1; then
+            T4_RETRY_NOTE="will retry once in $T4_RETRY_AFTER ($T4_RETRY_UNIT)"
+        else
+            T4_RETRY_NOTE="could not schedule a retry; rerun: sudo $T4_RETRY_CMD"
+        fi
+    }
     for ip in $T4CAND; do
-        addr=$ip
-        [[ "$ip" =~ ^[0-9.]+$|: ]] || addr=$(getent ahostsv4 "$ip" 2>/dev/null | awk 'NR==1 {print $1}')
-        read -r st stratum <<<"$(chronyc -n sources 2>/dev/null | awk -v ip="${addr:-$ip}" '$2 == ip {print $1, $3; exit}')"
-        nd=$(chronyc -n ntpdata "${addr:-$ip}" 2>/dev/null)
-        leap=$(printf '%s\n' "$nd" | sed -n 's/^Leap status *: *//p' | head -1)
-        refid=$(printf '%s\n' "$nd" | sed -n 's/^Reference ID *: *[0-9A-Fa-f]* *(\(.*\)).*/\1/p' | head -1)
-        if [[ "${st:-}" == "^*" || "${st:-}" == "^+" ]] && [ "${stratum:-}" = 1 ] \
-           && [ "$leap" = Normal ] && [ -n "$refid" ] && [ "$refid" != LOCL ] && [ "$refid" != INIT ]; then
+        t4_probe "$ip"; v=$(t4_verdict); addr=$T4_ADDR; st=$T4_ST; stratum=$T4_STRATUM; leap=$T4_LEAP; refid=$T4_REFID
+        if [ "$v" = OK ]; then
             T4OK="$T4OK ${addr:-$ip}"
         else
-            say "LAN server $ip NOT declared as T4 (chrony ${st:-absent}, stratum ${stratum:-?}, leap ${leap:-?}, refid ${refid:-?}) - will retry on a later run"
+            if [ "$v" = WAIT ]; then t4_arm_retry; note=$T4_RETRY_NOTE
+            else note="rerun after fixing: sudo $T4_RETRY_CMD"; fi
+            say "LAN server $ip NOT declared as T4 (chrony ${st:-absent}, stratum ${stratum:-?}, leap ${leap:-?}, refid ${refid:-?}) - $note"
         fi
     done
     if [ -n "$T4OK" ]; then
