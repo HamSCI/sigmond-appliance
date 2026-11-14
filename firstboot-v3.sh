@@ -3788,6 +3788,12 @@ if VMID="$VMID" USB_VID_DID="$USB_VID_DID" CPU_VENDOR="$CPU_VENDOR" \
     echo "LOCAL_RADIOD_COUNT=1"
     grep -v '^#' /etc/sigmond-appliance/layout.env; } > /etc/sigmond/host-layout.env
   say "finalize: host tuned (grub isolcpus/IOMMU, vfio, cpu-pin hookscript, qm bind)"
+  # The satellite guard's host side (sigmond-link): inert until the VM's own
+  # [link_schedule] turns it on, which the host follows through the guest
+  # agent.  Offline-safe: probe mode needs no download.  (sigmond plan
+  # 2026-11-14-satellite-host-guard; Rob 2026-11-13: the host has to be.)
+  VMID="$VMID" bash "$SIG/scripts/proxmox/install-host-link.sh" >>"$LOG" 2>&1 \
+    || say "finalize: WARNING — satellite guard not installed on the host (see $LOG)"
 else
   say "finalize: WARNING — host-apply failed (see $LOG); VM left untuned"
   qm start "$VMID" 2>/dev/null
