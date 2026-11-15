@@ -175,8 +175,11 @@ say "wizard sourced from sigmond $_wiz_head ($(wc -l < sigmond-wizard.sh) lines)
 # ...and so must every helper the stick carries into the host and the VM.
 # sigmond-site-timing (T4/VTEC discovery) shipped from the loose rig copy with
 # nothing comparing it to the tag (v3.68 pre-build review, 2026-10-05).
+# Since 2026-11-15 it lives in sigmond (bin/sigmond-site-timing): the golden
+# VM's sigmond install.sh links /usr/local/sbin to it, so the stick no longer
+# carries it.
 for _f in firstboot-v3.sh QUICKSTART.txt \
-          sigmond-site-timing sigmond-operator.sh sigmond-location-check \
+          sigmond-operator.sh sigmond-location-check \
           sigmond-net-probe sigmond-wifi sigmond-wait-nat64 sigmond-vm6proxy sigmond-vm4relay; do
     [ -f "$REPO/$_f" ] || { say "FATAL: $_f missing from $REPO"; exit 1; }
     if [ -e "$_f" ] && ! cmp -s "$REPO/$_f" "$_f"; then
@@ -449,10 +452,8 @@ WSEED=""
 [ -z "$WSEED" ] && [ -f wisdomf-ryzen5825u ] && WSEED=wisdomf-ryzen5825u
 [ -n "$WSEED" ] && cp "$WSEED" /tmp/sigpay.$$/wisdomf-seed \
   || say "WARN: no wisdom seed in rig — first radiod start may wait on the planner"
-# site-timing auto-wiring helper (chrony refclocks, LAN NTP/GNSS discovery,
-# metrology channels, full timestd profile) — pushed into the VM by the wizard
-[ -f sigmond-site-timing ] && cp sigmond-site-timing /tmp/sigpay.$$/ \
-  || say "WARN: sigmond-site-timing missing from rig — timing chain manual"
+# sigmond-site-timing is no longer a payload file: it lives in sigmond and
+# reaches the VM through the golden VM's own sigmond checkout (2026-11-15).
 # operator shell helpers (tm/ll/lrt) for host + VM /etc/profile.d
 [ -f sigmond-operator.sh ] && cp sigmond-operator.sh /tmp/sigpay.$$/
 # location authority (GPSDO definitive over operator entry)

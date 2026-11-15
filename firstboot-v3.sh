@@ -3003,7 +3003,9 @@ mkdir -p "$APP"
 cp /mnt/sig-media/sigmond-wizard.sh /usr/local/sbin/sigmond-setup 2>/dev/null && chmod +x /usr/local/sbin/sigmond-setup
 cp /mnt/sig-media/QUICKSTART.txt "$APP"/ 2>/dev/null
 cp /mnt/sig-media/wisdomf-seed "$APP"/ 2>/dev/null
-cp /mnt/sig-media/sigmond-site-timing "$APP"/ 2>/dev/null
+# sigmond-site-timing: no longer on the stick; the VM's sigmond carries it
+# (2026-11-15).  A stale copy in $APP from an older stick is harmless: the
+# wizard uses it only for a VM whose sigmond predates the move.
 # operator shell helpers (rob's tm/ll/lrt): host now, VM via the wizard
 cp /mnt/sig-media/sigmond-operator.sh "$APP"/ 2>/dev/null
 cp /mnt/sig-media/sigmond-location-check "$APP"/ 2>/dev/null
