@@ -363,7 +363,12 @@ printf '${GX_TOKEN}=%s\\n' \"\$?\"
 cat /tmp/u2-gx.out
 exit 0"
     b64="$(printf '%s\n' "$script" | base64 -w0)"
-    $SSHN "qm guest exec $VMID --timeout $t -- bash -lc \"echo $b64 | base64 -d > /tmp/u2-gx.sh; bash /tmp/u2-gx.sh\"" > "$raw" 2>&1
+    # Every snippet runs in its own transient unit, outside
+    # qemu-guest-agent.service's MemoryMax=128M, as test-nested-v3.sh's
+    # guest requests do.  eb925c1 moved only the --apply calls out; on the
+    # v3.92 ladder the cap then killed the dry `smd update` and `smd doctor`
+    # (exit 137), which no station ever runs under that cap.
+    $SSHN "qm guest exec $VMID --timeout $t -- bash -lc \"echo $b64 | base64 -d > /tmp/u2-gx.sh; systemd-run --quiet --wait --pipe --collect --unit=u2gx-$tag /bin/bash -l /tmp/u2-gx.sh\"" > "$raw" 2>&1
     local sshrc=$?
     if [ "$sshrc" -ne 0 ] && [ ! -s "$raw" ]; then
         say "guest-exec channel: ssh/qm exited $sshrc with no output ($tag)"
