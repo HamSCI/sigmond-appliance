@@ -3276,6 +3276,16 @@ umount /mnt/sig-media 2>/dev/null; losetup -d "$LO" 2>/dev/null
 # ── size the VM to this host: all CPUs minus one HT pair, RAM minus 2G ──
 MEMTOT=$(free -m | awk 'NR==2{print $2}')
 VMMEM=$(( MEMTOT - 2048 )); [ "$VMMEM" -lt 4096 ] && VMMEM=4096
+# The BIOS's graphics carve-out (UMA frame buffer) hides RAM from MemTotal:
+# every Beelink shipped with 3-4 GB of 16 reserved (N8UR, 2026-11-17).  A
+# headless host needs 64 MB.  Only a person at the console can change it;
+# after that, pm-memory --apply grows the VM at its next restart.
+VRAM_MB=$(for f in /sys/class/drm/card*/device/mem_info_vram_total; do
+            [ -r "$f" ] && echo $(( $(cat "$f") / 1048576 )); done | sort -n | tail -1)
+if [ -n "$VRAM_MB" ] && [ "$VRAM_MB" -gt 512 ]; then
+  say "import: WARN the BIOS reserves ${VRAM_MB} MB of RAM for the integrated GPU; set UMA Frame Buffer Size to 64 MB at the console, then run pm-memory --apply (the VM gains about ${VRAM_MB} MB at its next restart)"
+fi
+[ -f "$SIG/scripts/proxmox/pm-memory.py" ] && install -m 755 "$SIG/scripts/proxmox/pm-memory.py" /usr/local/sbin/pm-memory
 LAYOUT_OK=0
 if [ -x "$SIG/scripts/proxmox/host-discover.sh" ]; then
   declare -A KV

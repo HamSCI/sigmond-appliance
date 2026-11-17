@@ -200,6 +200,16 @@ sudo chown "$USER" ~/site-keys.tar.gz
 2. Power on and **boot from the stick** — press the boot-menu key as it
    starts (usually F7, F11, F12, or Del) and pick the USB entry. If no menu
    appears, enter BIOS setup and turn **Fast Boot OFF**.
+
+   **While you are in BIOS setup, give the graphics memory back.** Most
+   station computers set aside 3-4 GB of their RAM for the built-in graphics,
+   and the station never gets to use it. A station with only a text console
+   needs 64 MB. Look for **UMA Frame Buffer Size** (on a Beelink it sits
+   under the Advanced menu, in the graphics or GFX settings; the names vary
+   by maker), set it to **64M**, then save and exit. The installer gives the
+   station everything the computer can then see. (N8UR, 2026-11-17: John
+   Ackermann found 4 GB of his 16 GB set aside; after the change the
+   computer saw 15.5 GB.)
 3. **A boot menu appears, counting down from 60 seconds.** The first entry
    is highlighted and reads:
 
@@ -523,6 +533,20 @@ document lives in the HamSCI/sigmond-appliance repo as `INSTALL.md` — keep it
 updated as the wizard changes.*
 
 ---
+
+### A station installed before the graphics-memory change
+
+Change the setting first: someone at the station powers it off, enters BIOS
+setup, sets **UMA Frame Buffer Size** to **64M** (§5 step 2), and powers it
+back on. Then, on the Proxmox host (`ssh root@<host>` or the host console):
+
+    pm-memory            # shows the RAM the host now sees and what the station holds
+    pm-memory --apply    # gives the station the extra RAM at its next restart
+    qm reboot 100        # restarts the station now (it stops recording for a minute or two)
+
+`pm-memory` never restarts the station itself. Leave out the `qm reboot` and
+the station picks up the memory the next time it restarts for any reason.
+`pm-align` installs `pm-memory` and prints its one-line finding on each run.
 
 ## 12. Moving a station (staged in one place, deployed in another)
 
