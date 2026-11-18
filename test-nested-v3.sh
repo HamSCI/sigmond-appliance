@@ -1258,8 +1258,15 @@ PY
 # <<< sink_part2
 # sp2_gx <timeout> <script> <raw>: run a guest script through qm guest exec,
 # base64-encoded so the request holds only ASCII; qm's reply lands in <raw>.
+# The script runs in a transient unit of its own, outside the guest agent's
+# MemoryMax=128M, as gq and test-update-v3.sh already do: v3.93's ladder,
+# 2026-11-18 04:54Z, `smd admin uploader manifest` inside this probe hit the
+# cap and the kernel killed it, exit 137.
+SP2_N=0
 sp2_gx(){
-    $SSHN "qm guest exec $VMID --timeout $1 -- bash -lc \"echo $(printf '%s\n' "$2" | base64 -w0) | base64 -d > /tmp/sig-sp2.sh; bash /tmp/sig-sp2.sh\"" > "$3" 2>&1
+    SP2_N=$((SP2_N + 1))
+    local unit="rig-sp2-$$-$SP2_N"
+    $SSHN "qm guest exec $VMID --timeout $1 -- bash -lc \"echo $(printf '%s\n' "$2" | base64 -w0) | base64 -d > /tmp/$unit.sh; systemd-run --quiet --wait --pipe --collect --unit=$unit /bin/bash -l /tmp/$unit.sh\"" > "$3" 2>&1
 }
 
 KEY="$HOME/appliance/build/applkey"
