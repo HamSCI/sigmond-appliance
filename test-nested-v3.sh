@@ -75,11 +75,15 @@ phase_d_verdict() {
 # it.  hbq=1 for a wizard that asks the three heartbeat questions (v3.52 to
 # v3.83: the update rig's base image); hbq=0 for one that asks none (v3.84 on,
 # rob 2026-10-29).  ntpq=1 for a wizard that asks for a local NTP server
-# (v3.84 on); ntpq=0 for one that does not.  One answer too many or too few
+# (v3.84 on); ntpq=0 for one that does not.  roleq=1 for a wizard that
+# first asks the station role, full or radiod-only (v3.93 on, rob's
+# radiod-only role); the rig answers 1, full.  One answer too many or too few
 # shifts every answer after it, and the wizard then reads a PSWS id as a
-# heartbeat host.
+# heartbeat host (v3.93's first ladder: the role question took the callsign).
 wizard_answers() {
-    local a=(
+    local a=()
+    [ "${4:-0}" = 1 ] && a+=( '1' )   # station role: 1 = full
+    a+=(
         'N0CALL/T1'          # reporter id
         'EM00aa'             # grid square
         'Tier2 test dipole'  # antenna description
@@ -1692,8 +1696,15 @@ case "$($SSHN "mkdir -p /etc/sigmond-appliance && printf '%s\n' SIGMOND_RAC_SERV
     *PIN:OK*) ;;
     *) say "FATAL: could not pin the gateway on the nested host (the pin did not read back)"; exit 1 ;;
 esac
-mapfile -t WIZARD_ANSWERS < <(wizard_answers "$RACQ" "$HBQ" "$NTPQ")
-say "wizard answers: ${#WIZARD_ANSWERS[@]} (remote-access question: $([ "$RACQ" = 1 ] && echo asked || echo not asked); heartbeat questions: $([ "$HBQ" = 1 ] && echo asked || echo not asked); NTP question: $([ "$NTPQ" = 1 ] && echo asked || echo not asked))"
+# v3.93 on asks the station role before anything else (rob's radiod-only
+# role).  Read the wizard's code, not its comments, as above.
+case "$($SSHN "grep -v '^[[:space:]]*#' /usr/local/sbin/sigmond-setup | grep -q 'Station role, 1 or 2' && echo ROLEQ:YES || echo ROLEQ:NO" 2>&1)" in
+    *ROLEQ:YES*) ROLEQ=1 ;;
+    *ROLEQ:NO*)  ROLEQ=0 ;;
+    *) say "FATAL: could not tell whether the host's wizard asks the station role"; exit 1 ;;
+esac
+mapfile -t WIZARD_ANSWERS < <(wizard_answers "$RACQ" "$HBQ" "$NTPQ" "$ROLEQ")
+say "wizard answers: ${#WIZARD_ANSWERS[@]} (role question: $([ "$ROLEQ" = 1 ] && echo asked || echo not asked); remote-access question: $([ "$RACQ" = 1 ] && echo asked || echo not asked); heartbeat questions: $([ "$HBQ" = 1 ] && echo asked || echo not asked); NTP question: $([ "$NTPQ" = 1 ] && echo asked || echo not asked))"
 # The same four variables go into the wizard's own environment as well.  A
 # wizard from before v3.71 honours the environment and ignores the file, and
 # against such a wizard the answer `n` would be the only other guard.
