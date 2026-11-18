@@ -90,8 +90,8 @@ nothing.
 
 **By hand:** ask your fleet admin for the current release — or download links for it:
 
-- `sigmond-appliance-v3.90-20261111-release.img`  (about 5.9 GB)
-- `sigmond-appliance-v3.90-20261111-release.sha256`  (its checksum)
+- `sigmond-appliance-v3.92-20261116-release.img`  (about 5.9 GB)
+- `sigmond-appliance-v3.92-20261116-release.sha256`  (its checksum)
 
 Each release carries its own version and date in the filename; use the names
 you were given wherever this guide shows one.
@@ -100,7 +100,7 @@ The image is published **uncompressed** (`.img`) — there is nothing to
 decompress. With both files in one folder, check it:
 
 ```
-sha256sum -c sigmond-appliance-v3.90-20261111-release.sha256
+sha256sum -c sigmond-appliance-v3.92-20261116-release.sha256
 ```
 
 ---
@@ -115,7 +115,7 @@ refuses the disk your computer runs from, and reads the stick back to compare
 every byte:
 
 ```
-./flash-usb.sh sigmond-appliance-v3.90-20261111-release.img
+./flash-usb.sh sigmond-appliance-v3.92-20261116-release.img
 ```
 
 **Any OS, graphical:** balenaEtcher (balena.io/etcher) or Raspberry Pi Imager
@@ -125,7 +125,7 @@ handout is [docs/flash-usb-mac.md](docs/flash-usb-mac.md).
 **Command line (Linux):**
 ```
 lsblk -dno NAME,SIZE,TRAN,RM,MODEL     # find the stick: check size, removable
-sudo dd if=sigmond-appliance-v3.90-20261111-release.img of=/dev/sdX bs=4M \
+sudo dd if=sigmond-appliance-v3.92-20261116-release.img of=/dev/sdX bs=4M \
         oflag=direct conv=fsync status=progress
 sync
 ```
@@ -135,12 +135,12 @@ sync
 ```
 diskutil list                      # find your stick, e.g. /dev/disk4
 diskutil unmountDisk /dev/disk4
-sudo dd if=sigmond-appliance-v3.90-20261111-release.img of=/dev/rdisk4 bs=4m
+sudo dd if=sigmond-appliance-v3.92-20261116-release.img of=/dev/rdisk4 bs=4m
 ```
 
 **Verify a hand-written stick** by reading back exactly the image's size:
 ```
-IMG=sigmond-appliance-v3.90-20261111-release.img
+IMG=sigmond-appliance-v3.92-20261116-release.img
 sudo head -c "$(stat -c %s $IMG)" /dev/sdX | sha256sum
 sha256sum $IMG                     # the two hashes must match
 ```
@@ -400,8 +400,7 @@ you to check the antenna and its cable before anything else.  When the radio its
 stopped, the line says so instead and asks you to tell your fleet admin.
 
 A new station sends nothing yet.  It starts with its site sink switch at `off`: it
-records and decodes, but sends no spots or data to wsprnet, pskreporter.info,
-wsprdaemon.org or PSWS.  So the uploads line shows `wait` and says `new station`.
+records and decodes, but sends no spots or data to wsprdaemon.org or PSWS.  So the uploads line shows `wait` and says `new station`.
 
 When every other line shows `ok` or `--`, turn the uploads on:
 
@@ -422,8 +421,9 @@ packages stay on the station, and nothing else recorded before the switch ships.
 station packs each UTC day's data after that day ends, between 01:00 and about 05:00
 UTC.  If you turn the uploads on before that day's packing finishes, the package goes
 out later, once the station builds it.  While a packing job runs, `smd sink upload` refuses,
-names the job, and asks you to try again when it ends.  About fifteen minutes after,
-search your reporter ID at wsprnet.org (Database) and your callsign at pskreporter.info.
+names the job, and asks you to try again when it ends.  Your station sends every spot to wsprdaemon.org only; it forwards them to wsprnet.org and
+pskreporter.info.  About fifteen minutes after, search your reporter ID at wsprnet.org
+(Database) and your callsign at pskreporter.info.
 
 If you like, open the pages from another computer on the same network.  `sigmond-check`
 printed their addresses, for example `http://192.168.1.50:8081` over IPv4 or
