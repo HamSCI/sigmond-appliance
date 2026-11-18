@@ -20,18 +20,23 @@
 #   7. the install instructions name this release: origin/main's INSTALL.md
 #      reads Status: current and Verified against: sigmond-appliance <version>,
 #      and origin/main's docs/install-page.html names this image's file name
+#   8. the changelog names this release: origin/main's CHANGELOG.md holds
+#      exactly one "## sigmond-appliance <version>" heading, not marked
+#      (draft), with text under it
 #
 # Dry-run by default, matching smd update's contract on this fleet.
 # --apply is required to create anything, and even then only after every
-# gate above has passed.  On --apply the bless also publishes the two
-# instruction files beside the image at every publish target, as
-# <image stem>.INSTALL.md and <image stem>.INSTALL.html.
+# gate above has passed.  On --apply the release notes open with the
+# version's changelog section, under "What's new", and the bless also
+# publishes three files beside the image at every publish target:
+# <image stem>.INSTALL.md, <image stem>.INSTALL.html and
+# <image stem>.CHANGELOG.md.
 #
 # Usage: bless-release.sh <version> [--apply]
 #
 # Env overrides (used by the verification suite to point at scratch
 # fixtures instead of the real rig -- never required for normal use;
-# test-bless-instructions.sh builds such fixtures for gate 7 and the publish):
+# test-bless-instructions.sh builds such fixtures for gates 7 and 8 and the publish):
 #   APPLIANCE_REPO  sigmond-appliance checkout (default: $HOME/appliance/repos/sigmond-appliance)
 #   RIG_DIR         build/test staging dir: images, .sha256, .manifest.txt,
 #                    test-v3.log (default: $HOME/appliance/v3)
@@ -469,6 +474,102 @@ else
         "$_g7_join -- update INSTALL.md and docs/install-page.html for this image, commit and push them, then bless (docs/RELEASE.md, rung 3)"
 fi
 
+# ---- Gate 8: the changelog names THIS release --------------------------------
+#
+# ⛔ Michael, 2026-11-18: every release carries a changelog, and the bless
+# refuses without one.  Until then the only account of a release was the
+# generated `git log --oneline` in its notes: commit subjects, written for the
+# next developer, not for the operator deciding whether to install.
+#
+# CHANGELOG.md at the repo root holds one section per version, newest first,
+# each under a heading of the form
+#     ## sigmond-appliance v3.93 — blessed 2026-11-19
+# The words after the version are free.  A heading that holds "(draft)" marks
+# a section still being written.
+#
+# WHERE the gate reads: origin/main, through `git show`, for gate 7's reason.
+# The section gets written after the hardware test, in a commit later than the
+# tag, so the tag's tree lacks it and the working tree may differ from what the
+# team pushed.
+#
+# PASS needs all four:
+#   - CHANGELOG.md is readable at origin/main
+#   - exactly one "## sigmond-appliance <VERSION>" heading, the version a whole
+#     token: the heading continues with a space or ends there, so v3.7 does not
+#     match v3.70, and v3.70 does not match v3.701 or v3.70.1
+#   - that heading does not hold "(draft)", in any letter case
+#   - the section (up to the next "## " line) holds at least one non-blank line
+#
+# The section's bytes go into the temp directory under the names --apply uses:
+# the body for the release notes, and <stem>.CHANGELOG.md for the publish
+# targets.  So what gets published is what this gate checked, as in gate 7.
+G8_NAME="8 (changelog names this release)"
+CL_URL="https://github.com/$GH_REPO/blob/main/CHANGELOG.md"
+CL_FULL="$INSTR_DIR/CHANGELOG.origin-main.md"
+CL_BODY="$INSTR_DIR/changelog-section.body"
+CL_PUB="$INSTR_DIR/${INSTR_STEM:-unresolved}.CHANGELOG.md"
+G8_BAD=""
+G8_DO=""
+if ! git -C "$REPO" show "origin/main:CHANGELOG.md" > "$CL_FULL" 2>/dev/null; then
+    G8_BAD="CHANGELOG.md is not readable at origin/main"
+    G8_DO="create CHANGELOG.md with a '## sigmond-appliance $VERSION' section"
+else
+    _cl_n=0; _cl_head=""; _cl_in=0; _cl_body=()
+    while IFS= read -r _l || [ -n "$_l" ]; do
+        _lc="${_l%$'\r'}"
+        case "$_lc" in
+            "## "*)
+                _cl_in=0
+                _rest="${_lc#"## sigmond-appliance "}"
+                if [ "$_rest" != "$_lc" ]; then
+                    case "$_rest" in
+                        "$VERSION"|"$VERSION "*)
+                            _cl_n=$((_cl_n+1))
+                            if [ "$_cl_n" -eq 1 ]; then _cl_head="$_l"; _cl_in=1; fi
+                            ;;
+                    esac
+                fi
+                continue
+                ;;
+        esac
+        [ "$_cl_in" -eq 1 ] && _cl_body+=("$_l")
+    done < "$CL_FULL"
+    # Trim blank lines from both ends of the body; keep the bytes in between.
+    _first=-1; _last=-1
+    for _i in "${!_cl_body[@]}"; do
+        case "${_cl_body[$_i]}" in *[![:space:]]*)
+            [ "$_first" -lt 0 ] && _first=$_i
+            _last=$_i ;;
+        esac
+    done
+    if [ "$_cl_n" -eq 0 ]; then
+        G8_BAD="CHANGELOG.md has no '## sigmond-appliance $VERSION' heading"
+        G8_DO="write the $VERSION section at the top of CHANGELOG.md"
+    elif [ "$_cl_n" -gt 1 ]; then
+        G8_BAD="CHANGELOG.md has $_cl_n headings for sigmond-appliance $VERSION"
+        G8_DO="merge them into one section"
+    elif [[ "${_cl_head,,}" == *"(draft)"* ]]; then
+        G8_BAD="the $VERSION heading is marked draft ('${_cl_head%$'\r'}')"
+        G8_DO="finish the section and drop '(draft)' from its heading"
+    elif [ "$_first" -lt 0 ]; then
+        G8_BAD="the $VERSION section has no text under its heading"
+        G8_DO="write what changed in $VERSION under its heading"
+    else
+        printf '%s\n' "${_cl_body[@]:_first:_last-_first+1}" > "$CL_BODY"
+        {   printf '%s\n' "$_cl_head"
+            printf '%s\n' "${_cl_body[@]:0:_last+1}"
+            printf '\nFull changelog: %s\n' "$CL_URL"
+        } > "$CL_PUB"
+    fi
+fi
+if [ -z "$G8_BAD" ]; then
+    gate_pass "$G8_NAME" \
+        "CHANGELOG.md has a $VERSION section ($((_last-_first+1)) line(s)) (origin/main $(git -C "$REPO" rev-parse --short origin/main 2>/dev/null))"
+else
+    gate_fail "$G8_NAME" \
+        "$G8_BAD -- $G8_DO, commit and push CHANGELOG.md, then bless (docs/RELEASE.md, rung 3)"
+fi
+
 # ---- report -----------------------------------------------------------------
 say "=== bless-release.sh $VERSION ($([ $APPLY -eq 1 ] && echo apply || echo dry-run)) ==="
 i=0
@@ -493,7 +594,8 @@ if [ $APPLY -eq 0 ]; then
     say "DRY RUN -- would create Release $VERSION on $GH_REPO attaching:"
     say "  $(basename "$MANIFEST")"
     say "  $(basename "$SHAFILE")"
-    say "DRY RUN -- would also publish $(basename "$INSTR_MD") and $(basename "$INSTR_HTML") beside the image at every publish target (from origin/main)"
+    say "DRY RUN -- would also publish $(basename "$INSTR_MD"), $(basename "$INSTR_HTML") and $(basename "$CL_PUB") beside the image at every publish target (from origin/main)"
+    say "DRY RUN -- the release notes would open with CHANGELOG.md's $VERSION section, under \"What's new\""
     if [ -n "$FLASHER" ]; then say "DRY RUN -- and sigmond-flash-latest.sh (from origin/main), under its fixed name"; else say "DRY RUN -- ${FLASHER_NOTE:-no flasher}"; fi
     say "Re-run with --apply to publish. Creating a public Release is outward-facing and requires explicit human authorization."
     exit 0
@@ -569,9 +671,25 @@ if [ -n "$PREV_TAG" ]; then
     PREV_TAG_COMMIT="$(git -C "$REPO" rev-parse --short "${PREV_TAG}^{commit}" 2>/dev/null)"
 fi
 
+# The notes open with the changelog section gate 8 checked (CL_BODY), under
+# "What's new": the words written for the operator come first, the generated
+# record after.  WN_FIRST..WN_LAST are the section's line numbers in $NOTES, so
+# the leak check below can name CHANGELOG.md as the place to fix a hit there.
 NOTES="$(mktemp)"
 {
     echo "## sigmond-appliance $VERSION"
+    echo
+    echo "### What's new"
+    echo
+} > "$NOTES"
+WN_FIRST=$(( $(wc -l < "$NOTES") + 1 ))
+cat "$CL_BODY" >> "$NOTES"
+WN_LAST=$(wc -l < "$NOTES")
+{
+    echo
+    echo "Full changelog: $CL_URL"
+    echo
+    echo "### Release record"
     echo
     echo "- Version: $VERSION"
     echo "- Appliance commit: $TAG_COMMIT"
@@ -580,14 +698,14 @@ NOTES="$(mktemp)"
     echo "- Test verdict: PASS (PHASE D PASS -- NESTED TEST COMPLETE, test-nested-v3.sh)"
     echo
     if [ -n "$PREV_TAG_COMMIT" ]; then
-        echo "### Changelog since $PREV_TAG_COMMIT"
+        echo "### Commits since $PREV_TAG_COMMIT"
     else
-        echo "### Changelog (first release)"
+        echo "### Commits (first release)"
     fi
     echo '```'
     echo "$CHANGELOG"
     echo '```'
-} > "$NOTES"
+} >> "$NOTES"
 
 # Leakage self-check -- SHAPES, not an enumerated list of known hostnames.
 # A denylist of known names (the version before this one) only ever catches
@@ -712,8 +830,12 @@ NOTES="$(mktemp)"
 #     (e.g. a bare API key or token) matches nothing here
 #   - a description of internal topology in plain English ("the box next
 #     to the antenna switch") matches nothing here and never will by shape
+# The CHANGELOG.md section joins the git log in this file: it is hand-written
+# prose, as commit messages are, so the flagged shapes apply to it the same way.
+# (The hard-abort tier below already covers it, since it scans all of $NOTES.)
 CHANGELOG_FILE="$(mktemp)"
 printf '%s\n' "$CHANGELOG" > "$CHANGELOG_FILE"
+cat "$CL_BODY" >> "$CHANGELOG_FILE"
 
 # Collected per DISTINCT LINE, same reasoning as the flagged tier below:
 # a line matching both shapes (e.g. "root@192.168.1.14" is simultaneously
@@ -771,15 +893,20 @@ if [ ${#HARD_LINE_LABELS[@]} -gt 0 ]; then
         # lines); a hit anywhere else is changelog content, where "fix
         # the tag" does nothing -- the offending text lives in a past
         # commit message already in history.
+        if [ "$ln" -ge "$WN_FIRST" ] && [ "$ln" -le "$WN_LAST" ]; then
+            LINE_TEXT="## changelog section ##"   # pick the CHANGELOG.md remedy below
+        fi
         case "$LINE_TEXT" in
+            "## changelog section ##")
+                REMEDY="this is CHANGELOG.md's $VERSION section on origin/main, which these notes quote under \"What's new\" -- take the address or user@host out of that section, commit and push CHANGELOG.md, then re-run" ;;
             "## sigmond-appliance "*|"- Version: "*|"- Image: "*)
                 REMEDY="the CURRENT tag ($VERSION) is poisoned -- delete it (git tag -d $VERSION; git push origin :refs/tags/$VERSION if it was pushed) and re-tag with a clean name, then re-run" ;;
-            "- Appliance commit: "*|"- SHA-256: "*|"- Test verdict:"*)
+            "- Appliance commit: "*|"- SHA-256: "*|"- Test verdict:"*|"Full changelog: "*)
                 REMEDY="this is a script-generated field that should be pure hex/literal text and should never match this shape -- something is wrong upstream of this script; do not trust anything else this run produced until that's understood" ;;
             *)
                 REMEDY="this is changelog content -- a past commit message already in history. Re-tagging does not fix it; the commit needs to be excluded from what ships (adjust the release range) or the leak needs to be handled out of band (e.g. rewriting that commit's message and force-pushing, which has its own costs)" ;;
         esac
-        printf '  line %s: %s\n    matched: %s\n    remedy: %s\n' "$ln" "$LINE_TEXT" "${HARD_LINE_LABELS[$ln]}" "$REMEDY"
+        printf '  line %s: %s\n    matched: %s\n    remedy: %s\n' "$ln" "$(sed -n "${ln}p" "$NOTES")" "${HARD_LINE_LABELS[$ln]}" "$REMEDY"
     done
     rm -f "$NOTES" "$CHANGELOG_FILE"
     exit 1
@@ -827,7 +954,7 @@ if [ "$NFLAGGED" -gt 0 ]; then
         printf '  line %s: %s\n    matched: %s\n' "$ln" "$(sed -n "${ln}p" "$CHANGELOG_FILE")" "${LINE_LABELS[$ln]}"
     done
 else
-    say "leakage self-check clean (changelog: no hard-stop or flagged shapes matched)"
+    say "leakage self-check clean (commits and CHANGELOG.md section: no hard-stop or flagged shapes matched)"
 fi
 rm -f "$CHANGELOG_FILE"
 
@@ -952,6 +1079,17 @@ if [ $RC -eq 0 ]; then
                     say "  [$_lab]   by hand, in a checkout with origin/main fetched: git show origin/main:INSTALL.md > '$(basename "$INSTR_MD")'; git show origin/main:docs/install-page.html > '$(basename "$INSTR_HTML")'"
                     say "  [$_lab]   then copy both files beside $IMGBASE in $_d"
                 fi
+                # The changelog section gate 8 checked, with a link to the
+                # whole file.  Same place, same order, same failure rule as
+                # the install instructions.
+                if pub_put "$_d" "" "$CL_PUB" 2>/dev/null; then
+                    say "  [$_lab] changelog: $(basename "$CL_PUB")"
+                else
+                    _allok=0
+                    say "  [$_lab] WARNING: could not publish the changelog to $_d"
+                    say "  [$_lab]   by hand, in a checkout with origin/main fetched: copy the '## sigmond-appliance $VERSION' section of 'git show origin/main:CHANGELOG.md', heading included, into '$(basename "$CL_PUB")', and end it with the line 'Full changelog: $CL_URL'"
+                    say "  [$_lab]   then copy that file beside $IMGBASE in $_d"
+                fi
                 # The flasher keeps its one name in every folder: rclone copyto onto
                 # the same name updates the Drive file in place, so its id and link
                 # stay.  Only after the image landed, like the instructions.
@@ -993,7 +1131,7 @@ if [ $RC -eq 0 ]; then
         # download convenience -- but name every target that missed, so a
         # partial publish can never read as a complete one.
         [ -n "$FLASHER_NOTE" ] && say "$FLASHER_NOTE"
-        [ "$_allok" = 1 ] || say "NOTE: some targets above did not receive $IMGBASE or its install instructions (see the WARNING lines) — the GitHub Release is authoritative."
+        [ "$_allok" = 1 ] || say "NOTE: some targets above did not receive $IMGBASE, its install instructions or its changelog (see the WARNING lines) — the GitHub Release is authoritative."
     fi
 fi
 exit $RC

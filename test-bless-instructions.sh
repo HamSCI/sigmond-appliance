@@ -1,6 +1,8 @@
 #!/bin/bash
 # test-bless-instructions.sh — bless-release.sh gate 7 (the install instructions
-# name this release) and the two files --apply publishes beside the image.
+# name this release), gate 8 (the changelog names this release), the three
+# files --apply publishes beside the image, and the changelog section in the
+# release notes.
 #
 # Hermetic.  Each scene builds a scratch origin, a scratch checkout, a scratch
 # rig directory and a fake remote tree.  Stub gh, rclone, ssh and scp stand in
@@ -23,6 +25,10 @@
 # what the team pushed.  Every scene here is built that way: the tag commit
 # carries the v3.69 instructions, and the current ones arrive in a later commit
 # that reaches origin/main only after the checkout is cloned.
+#
+# Gate 8 (Michael, 2026-11-18: every release carries a changelog; the bless
+# refuses without it) follows the same timing.  The tag commit's CHANGELOG.md
+# holds only the v3.69 section; the v3.70 section arrives in a later commit.
 #
 # Run it against a mutated copy to measure its power:
 #
@@ -129,6 +135,14 @@ page() { # page <image file name>
 OLD_IMG=sigmond-appliance-v3.69-20261007-release.img
 IMG=sigmond-appliance-v3.70-20261008-release.img
 STEM="${IMG%.img}"
+# cl_doc <section>... — a CHANGELOG.md: a title, the given sections, then v3.69's.
+CL_PREV_SECTION='## sigmond-appliance v3.69 — blessed 2026-10-07
+
+- The flasher checks the stick before it writes.'
+cl_doc() { printf '# sigmond-appliance changelog\n\nNewest first.\n\n'; local x; for x in "$@" "$CL_PREV_SECTION"; do printf '%s\n\n' "$x"; done; }
+# cl_sec <version> [heading suffix] — a good section for <version>.
+cl_sec() { printf '## sigmond-appliance %s%s\n\n- Firstboot warns about the graphics carve-out.\n- The install page names the new image.' "$1" "${2- — blessed 2026-10-08}"; }
+CL_OLD="$(cl_doc)"
 OLD_INST="$(inst current 'sigmond-appliance v3.69 (1c63a35) with sigmond f01e86f, hardware install 2026-10-07')"
 OLD_PAGE="$(page "$OLD_IMG")"
 GOOD_INST="$(inst current 'sigmond-appliance v3.70 (4c976c8) with sigmond 61f22db, hardware install 2026-10-08')"
@@ -140,6 +154,8 @@ sc_reset() {
     SC_LOCAL_INSTALL=""; SC_LOCAL_PAGE=""  # an UNPUSHED commit in the checkout
     SC_NOIMAGE=0; SC_NOPENDING=""
     SC_FLASHER=""                         # sigmond-flash-latest.sh pushed to origin/main ("" = none)
+    SC_CL=DEFAULT                         # CHANGELOG.md pushed to origin/main (DEFAULT = a good section for SC_VERSION; DELETE = remove; KEEP = the tag's v3.69-only file)
+    SC_LOCAL_CL=""                        # CHANGELOG.md in an UNPUSHED commit
 }
 
 # mkscene <name> — builds $T/<name>/{origin.git,seed,repo,rig,bless,remote,tmp}.
@@ -154,6 +170,7 @@ mkscene() {
         mkdir -p docs
         printf '%s\n' "$OLD_INST" > INSTALL.md
         printf '%s\n' "$OLD_PAGE" > docs/install-page.html
+        printf '%s\n' "$CL_OLD" > CHANGELOG.md
         git add -A && git commit -q -m "initial: firstboot and the v3.69 instructions"
         git tag "$v"
         git push -q origin main "refs/tags/$v" 2>/dev/null
@@ -177,16 +194,27 @@ mkscene() {
             git add -A && git commit -q -m "docs: instructions for the new image"
             git push -q origin main 2>/dev/null
         fi
+        case "$SC_CL" in
+            KEEP)    ;;
+            DELETE)  git rm -q CHANGELOG.md ;;
+            DEFAULT) printf '%s\n' "$(cl_doc "$(cl_sec "$v")")" > CHANGELOG.md ;;
+            *)       printf '%s\n' "$SC_CL" > CHANGELOG.md ;;
+        esac
+        if [ "$SC_CL" != KEEP ]; then
+            git add -A && git commit -q -m "docs: changelog for the new release"
+            git push -q origin main 2>/dev/null
+        fi
         if [ -n "$SC_FLASHER" ]; then
             printf '%s\n' "$SC_FLASHER" > sigmond-flash-latest.sh
             git add -A && git commit -q -m "sigmond-flash-latest.sh"
             git push -q origin main 2>/dev/null
         fi
     )
-    if [ -n "$SC_LOCAL_INSTALL" ] || [ -n "$SC_LOCAL_PAGE" ]; then
+    if [ -n "$SC_LOCAL_INSTALL" ] || [ -n "$SC_LOCAL_PAGE" ] || [ -n "$SC_LOCAL_CL" ]; then
         (   cd "$S/repo" || exit 1
             [ -n "$SC_LOCAL_INSTALL" ] && printf '%s\n' "$SC_LOCAL_INSTALL" > INSTALL.md
             [ -n "$SC_LOCAL_PAGE" ] && printf '%s\n' "$SC_LOCAL_PAGE" > docs/install-page.html
+            [ -n "$SC_LOCAL_CL" ] && printf '%s\n' "$SC_LOCAL_CL" > CHANGELOG.md
             git add -A && git commit -q -m "local only: never pushed"
         )
     fi
@@ -239,6 +267,7 @@ run_bless() {
     case " ${SHOW:-} " in *" $1 "*) printf '%s\n' "$OUT" | sed 's/^/      | /' ;; esac
 }
 g7() { grep -F '[gate 7 (install instructions name this release)' <<<"$OUT" || true; }
+g8() { grep -F '[gate 8 (changelog names this release)' <<<"$OUT" || true; }
 leftover() { find "$T/$1/tmp" -mindepth 1 2>/dev/null | wc -l | tr -d ' '; }
 
 # expect_fail <desc> <must-name...> — gate 7 FAILs, names each of the strings,
@@ -373,6 +402,107 @@ echo "gate 7: no image"
 sc_reset; SC_NOIMAGE=1; SC_INSTALL="$GOOD_INST"; SC_PAGE="$GOOD_PAGE"; mkscene noimg; run_bless noimg 0
 expect_g7_fail noimg "no image resolved" "no image to check the page against"
 has "gate 3 still reports the missing image" "$OUT" "no image matching"
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Gate 8: the changelog names this release.  Every scene here gets a correct
+# INSTALL.md and page, so gate 8 alone decides.
+expect_g8_fail() { # <scene> <desc> <needle>...
+    local s="$1" desc="$2"; shift 2
+    G8="$(g8)"
+    has "$desc: gate 8 FAILs" "$G8" " FAIL "
+    local nd; for nd in "$@"; do has "$desc: detail names '$nd'" "$G8" "$nd"; done
+    has "$desc: detail says commit and push" "$G8" "commit and push CHANGELOG.md, then bless (docs/RELEASE.md, rung 3)"
+    has "$desc: gate 7 still PASSes" "$(g7)" " PASS "
+    chk "$desc: the bless exits 1" "$RC" "1"
+    lacks "$desc: no unbound variable" "$OUT" "unbound variable"
+    chk "$desc: no temp files left" "$(leftover "$s")" "0"
+}
+g8ok() { sc_reset; SC_INSTALL="$GOOD_INST"; SC_PAGE="$GOOD_PAGE"; }
+
+echo "gate 8: a v3.70 section at origin/main"
+g8ok; mkscene cl_ok; run_bless cl_ok 0
+G8="$(g8)"
+has   "gate 8 is reported, named as specified" "$G8" "8 (changelog names this release)"
+has   "gate 8 PASSes"                           "$G8" " PASS "
+has   "the PASS detail counts the section's lines" "$G8" "v3.70 section (2 line(s))"
+chk   "the bless exits 0"                       "$RC" "0"
+has   "all gates pass"                          "$OUT" "ALL GATES PASS"
+has   "dry run names the .CHANGELOG.md"         "$(grep -F "$STEM.CHANGELOG.md" <<<"$OUT" | head -1)" "DRY RUN"
+has   "dry run says the notes open with the section" "$OUT" "What's new"
+chk   "nothing put in any target"               "$(find "$T/cl_ok/remote" -name '*CHANGELOG*' | wc -l | tr -d ' ')" "0"
+chk   "no temp files left"                      "$(leftover cl_ok)" "0"
+
+echo "gate 8: a missing file or section fails"
+g8ok; SC_CL=DELETE; mkscene cl_nofile; run_bless cl_nofile 0
+expect_g8_fail cl_nofile "CHANGELOG.md absent from origin/main" "CHANGELOG.md is not readable at origin/main" "create CHANGELOG.md"
+g8ok; SC_CL=KEEP; mkscene cl_nosec; run_bless cl_nosec 0
+expect_g8_fail cl_nosec "only the v3.69 section" "no '## sigmond-appliance v3.70' heading" "write the v3.70 section"
+
+echo "gate 8: a draft heading fails"
+g8ok; SC_CL="$(cl_doc "$(cl_sec v3.70 ' (draft)')")"; mkscene cl_draft; run_bless cl_draft 0
+expect_g8_fail cl_draft "'(draft)' heading" "marked draft" "drop '(draft)'"
+g8ok; SC_CL="$(cl_doc "$(cl_sec v3.70 ' — (Draft) for 2026-10-08')")"; mkscene cl_draft2; run_bless cl_draft2 0
+expect_g8_fail cl_draft2 "'(Draft)' in other words and case" "marked draft"
+# "(draft)" in the BODY, or in another version's heading, does not matter.
+g8ok; SC_CL="$(cl_doc "## sigmond-appliance v3.71 (draft)
+
+- not yet." "$(cl_sec v3.70)
+- An earlier note said (draft) here.")"; mkscene cl_draftelse; run_bless cl_draftelse 0
+has "a (draft) elsewhere does not fail v3.70" "$(g8)" " PASS "
+
+echo "gate 8: an empty section fails"
+g8ok; SC_CL="$(cl_doc '## sigmond-appliance v3.70 — blessed 2026-10-08
+
+
+')"; mkscene cl_empty; run_bless cl_empty 0
+expect_g8_fail cl_empty "heading with only blank lines under it" "no text under its heading" "write what changed"
+g8ok; SC_CL="$(printf '# changelog\n\n## sigmond-appliance v3.70\n   \n')"; mkscene cl_emptyeof; run_bless cl_emptyeof 0
+expect_g8_fail cl_emptyeof "heading at the end of the file, whitespace under it" "no text under its heading"
+
+echo "gate 8: two headings for one version fail"
+g8ok; SC_CL="$(cl_doc "$(cl_sec v3.70)" "$(cl_sec v3.70 ' — again')")"; mkscene cl_two; run_bless cl_two 0
+expect_g8_fail cl_two "two v3.70 sections" "2 headings for sigmond-appliance v3.70" "merge them"
+
+echo "gate 8: the version matches as a whole token"
+g8ok; SC_CL="$(cl_doc "$(cl_sec v3.701)")"; mkscene cl_n1; run_bless cl_n1 0
+expect_g8_fail cl_n1 "a v3.701 section does not name v3.70" "no '## sigmond-appliance v3.70' heading"
+g8ok; SC_CL="$(cl_doc "$(cl_sec v3.70.1)")"; mkscene cl_n2; run_bless cl_n2 0
+expect_g8_fail cl_n2 "a v3.70.1 section does not name v3.70" "no '## sigmond-appliance v3.70' heading"
+g8ok; SC_CL="$(cl_doc "$(cl_sec v3x70)")"; mkscene cl_n3; run_bless cl_n3 0
+expect_g8_fail cl_n3 "the dot in the version is not a wildcard" "no '## sigmond-appliance v3.70' heading"
+g8ok; SC_CL="$(cl_doc "$(cl_sec 'v3.70-rc1')")"; mkscene cl_n4; run_bless cl_n4 0
+expect_g8_fail cl_n4 "a v3.70-rc1 section does not name v3.70" "no '## sigmond-appliance v3.70' heading"
+g8ok; SC_CL="$(cl_doc "$(cl_sec v3.70 '')" "$(cl_sec v3.701)" "$(cl_sec v3.7)")"; mkscene cl_n5; run_bless cl_n5 0
+has "v3.70 beside v3.701 and v3.7 sections: one heading, PASS" "$(g8)" " PASS "
+sc_reset; SC_VERSION=v3.7; SC_DATE=20261006
+SC_INSTALL="$(inst current 'sigmond-appliance v3.7 (4c976c8)')"; SC_PAGE="$(page sigmond-appliance-v3.7-20261006-release.img)"
+SC_CL="$(cl_doc "$(cl_sec v3.70)" "$(cl_sec v3.701)")"; mkscene cl_n6; run_bless cl_n6 0
+expect_g8_fail cl_n6 "other direction: blessing v3.7 against v3.70 and v3.701 sections" "no '## sigmond-appliance v3.7' heading"
+g8ok; SC_CL="$(cl_doc "## sigmond-appliance  v3.70
+
+- two spaces." "### sigmond-appliance v3.70
+
+- a level-3 heading.")"; mkscene cl_n7; run_bless cl_n7 0
+expect_g8_fail cl_n7 "a doubled space or a level-3 heading is not the heading" "no '## sigmond-appliance v3.70' heading"
+
+echo "gate 8: the section ends at the next '## ' heading, not at '### '"
+g8ok; SC_CL="$(cl_doc '## sigmond-appliance v3.70
+
+### Install
+- Burn the new image.')"; mkscene cl_sub; run_bless cl_sub 0
+has "a ### subheading stays inside the section" "$(g8)" "v3.70 section (2 line(s))"
+
+echo "gate 8: CRLF line endings pass"
+g8ok; SC_CL="$(cl_doc "$(cl_sec v3.70)" | sed 's/$/\r/')"; mkscene cl_crlf; run_bless cl_crlf 0
+has "a CRLF CHANGELOG.md passes" "$(g8)" " PASS "
+g8ok; SC_CL="$(cl_doc "$(cl_sec v3.70 ' (draft)')" | sed 's/$/\r/')"; mkscene cl_crlfd; run_bless cl_crlfd 0
+has "a CRLF draft heading still fails" "$(g8)" "marked draft"
+
+echo "gate 8 reads origin/main: not the working tree, not the tag"
+g8ok; SC_CL=KEEP; SC_LOCAL_CL="$(cl_doc "$(cl_sec v3.70)")"; mkscene cl_wtgood; run_bless cl_wtgood 0
+expect_g8_fail cl_wtgood "origin/main lacks the section, working tree has it" "no '## sigmond-appliance v3.70' heading"
+g8ok; SC_LOCAL_CL="$(cl_doc "$(cl_sec v3.70 ' (draft)')")"; mkscene cl_wtbad; run_bless cl_wtbad 0
+has "origin/main correct, working tree a draft: gate 8 PASSes" "$(g8)" " PASS "
 
 # ═══════════════════════════════════════════════════════════════════════════
 echo "--apply: both files reach every target after the image does"
@@ -531,6 +661,114 @@ has   "BLOCKED"                           "$OUT" "BLOCKED"
 chk   "no Release created"                "$(grep -c 'release create' "$T/blocked/calls")" "0"
 chk   "nothing moved or uploaded"         "$(grep -cE '^(rclone|ssh|scp) ' "$T/blocked/calls")" "0"
 chk   "no temp files left"                "$(leftover blocked)" "0"
+
+# ═══════════════════════════════════════════════════════════════════════════
+echo "--apply: the notes open with the changelog section; <stem>.CHANGELOG.md reaches every target"
+g8ok; SC_LOCAL_CL="$(cl_doc "$(cl_sec v3.70 ' — LOCALONLY')")"; mkscene cl_apply; run_bless cl_apply 1
+R="$T/cl_apply/remote"; NOTESC="$(cat "$T/cl_apply/notes.copy" 2>/dev/null)"
+chk   "the bless exits 0"                           "$RC" "0"
+has   "the notes carry a What's new heading"        "$NOTESC" "### What's new"
+has   "the notes carry the section's first line"    "$NOTESC" "- Firstboot warns about the graphics carve-out."
+has   "the notes carry the section's last line"     "$NOTESC" "- The install page names the new image."
+has   "the notes link the full changelog"           "$NOTESC" "Full changelog: https://github.com/Scratch/appliance/blob/main/CHANGELOG.md"
+lacks "the notes do not repeat the section heading" "$NOTESC" "blessed 2026-10-08"
+lacks "the notes carry no other version's section" "$NOTESC" "The flasher checks the stick"
+lacks "the working tree's section was not used"     "$NOTESC" "LOCALONLY"
+n_wn="$(grep -n "^### What's new" <<<"$NOTESC" | cut -d: -f1)"
+n_ver="$(grep -n '^- Version: ' <<<"$NOTESC" | cut -d: -f1)"
+n_log="$(grep -n '^### Commits' <<<"$NOTESC" | cut -d: -f1)"
+chk   "What's new comes before the generated record and the commits" \
+      "$([ -n "$n_wn" ] && [ -n "$n_ver" ] && [ -n "$n_log" ] && [ "$n_wn" -lt "$n_ver" ] && [ "$n_ver" -lt "$n_log" ] && echo before || echo "wn=$n_wn ver=$n_ver log=$n_log")" "before"
+has   "the confirmation showed the section"         "$OUT" "- Firstboot warns about the graphics carve-out."
+WANT_CL="$(printf '%s\n\n%s\n' "$(cl_sec v3.70)" "Full changelog: https://github.com/Scratch/appliance/blob/main/CHANGELOG.md")"
+for pair in "rob:$R/gdrive/sigmond-images" "mjh:$R/gdrive,root_folder_id=ABC123" "wd30:$R/home-wd30" "bl:$R/gdrive/blessed-only"; do
+    lab="${pair%%:*}"; dir="${pair#*:}"
+    chk "[$lab] $STEM.CHANGELOG.md holds the v3.70 section and the link" "$(cat "$dir/$STEM.CHANGELOG.md" 2>/dev/null)" "$WANT_CL"
+    chk "[$lab] the changelog is not in pending/" "$(ls "$dir/pending" 2>/dev/null | grep -c CHANGELOG)" "0"
+    has "[$lab] the log names the changelog" "$OUT" "[$lab] changelog: $STEM.CHANGELOG.md"
+done
+n_mv="$(grep -n "moveto -q gdrive:sigmond-images/pending/$IMG" "$T/cl_apply/calls" | head -1 | cut -d: -f1)"
+n_cl="$(grep -n "copyto -q .*$STEM.CHANGELOG.md gdrive:sigmond-images/$STEM.CHANGELOG.md" "$T/cl_apply/calls" | head -1 | cut -d: -f1)"
+chk "[rob] promotion comes before the changelog upload" "$([ -n "$n_mv" ] && [ -n "$n_cl" ] && [ "$n_mv" -lt "$n_cl" ] && echo before || echo "mv=$n_mv cl=$n_cl")" "before"
+lacks "the Release call attaches no changelog file" "$(grep 'release create' "$T/cl_apply/calls")" "CHANGELOG"
+chk   "no temp files left" "$(leftover cl_apply)" "0"
+
+echo "--apply: the published file keeps the section's own bytes"
+g8ok; SC_CL="$(cl_doc '## sigmond-appliance v3.70 — blessed 2026-10-08
+
+### Install
+- Burn the new image.
+
+### Fixes
+- The panel shows the right version.')"; mkscene cl_bytes; run_bless cl_bytes 1
+chk "[rob] subheadings and blank lines survive" "$(cat "$T/cl_bytes/remote/gdrive/sigmond-images/$STEM.CHANGELOG.md")" "## sigmond-appliance v3.70 — blessed 2026-10-08
+
+### Install
+- Burn the new image.
+
+### Fixes
+- The panel shows the right version.
+
+Full changelog: https://github.com/Scratch/appliance/blob/main/CHANGELOG.md"
+
+echo "--apply: a hard-stop leak in the changelog section refuses the bless"
+g8ok; SC_CL="$(cl_doc "$(cl_sec v3.70)
+- Uploads now go to 192.168.1.14 first.")"; mkscene cl_leakip; run_bless cl_leakip 1
+chk   "the bless exits 1"              "$RC" "1"
+has   "FATAL names the leak"           "$OUT" "hard-stop leak shape"
+has   "the hit line is shown"          "$OUT" "Uploads now go to 192.168.1.14 first."
+has   "the remedy names CHANGELOG.md"  "$OUT" "this is CHANGELOG.md's v3.70 section on origin/main"
+lacks "the remedy does not blame the tag" "$OUT" "is poisoned"
+chk   "no Release created"             "$(grep -c 'release create' "$T/cl_leakip/calls")" "0"
+chk   "nothing moved or uploaded"      "$(grep -cE '^(rclone|ssh|scp) ' "$T/cl_leakip/calls")" "0"
+chk   "no temp files left"             "$(leftover cl_leakip)" "0"
+g8ok; SC_CL="$(cl_doc "$(cl_sec v3.70)
+- Log in as ops@station to check.")"; mkscene cl_leakat; run_bless cl_leakat 1
+chk   "user@host: the bless exits 1"   "$RC" "1"
+has   "user@host: matched as such"     "$OUT" "a user@host reference"
+chk   "user@host: no Release created"  "$(grep -c 'release create' "$T/cl_leakat/calls")" "0"
+# The leak check must not fire when the dry run passes: gate 8 itself does not scan.
+g8ok; SC_CL="$(cl_doc "$(cl_sec v3.70)
+- Uploads now go to 192.168.1.14 first.")"; mkscene cl_leakdry; run_bless cl_leakdry 0
+has   "dry run: gate 8 passes a section the --apply leak check will refuse" "$(g8)" " PASS "
+
+echo "--apply: a flagged shape in the section demands the deliberate confirmation"
+g8ok; SC_CL="$(cl_doc "$(cl_sec v3.70)
+- Config moved to /etc/sigmond/fleet.toml.")"; mkscene cl_flag; run_bless cl_flag 1
+has   "the line is flagged"                      "$OUT" "Config moved to /etc/sigmond/fleet.toml."
+has   "as a path"                                "$OUT" "an absolute Unix path"
+has   "the plain phrase is not enough"           "$OUT" "confirmation not given"
+chk   "the bless exits 1"                        "$RC" "1"
+chk   "no Release created"                       "$(grep -c 'release create' "$T/cl_flag/calls")" "0"
+
+echo "--apply: a failed changelog upload warns and leaves the bless at exit 0"
+g8ok; mkscene cl_upfail
+STUB_FAIL_PUT='gdrive:sigmond-images/*CHANGELOG.md'; export STUB_FAIL_PUT
+run_bless cl_upfail 1
+unset STUB_FAIL_PUT
+R="$T/cl_upfail/remote"
+chk   "the bless still exits 0"                   "$RC" "0"
+has   "WARNING names the target and the changelog" "$OUT" "[rob] WARNING: could not publish the changelog"
+has   "the by-hand recipe names the file"         "$(grep -F '[rob]   by hand' <<<"$OUT")" "$STEM.CHANGELOG.md"
+has   "the by-hand recipe names the link"         "$(grep -F '[rob]   by hand' <<<"$OUT")" "Full changelog: https://github.com/Scratch/appliance/blob/main/CHANGELOG.md"
+has   "the final NOTE reports a partial publish"  "$OUT" "NOTE: some targets"
+has   "[rob] still got its instructions"          "$OUT" "[rob] instructions: $STEM.INSTALL.md, $STEM.INSTALL.html"
+lacks "[rob] no 'changelog:' success line"        "$OUT" "[rob] changelog:"
+chk   "[mjh] still received the changelog"        "$([ -f "$R/gdrive,root_folder_id=ABC123/$STEM.CHANGELOG.md" ] && echo yes || echo no)" "yes"
+has   "the Release was created"                   "$(cat "$T/cl_upfail/calls")" "release create"
+
+echo "--apply: a target whose promotion failed gets no changelog"
+g8ok; SC_NOPENDING=wd30; mkscene cl_nopromo; run_bless cl_nopromo 1
+chk   "[wd30] no changelog file written" "$(find "$T/cl_nopromo/remote/home-wd30" -name '*CHANGELOG*' 2>/dev/null | wc -l | tr -d ' ')" "0"
+lacks "no changelog line for wd30"       "$OUT" "[wd30] changelog:"
+
+echo "--apply: a failing gate 8 blocks everything"
+g8ok; SC_CL=KEEP; mkscene cl_blocked; run_bless cl_blocked 1
+chk   "the bless exits 1"         "$RC" "1"
+has   "BLOCKED"                   "$OUT" "BLOCKED"
+chk   "no Release created"        "$(grep -c 'release create' "$T/cl_blocked/calls")" "0"
+chk   "nothing moved or uploaded" "$(grep -cE '^(rclone|ssh|scp) ' "$T/cl_blocked/calls")" "0"
+chk   "no temp files left"        "$(leftover cl_blocked)" "0"
 
 echo
 printf '%d passed, %d failed\n' "$PASS" "$FAIL"

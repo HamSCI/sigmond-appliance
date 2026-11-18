@@ -83,10 +83,11 @@ rollout, not here.
 ### 3. Blessed
 
 `bless-release.sh <version> [--apply]` is the gate. It refuses to create a
-GitHub Release unless all eight checks pass (version format, tag reachable
+GitHub Release unless all nine checks pass (version format, tag reachable
 from `origin/main`, clean tree, verified checksum, manifest with a
 components block, tied test evidence, no pre-existing Release for the tag,
-install instructions that name this release).
+install instructions that name this release, a changelog section for this
+release).
 Dry-run by default — `--apply` is required to create anything, and even
 then only after every gate has passed.
 
@@ -102,15 +103,18 @@ check; blessing is the only remaining backstop).
 
 On `--apply`, the Release is created on the **public** `HamSCI/sigmond-appliance`
 repo with only the manifest and `.sha256` attached (the image itself is 4.7 GB
-against GitHub's 2 GiB asset cap and stays on the artifact store). Release
-notes are generated, never hand-typed, and are self-checked for leakage
-(hostnames, IPs, absolute paths, usernames) before publishing — the script
-refuses to publish rather than guess.
+against GitHub's 2 GiB asset cap and stays on the artifact store). The release
+notes open with the version's section from `CHANGELOG.md`, under "What's new".
+The script generates the rest: the image record and the commits since the
+previous release. Before publishing, it checks the whole of the notes for
+leaks (hostnames, IPs, absolute paths, usernames), the changelog section
+included, and refuses to publish rather than guess.
 
 **Update the operator install pages before you bless** (Michael's standing
 policy since 2026-10-07; gate 7 enforces it from 2026-10-08). The order runs:
-cut the tag, build, run the hardware test, update the instructions, bless. The
-tag stays put. Only the instructions move, in a commit after the tag.
+cut the tag, build, run the hardware test, update the instructions and write
+the changelog section, bless. The tag stays put. Only the instructions and the
+changelog move, in a commit after the tag.
 
 After the hardware test, edit `INSTALL.md`. Set `**Status:** current`, and make
 the `**Verified against:**` line name `sigmond-appliance <version>`, the image
@@ -143,6 +147,47 @@ failed promotion does.
 The shared web page "Installing a Sigmond Station", which new operators read,
 comes from the same `docs/install-page.html`. Republish it after the bless.
 Its link lives in the operators' notes.
+
+**Write the changelog section before you bless** (Michael, 2026-11-18: every
+release carries a changelog, and gate 8 refuses the bless without one). It
+follows the install instructions: after the hardware test, before the bless,
+in a commit after the tag.
+
+`CHANGELOG.md` at the repo root holds one section per version, newest first.
+Each section starts with a heading of this form:
+
+```
+## sigmond-appliance v3.93 — blessed 2026-11-19
+```
+
+The words after the version stay free. A heading that holds `(draft)` marks a
+section still in progress. Write for the operator who decides whether to
+install: what changed, what to do differently, what got fixed. Commit
+`CHANGELOG.md` and push it to `origin/main`.
+
+Gate 8 reads `CHANGELOG.md` with `git show origin/main:CHANGELOG.md`, for the
+same reason gate 7 does. It passes only when:
+
+- `CHANGELOG.md` exists at `origin/main`;
+- it holds exactly one `## sigmond-appliance <version>` heading, the version a
+  whole token, so a `v3.70` or `v3.701` section does not satisfy `v3.7`;
+- that heading does not hold `(draft)`;
+- the section, which runs to the next `## ` heading, holds at least one
+  non-blank line.
+
+When gate 8 fails, its detail names the condition and the fix: write the
+section, drop `(draft)`, or merge two sections, then commit and push.
+
+On `--apply`, the section's text opens the release notes under "What's new",
+and the leak check reads it with the rest. An IP address or a `user@host` in
+the section stops the bless outright, like any other hard-stop leak; the fix
+lies in `CHANGELOG.md` on `origin/main`. A path or a hostname-shaped word gets
+flagged and calls for the deliberate confirmation, as it does in a commit
+message. The bless also puts `<stem>.CHANGELOG.md` beside the image in every
+publish target, next to the install files. That file holds the version's
+section, heading included, and ends with a link to the full `CHANGELOG.md` on
+GitHub. A failed upload warns with a by-hand recipe and leaves the bless at
+exit 0, as for the install files.
 
 ### 4. Rolled
 
