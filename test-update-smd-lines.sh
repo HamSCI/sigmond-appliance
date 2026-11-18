@@ -338,5 +338,12 @@ fi
     && echo "  ok   PHASE E checks the decoder provenance after the update" \
     || { echo "  FAIL PHASE E does not check the decoder provenance after the update"; fail=1; }
 
+# The image build records the decoders' commit in the station pin file under
+# SIGMOND_TRACK_MAIN=1; smd holds them there.  A check that reads only the
+# constant failed a correct v3.92 -> main update (2026-11-18 06:12Z).
+grep -q '/etc/sigmond/component-pins.toml' <(sed -n '/gx_ok 120 e6b-decoder-pin/,/post-update: ubersdr decoder provenance/p' "$SRC") \
+    && echo "  ok   PHASE E reads the decoder pin from the station pin file first" \
+    || { echo "  FAIL PHASE E reads only _UBERSDR_COMMIT, not the station pin file smd honours"; fail=1; }
+
 [ "$fail" = 0 ] && echo "PASS: held_names, restore_moved, PANEL_DEFECT_RE, doctor_pairs, manifest_drift, decoder_pin_verdict" || echo "FAILED: held_names, restore_moved, PANEL_DEFECT_RE, doctor_pairs, manifest_drift, decoder_pin_verdict"
 exit "$fail"

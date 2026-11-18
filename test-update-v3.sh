@@ -518,7 +518,7 @@ held_names(){
 # >>> decoder_pin_verdict (test-update-smd-lines.sh loads exactly this block)
 # decoder_pin_verdict <capture>: does the INSTALLED UberSDR decoder build come
 # from the commit the updated sigmond pins?  The capture holds three lines the
-# guest prints: "PIN <_UBERSDR_COMMIT read from the guest's bin/smd>",
+# guest prints: "PIN <the station pin file entry, else _UBERSDR_COMMIT from bin/smd>",
 # "SRC yes|no" (an ubersdr_wsprd checkout exists) and "PROV <the
 # .provenance line>".  Prints one of:
 #   ok <pin12>                  the provenance names the pin
@@ -1268,10 +1268,17 @@ ASSESSED="$(awk '$1=="BEHIND"' "$WORK/e6-behind.out" | awk 'END{print NR}')"
 
 # ── the INSTALLED UberSDR decoders come from the pin sigmond now names ──
 # The checks above read git; a checkout moved to the new pin beside the old
-# binaries passes all of them.  Read the pin from the guest's own (updated)
-# bin/smd, never from this script, so a later pin bump needs no edit here.
+# binaries passes all of them.  Read the pin the way smd's _native_pin does:
+# the station pin file's entry first, else _UBERSDR_COMMIT from the guest's
+# own (updated) bin/smd, never from this script, so a later pin bump needs no
+# edit here.  The image build runs under SIGMOND_TRACK_MAIN=1 and records the
+# commit it built in /etc/sigmond/component-pins.toml; from v3.92 that commit
+# lies ahead of the constant, smd update holds the decoders there (HELD), and
+# a constant-only read failed a correct update (2026-11-18 06:12Z).
 gx_ok 120 e6b-decoder-pin '
-printf "PIN %s\n" "$(sed -nE "s/^_UBERSDR_COMMIT *= *.([0-9a-f]{40}).*/\1/p" /opt/git/sigmond/sigmond/bin/smd | head -1)"
+P="$(sed -nE "s/^ *\"?ubersdr_wsprd\"? *= *\"([0-9a-f]{40})\".*/\1/p" /etc/sigmond/component-pins.toml 2>/dev/null | head -1)"
+[ -n "$P" ] || P="$(sed -nE "s/^_UBERSDR_COMMIT *= *.([0-9a-f]{40}).*/\1/p" /opt/git/sigmond/sigmond/bin/smd | head -1)"
+printf "PIN %s\n" "$P"
 if [ -d /opt/git/sigmond/ubersdr_wsprd/.git ]; then echo "SRC yes"; else echo "SRC no"; fi
 printf "PROV %s\n" "$(head -1 /usr/local/libexec/sigmond/decoders/ubersdr/.provenance 2>/dev/null)"
 exit 0' "post-update: ubersdr decoder provenance"
