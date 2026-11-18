@@ -732,6 +732,45 @@ g8ok; SC_CL="$(cl_doc "$(cl_sec v3.70)
 - Uploads now go to 192.168.1.14 first.")"; mkscene cl_leakdry; run_bless cl_leakdry 0
 has   "dry run: gate 8 passes a section the --apply leak check will refuse" "$(g8)" " PASS "
 
+echo "--apply: a leak in the section HEADING refuses too (the heading is published in <stem>.CHANGELOG.md)"
+# The notes carry only the body, so these shapes reach the scan only through
+# the published file.  A review of 3789ffb found the heading went out unscanned.
+g8ok; SC_CL="$(cl_doc "$(cl_sec v3.70 ' — tested at 10.0.0.5')")"; mkscene cl_hdip; run_bless cl_hdip 1
+has   "heading IP: gate 8 passed first"        "$OUT" "[gate 8 (changelog names this release)]            PASS"
+chk   "heading IP: the bless exits 1"          "$RC" "1"
+has   "heading IP: FATAL"                      "$OUT" "hard-stop leak shape"
+has   "heading IP: names the published file and the line" "$OUT" "$STEM.CHANGELOG.md line 1: ## sigmond-appliance v3.70 — tested at 10.0.0.5"
+has   "heading IP: remedy names CHANGELOG.md"  "$OUT" "this is CHANGELOG.md's v3.70 section on origin/main (its heading or its text)"
+lacks "heading IP: the notes never carried it" "$(grep -F 'line ' <<<"$OUT" | grep -vF "$STEM.CHANGELOG.md line")" "10.0.0.5"
+chk   "heading IP: no Release created"         "$(grep -c 'release create' "$T/cl_hdip/calls")" "0"
+chk   "heading IP: nothing moved or uploaded"  "$(grep -cE '^(rclone|ssh|scp) ' "$T/cl_hdip/calls")" "0"
+chk   "heading IP: no temp files left"         "$(leftover cl_hdip)" "0"
+g8ok; SC_CL="$(cl_doc "$(cl_sec v3.70 ' — checked by ops@station')")"; mkscene cl_hdat; run_bless cl_hdat 1
+chk   "heading user@host: the bless exits 1"   "$RC" "1"
+has   "heading user@host: matched as such"     "$OUT" "a user@host reference"
+chk   "heading user@host: no Release created"  "$(grep -c 'release create' "$T/cl_hdat/calls")" "0"
+g8ok; SC_CL="$(cl_doc "$(cl_sec v3.70 ' — tested on b4-prox')")"; mkscene cl_hdflag; run_bless cl_hdflag 1
+has   "heading flagged: the heading line is flagged" "$OUT" "## sigmond-appliance v3.70 — tested on b4-prox"
+has   "heading flagged: as a hostname shape"   "$OUT" "a hyphenated hostname-shaped token"
+has   "heading flagged: the plain phrase is not enough" "$OUT" "confirmation not given"
+chk   "heading flagged: the bless exits 1"     "$RC" "1"
+chk   "heading flagged: no Release created"    "$(grep -c 'release create' "$T/cl_hdflag/calls")" "0"
+# The deliberate phrase does publish it: the flag asks for a reading, not a refusal.
+run_bless_phrase() { # <scene> <phrase>
+    local S="$T/$1"; : > "$S/calls"
+    OUT="$(cd "$S" && printf '%s\n' "$2" | env \
+        APPLIANCE_REPO="$S/repo" RIG_DIR="$S/rig" GH_REPO_SLUG=Scratch/appliance \
+        STUB_REMOTE="$S/remote" STUB_CALLS="$S/calls" TMPDIR="$S/tmp" PATH="$T/bin:$PATH" \
+        script -qefc "bash '$S/bless/bless-release.sh' $SC_VERSION --apply" /dev/null 2>&1)"
+    RC=$?; OUT="$(printf '%s' "$OUT" | tr -d '\r')"
+}
+g8ok; SC_CL="$(cl_doc "$(cl_sec v3.70 ' — tested on b4-prox')")"; mkscene cl_hdflag2
+run_bless_phrase cl_hdflag2 "I reviewed 1 flagged lines, publish v3.70"
+chk   "heading flagged, deliberate phrase: the bless exits 0" "$RC" "0"
+has   "heading flagged, deliberate phrase: the Release was created" "$(cat "$T/cl_hdflag2/calls")" "release create"
+has   "heading flagged, deliberate phrase: the heading was published as written" \
+      "$(head -1 "$T/cl_hdflag2/remote/gdrive/sigmond-images/$STEM.CHANGELOG.md" 2>/dev/null)" "## sigmond-appliance v3.70 — tested on b4-prox"
+
 echo "--apply: a flagged shape in the section demands the deliberate confirmation"
 g8ok; SC_CL="$(cl_doc "$(cl_sec v3.70)
 - Config moved to /etc/sigmond/fleet.toml.")"; mkscene cl_flag; run_bless cl_flag 1

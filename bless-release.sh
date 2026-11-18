@@ -832,10 +832,15 @@ WN_LAST=$(wc -l < "$NOTES")
 #     to the antenna switch") matches nothing here and never will by shape
 # The CHANGELOG.md section joins the git log in this file: it is hand-written
 # prose, as commit messages are, so the flagged shapes apply to it the same way.
-# (The hard-abort tier below already covers it, since it scans all of $NOTES.)
+# It goes in as published: the bytes of <stem>.CHANGELOG.md, HEADING INCLUDED,
+# less the last two lines (the blank and the "Full changelog:" link the script
+# itself writes).  The notes carry only the body, so the heading reaches no
+# scan through $NOTES; a review of 3789ffb caught a heading such as
+# "## sigmond-appliance v3.93 — tested at 10.0.0.5" going out unscanned.
+# The hard-abort tier below scans the whole of $CL_PUB for the same reason.
 CHANGELOG_FILE="$(mktemp)"
 printf '%s\n' "$CHANGELOG" > "$CHANGELOG_FILE"
-cat "$CL_BODY" >> "$CHANGELOG_FILE"
+sed '$d' "$CL_PUB" | sed '$d' >> "$CHANGELOG_FILE"
 
 # Collected per DISTINCT LINE, same reasoning as the flagged tier below:
 # a line matching both shapes (e.g. "root@192.168.1.14" is simultaneously
@@ -882,8 +887,29 @@ note_hard "an IPv4 address" \
 note_hard "a user@host reference" \
     "$(grep -nE '[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+' "$NOTES" || true)"
 
-if [ ${#HARD_LINE_LABELS[@]} -gt 0 ]; then
-    say "FATAL: the release notes contain a hard-stop leak shape -- refusing to publish. No confirmation can override this. Line-by-line remedy:"
+# The same two shapes over the exact bytes of <stem>.CHANGELOG.md, which the
+# publish targets receive: its heading line appears nowhere in $NOTES.  Body
+# lines get reported here and above alike, since both files would carry them.
+declare -A PUB_HARD_LABELS=()
+_pub_hard(){ # _pub_hard <label> <grep -n output>
+    local ln
+    [ -n "$2" ] || return 0
+    while IFS= read -r ln; do
+        [ -n "$ln" ] || continue
+        PUB_HARD_LABELS[$ln]="${PUB_HARD_LABELS[$ln]:+${PUB_HARD_LABELS[$ln]}, }$1"
+    done <<< "$(printf '%s\n' "$2" | cut -d: -f1)"
+}
+_pub_hard "an IPv4 address" \
+    "$(grep -nE '[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}' "$CL_PUB" || true)"
+_pub_hard "a user@host reference" \
+    "$(grep -nE '[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+' "$CL_PUB" || true)"
+
+if [ ${#HARD_LINE_LABELS[@]} -gt 0 ] || [ ${#PUB_HARD_LABELS[@]} -gt 0 ]; then
+    say "FATAL: the release notes or $(basename "$CL_PUB") contain a hard-stop leak shape -- refusing to publish. No confirmation can override this. Line-by-line remedy:"
+    for ln in $(printf '%s\n' "${!PUB_HARD_LABELS[@]}" | sort -n); do
+        printf '  %s line %s: %s\n    matched: %s\n    remedy: %s\n' "$(basename "$CL_PUB")" "$ln" "$(sed -n "${ln}p" "$CL_PUB")" "${PUB_HARD_LABELS[$ln]}" \
+            "this is CHANGELOG.md's $VERSION section on origin/main (its heading or its text) -- take the address or user@host out of it, commit and push CHANGELOG.md, then re-run"
+    done
     for ln in $(printf '%s\n' "${!HARD_LINE_LABELS[@]}" | sort -n); do
         LINE_TEXT="$(sed -n "${ln}p" "$NOTES")"
         # The remedy depends on WHERE the match is, not just what matched.
