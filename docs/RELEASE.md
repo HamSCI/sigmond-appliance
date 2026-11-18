@@ -80,6 +80,27 @@ exit means the CLI is broken), and both awareness units must be
 installed. The exit-0 path is proven on a configured station after
 rollout, not here.
 
+### 2b. Canaried
+
+Before the bless, two stations run the candidate for about a day.  Michael set
+the pair on 2026-11-18: **AC0G-B4**, a Proxmox station (`smd align` in the VM and
+`pm-align` on its host), and **SIGMA**, a bare-metal station with no host side.
+Each aligns to the candidate's manifest, copied from the rig, not to a Release:
+
+```bash
+smd align --manifest <candidate>.manifest.txt            # dry run
+smd align --manifest <candidate>.manifest.txt --apply
+pm-align --manifest <candidate>.manifest.txt --release-tag vX.Y --apply   # B4's host only
+```
+
+Every line those tools print names the target `CANDIDATE vX.Y (not blessed)`,
+and the station records itself as on a candidate.  The watch covers what a
+release can break: services stable, no OOM kills, uploads arriving at wd30,
+timing healthy, and the align itself free of surprises.  v3.92 skipped this
+step; B4 updated only after the bless and met the ka9q-web catalog refusal
+then.  A third canary joins only when B4 or SIGMA shows a problem.  The
+changelog's **How it was proven** names the canaries and what they showed.
+
 ### 3. Blessed
 
 `bless-release.sh <version> [--apply]` is the gate. It refuses to create a
@@ -112,7 +133,7 @@ included, and refuses to publish rather than guess.
 
 **Update the operator install pages before you bless** (Michael's standing
 policy since 2026-10-07; gate 7 enforces it from 2026-10-08). The order runs:
-cut the tag, build, run the hardware test, update the instructions and write
+cut the tag, build, run the hardware test (the canaries, rung 2b), update the instructions and write
 the changelog section, bless. The tag stays put. Only the instructions and the
 changelog move, in a commit after the tag.
 
