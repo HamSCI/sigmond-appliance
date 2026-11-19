@@ -114,7 +114,16 @@ first as canaries.
 
 ### How it was proven
 
-To come: the rig ladder, then the first hardware install.
+The rig built the v3.93 image (tag 2763b24) and passed the whole ladder on
+2026-11-18: the golden VM, the release image, the nested test (13:17Z) and the update
+test from v3.92 (14:21Z).  Two stations then ran the unblessed candidate as canaries:
+B4 (Proxmox; the VM from 14:33Z and the host from 14:44Z) and SIGMA (bare metal, from
+14:39Z).  After 27 hours, B4's `smd check` reads clean and its uploads deliver.  SIGMA
+uploads and records too.  Its magnetometer has failed since 2026-11-17, before the
+canary began: the sensor stopped answering, so the fault lies with the sensor or its
+USB link, not this release.  On both stations `smd align` reported one failure, an old
+meteor-scatter instance left over from a reporter rename (ledger:
+reporter-rename-duplicates); it ran nothing.
 
 ---
 
