@@ -310,7 +310,7 @@ eval "$(sed -n '/^# >>> decoder_pin_verdict/,/^# <<< decoder_pin_verdict/p' "$SR
 if ! type decoder_pin_verdict >/dev/null 2>&1; then
     echo "  FAIL decoder_pin_verdict not found between its markers in $SRC"; fail=1
 else
-    NEWP=8719788abb7718412a77ba85d0d4d6c717d1a58e
+    NEWP=5eeeb53576d8d3f9c73de8b8fa9a3d9a39175395
     OLDP=529ec5d2530f5ffc2ad4a73a3be6c10c0a8b4027
     dpv() {  # dpv <name> <want> <capture lines...>
         local name="$1" want="$2"; shift 2
@@ -325,7 +325,7 @@ else
         "PROV ubersdr-decoders $OLDP version=sigmond-529ec5d25 march=x86-64-v3 parity=verified"
     dpv "a rebuilt guest passes" "ok ${NEWP:0:12}" \
         "PIN $NEWP" "SRC yes" \
-        "PROV ubersdr-decoders $NEWP version=sigmond-8719788ab march=x86-64-v3 parity=verified"
+        "PROV ubersdr-decoders $NEWP version=sigmond-5eeeb53 march=x86-64-v3 parity=verified"
     dpv "no provenance beside a checkout" "noprov ${NEWP:0:12}" \
         "PIN $NEWP" "SRC yes" "PROV "
     dpv "no checkout: nothing to assert" "nosrc" "PIN $NEWP" "SRC no" "PROV "
