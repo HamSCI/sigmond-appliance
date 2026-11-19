@@ -2,7 +2,7 @@
 
 > **Audience:** operator
 > **Status:** current
-> **Verified against:** sigmond-appliance v3.92 (blessed 2026-11-18): lighter FT8 decoding, a steadier upload store, and a fix to the time-server check.  What each release changed, and how it was proven: [CHANGELOG.md](CHANGELOG.md).
+> **Verified against:** sigmond-appliance v3.93 (blessed 2026-11-19): CODAR timing that holds through dropped samples, an upload store that recovers by itself, and a 7-day limit on CODAR's local spot copy.  What each release changed, and how it was proven: [CHANGELOG.md](CHANGELOG.md).
 > **Canonical for:** burning, booting and first-boot wizard of the appliance image
 
 Day-2 operation, troubleshooting beyond §11, remote access and what-not-to-touch live in the [Operator guide](https://github.com/HamSCI/sigmond/blob/main/docs/operator/README.md).
@@ -90,8 +90,8 @@ nothing.
 
 **By hand:** ask your fleet admin for the current release — or download links for it:
 
-- `sigmond-appliance-v3.92-20261116-release.img`  (about 5.9 GB)
-- `sigmond-appliance-v3.92-20261116-release.sha256`  (its checksum)
+- `sigmond-appliance-v3.93-20261118-release.img`  (about 6.1 GB)
+- `sigmond-appliance-v3.93-20261118-release.sha256`  (its checksum)
 
 Each release carries its own version and date in the filename; use the names
 you were given wherever this guide shows one.
@@ -100,7 +100,7 @@ The image is published **uncompressed** (`.img`) — there is nothing to
 decompress. With both files in one folder, check it:
 
 ```
-sha256sum -c sigmond-appliance-v3.92-20261116-release.sha256
+sha256sum -c sigmond-appliance-v3.93-20261118-release.sha256
 ```
 
 ---
@@ -115,7 +115,7 @@ refuses the disk your computer runs from, and reads the stick back to compare
 every byte:
 
 ```
-./flash-usb.sh sigmond-appliance-v3.92-20261116-release.img
+./flash-usb.sh sigmond-appliance-v3.93-20261118-release.img
 ```
 
 **Any OS, graphical:** balenaEtcher (balena.io/etcher) or Raspberry Pi Imager
@@ -125,7 +125,7 @@ handout is [docs/flash-usb-mac.md](docs/flash-usb-mac.md).
 **Command line (Linux):**
 ```
 lsblk -dno NAME,SIZE,TRAN,RM,MODEL     # find the stick: check size, removable
-sudo dd if=sigmond-appliance-v3.92-20261116-release.img of=/dev/sdX bs=4M \
+sudo dd if=sigmond-appliance-v3.93-20261118-release.img of=/dev/sdX bs=4M \
         oflag=direct conv=fsync status=progress
 sync
 ```
@@ -135,12 +135,12 @@ sync
 ```
 diskutil list                      # find your stick, e.g. /dev/disk4
 diskutil unmountDisk /dev/disk4
-sudo dd if=sigmond-appliance-v3.92-20261116-release.img of=/dev/rdisk4 bs=4m
+sudo dd if=sigmond-appliance-v3.93-20261118-release.img of=/dev/rdisk4 bs=4m
 ```
 
 **Verify a hand-written stick** by reading back exactly the image's size:
 ```
-IMG=sigmond-appliance-v3.92-20261116-release.img
+IMG=sigmond-appliance-v3.93-20261118-release.img
 sudo head -c "$(stat -c %s $IMG)" /dev/sdX | sha256sum
 sha256sum $IMG                     # the two hashes must match
 ```

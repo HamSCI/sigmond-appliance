@@ -63,7 +63,7 @@ first as canaries.
 
 ---
 
-## sigmond-appliance v3.93 (draft)
+## sigmond-appliance v3.93
 
 ### Timing
 
