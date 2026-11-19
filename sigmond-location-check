@@ -13,14 +13,15 @@
 # differs from the recorded location by a new 6-char grid or >~50 m.
 set -u
 say(){ echo "[location] $*" | systemd-cat -t sigmond-location-check -p notice; }
-SP=/etc/sigmond/site-profile.toml
+SP=${SIGMOND_SITE_PROFILE:-/etc/sigmond/site-profile.toml}
+GPSDO_DIR=${SIGMOND_GPSDO_DIR:-/run/gpsdo}
 [ -f "$SP" ] || exit 0
 
-OUT=$(python3 - "$SP" <<'PYEOF'
+OUT=$(python3 - "$SP" "$GPSDO_DIR" <<'PYEOF'
 import glob, json, sys, tomllib
-sp_path = sys.argv[1]
+sp_path, gpsdo_dir = sys.argv[1:3]
 best = None
-for p in sorted(glob.glob('/run/gpsdo/*.json')):
+for p in sorted(glob.glob(gpsdo_dir + '/*.json')):
     if p.endswith('index.json'):
         continue
     try:
@@ -57,12 +58,31 @@ if isinstance(old_lat, (int, float)) and isinstance(old_lon, (int, float)):
     # ~50 m hysteresis: GPSDO jitter is metres, real moves are kilometres
     moved = abs(lat - old_lat) > 0.0005 or abs(lon - old_lon) > 0.0005
 if old_g[:6].lower() == G.lower() and not moved:
-    print('CURRENT'); raise SystemExit
+    # A valid fix agrees with the recorded position: the GPSDO is the
+    # source, whatever an earlier operator entry labelled it.
+    print('CURRENT' if st.get('location_source') == 'gpsdo' else 'RELABEL')
+    raise SystemExit
 print('UPDATE %s %.7f %.7f %s' % (G, lat, lon, old_g or '(none)'))
 PYEOF
 )
 case "$OUT" in
   NOGNSS|CURRENT|'') exit 0 ;;
+  RELABEL)
+    # Nothing moved: record the source, re-render so coordination [host]
+    # follows, and leave the recorders alone.
+    python3 - "$SP" <<'PYEOF'
+import re, sys
+p = sys.argv[1]
+s = open(p).read()
+if re.search(r'(?m)^location_source\s*=', s):
+    s = re.sub(r'(?m)^location_source\s*=\s*[^\n]*', 'location_source = "gpsdo"', s, count=1)
+else:
+    s = re.sub(r'(?m)^\[station\]\s*$', '[station]\nlocation_source = "gpsdo"', s, count=1)
+open(p, 'w').write(s)
+PYEOF
+    say "GPSDO fix matches the recorded position; location_source set to gpsdo"
+    env -u SUDO_USER -u SUDO_UID -u SUDO_GID -u SUDO_COMMAND smd config render >/dev/null 2>&1 || say "WARN: config render failed after relabel"
+    exit 0 ;;
 esac
 set -- $OUT; G="$2"; LAT="$3"; LON="$4"; OLDG="$5"
 
