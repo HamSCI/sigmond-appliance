@@ -10,7 +10,7 @@ what has run on real hardware.  A release that no station has yet installed says
 
 ---
 
-## sigmond v3.95 (draft)
+## sigmond v3.94 (draft)
 
 ### Each station reports how it differs from its release
 
