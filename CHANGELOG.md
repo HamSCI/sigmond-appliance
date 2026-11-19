@@ -10,6 +10,59 @@ what has run on real hardware.  A release that no station has yet installed says
 
 ---
 
+## sigmond v3.94 (draft)
+
+### Each station reports how it differs from its release
+
+- **The drift report.**  `smd align` (without `--apply`) now lists every way a station
+  differs from its blessed release: its source checkouts, its builds, its systemd units,
+  the settings an operator changed, files nothing installed, and the host itself.  Each
+  item says whether it changes behaviour (a fault) or not (drift), and names the one
+  command that puts it right.  Nothing repairs itself; `smd align --apply` still does
+  the repair when the operator asks.
+- `smd check` adds one line: no drift, or the count and the first fault.
+- A daily timer, `sigmond-drift.timer`, writes the report to
+  `/var/lib/sigmond/drift.json` and sends one row to sigmondb.  The row names the
+  station's receivers and their grid squares.  It carries no precise position.
+- `smd align --accept KEY` records an exception, with `--test` and `--until` for a
+  temporary one; the report reminds the operator a day before a test ends.
+- `smd fleet update` names the stations with open faults, and those it cannot judge,
+  without stopping the roll.  `smd fleet status` shows each station's release and fault
+  count.
+- The fleet board raises an alarm for each fault.  Its public view shows only the
+  station, the kind of item and a fixed phrase; the detail stays private.
+- `smd version` now shows what `smd component list` showed.  `smd component list`
+  still works for this release and points to `smd version`.
+
+### Location
+
+- **Bare-metal stations now read their GPSDO.**  Until now only the Proxmox image ran
+  `sigmond-location-check`.  Every install now runs it every 10 minutes wherever sigmond
+  sees a GPSDO, and it waits while `smd` holds its lifecycle lock.  The station's
+  location comes from the GPSDO wherever one exists, as it already did on the image.
+- sigmond records where each location came from, `gpsdo` or `operator`, whether the
+  location check, `smd config location --from-gps` or `smd config identity --lat --lon`
+  wrote it.
+
+### Upgrading from v3.93
+
+- The release needs hs-uploader f9698fd or later; an older one sends no drift row.
+- `smd align --apply` installs and starts the two new timers after its bring-up
+  finishes.  It backs up any sigmond unit it replaces (`*.bak-drift-<time>`), and it
+  leaves alone a unit an operator excepted with `--accept`.
+
+### How it was proven
+
+The sigmond suite (8,527 tests), hs-uploader's suite and the new location-check lock
+test pass.  A final whole-branch review found three faults the per-task tests had
+missed (the daily report crashed, hs-uploader dropped its row, and stock settings read
+as overrides); one fix wave closed them, and a second review confirmed it.  On
+2026-11-19 wd30 took the server half: sigmondb holds the new table, and spot and CODAR
+ingest kept flowing.  No station has installed this release yet; B4 and SIGMA run it
+first as canaries.
+
+---
+
 ## sigmond-appliance v3.93 (draft)
 
 ### Timing
