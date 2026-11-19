@@ -78,6 +78,7 @@ def setkey(s, key, val):
         return re.sub(r'(?m)^' + key + r'\s*=\s*[^\n]*', line, s, count=1)
     return re.sub(r'(?m)^\[station\]\s*$', '[station]\n' + line, s, count=1)
 s = setkey(s, 'grid_square', f'"{g}"   # GPSDO location authority')
+s = setkey(s, 'location_source', '"gpsdo"')
 s = setkey(s, 'latitude', lat)
 s = setkey(s, 'longitude', lon)
 open(p, 'w').write(s)
