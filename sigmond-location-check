@@ -17,6 +17,23 @@ SP=${SIGMOND_SITE_PROFILE:-/etc/sigmond/site-profile.toml}
 GPSDO_DIR=${SIGMOND_GPSDO_DIR:-/run/gpsdo}
 [ -f "$SP" ] || exit 0
 
+# smd's lifecycle lock (lib/sigmond/paths.py LIFECYCLE_LOCK).  While any smd
+# lifecycle verb holds it -- `smd align --apply` above all, whose bring-up
+# renders the same files and restarts the same recorders -- this tick does
+# nothing; the next one, ~10 min on, tries again.  Held to the end, so no
+# smd lifecycle run starts mid-update either.  flock -n never waits.
+LOCK=${SIGMOND_LIFECYCLE_LOCK:-/var/lib/sigmond/lifecycle.lock}
+if [ -d "$(dirname "$LOCK")" ]; then
+    if ! exec 9>>"$LOCK"; then
+        say "cannot open the smd lifecycle lock $LOCK; skipping this tick"
+        exit 0
+    fi
+    if ! flock -n 9; then
+        say "an smd lifecycle operation holds $LOCK; skipping this tick"
+        exit 0
+    fi
+fi
+
 OUT=$(python3 - "$SP" "$GPSDO_DIR" <<'PYEOF'
 import glob, json, sys, tomllib
 sp_path, gpsdo_dir = sys.argv[1:3]
