@@ -1875,7 +1875,7 @@ if [ "$SINKWIZ" = 1 ]; then
     # One KEY:N token per file.  qm guest exec returns JSON whose "out-data"
     # carries every output line on ONE line, so grep -c over $SINK_OUT can never
     # count past 1; read tokens instead, as phase_d_verdict does.
-    SINK_OUT=$($SSHN "qm guest exec $VMID --timeout 60 -- bash -lc 'for f in site-profile coordination; do echo \"\$f:\$(grep -A3 \"^\\[uploads\\]\" /etc/sigmond/\$f.toml 2>/dev/null | grep -cE \"^mode *= *.discard.\")\"; done; smd sink status 2>&1'" 2>&1)
+    SINK_OUT=$($SSHN "qm guest exec $VMID --timeout 60 -- systemd-run --quiet --wait --pipe --collect /bin/bash -lc 'for f in site-profile coordination; do echo \"\$f:\$(grep -A3 \"^\\[uploads\\]\" /etc/sigmond/\$f.toml 2>/dev/null | grep -cE \"^mode *= *.discard.\")\"; done; smd sink status 2>&1'" 2>&1)
     echo "$SINK_OUT" | tail -12
     _sp=$(echo "$SINK_OUT" | grep -oE 'site-profile:[0-9]+' | head -1 | cut -d: -f2)
     _co=$(echo "$SINK_OUT" | grep -oE 'coordination:[0-9]+' | head -1 | cut -d: -f2)
@@ -1953,7 +1953,7 @@ say "── location authority: fake GPSDO announces Scranton (FN21ej)"
 # The check skips its tick while an smd lifecycle verb holds the lifecycle
 # lock (0af16c3), so wait up to 5 min for the lock first; LOCKWAIT says how
 # many 5 s steps that took (61 = still held).
-LC=$($SSHN "qm guest exec $VMID --timeout 420 -- bash -lc 'test -x /usr/local/sbin/sigmond-location-check || { echo NOT-STAGED; exit 0; }; for i in \$(seq 60); do flock -n /var/lib/sigmond/lifecycle.lock true && break; sleep 5; i=61; done; echo LOCKWAIT=\$i; mkdir -p /run/gpsdo && printf \"{\\\"health\\\": {\\\"latitude\\\": 41.4, \\\"longitude\\\": -75.66, \\\"gps_fix\\\": \\\"3D\\\", \\\"sats_used\\\": 8, \\\"fix_age_sec\\\": 1}}\" > /run/gpsdo/TEST.json; /usr/local/sbin/sigmond-location-check; grep -E \"grid_square|latitude|longitude\" /etc/sigmond/site-profile.toml | head -3'" 2>&1)
+LC=$($SSHN "qm guest exec $VMID --timeout 420 -- systemd-run --quiet --wait --pipe --collect /bin/bash -lc 'test -x /usr/local/sbin/sigmond-location-check || { echo NOT-STAGED; exit 0; }; for i in \$(seq 60); do flock -n /var/lib/sigmond/lifecycle.lock true && break; sleep 5; i=61; done; echo LOCKWAIT=\$i; mkdir -p /run/gpsdo && printf \"{\\\"health\\\": {\\\"latitude\\\": 41.4, \\\"longitude\\\": -75.66, \\\"gps_fix\\\": \\\"3D\\\", \\\"sats_used\\\": 8, \\\"fix_age_sec\\\": 1}}\" > /run/gpsdo/TEST.json; /usr/local/sbin/sigmond-location-check; grep -E \"grid_square|latitude|longitude\" /etc/sigmond/site-profile.toml | head -3'" 2>&1)
 echo "$LC" | grep -q NOT-STAGED && { say "FATAL: sigmond-location-check not staged"; exit 1; }
 say "location check lock wait: $(echo "$LC" | grep -o 'LOCKWAIT=[0-9]*' | head -1)"
 if echo "$LC" | grep -q 'FN21ej' && echo "$LC" | grep -q '41.4'; then
@@ -1988,7 +1988,7 @@ say "── fleet awareness: heartbeat CLI contract on a CONFIGURED station"
 if [ "$HBQ" = 0 ]; then
     # v3.84 on: the units ship, and the wizard leaves both timers disarmed.
     # smd says "not enabled" and exits 2 when [heartbeat] is off or absent.
-    HB=$($SSHN "qm guest exec $VMID --timeout 30 -- bash -lc 'o=\$(smd admin heartbeat emit --dry-run 2>&1); echo rc=\$?; echo notenabled=\$(printf %s \"\$o\" | grep -ci \"not enabled\"); echo HBT-\$(systemctl is-enabled sigmond-heartbeat.timer 2>&1)'" 2>&1)
+    HB=$($SSHN "qm guest exec $VMID --timeout 30 -- systemd-run --quiet --wait --pipe --collect /bin/bash -lc 'o=\$(smd admin heartbeat emit --dry-run 2>&1); echo rc=\$?; echo notenabled=\$(printf %s \"\$o\" | grep -ci \"not enabled\"); echo HBT-\$(systemctl is-enabled sigmond-heartbeat.timer 2>&1)'" 2>&1)
     echo "$HB" | grep -q "rc=2" && echo "$HB" | grep -qE "notenabled=[1-9]" \
         && say "heartbeat emit --dry-run: exit 2, not enabled, as the wizard left it ✓" \
         || { say "FATAL: heartbeat emit does not say 'not enabled' (exit 2) on a station whose wizard asked nothing about it"; echo "$HB" | head -6; exit 1; }
@@ -2002,7 +2002,7 @@ if [ "$HBQ" = 0 ]; then
         && { say "FATAL: pm-heartbeat.timer is enabled on the PM; the wizard should have disarmed it"; exit 1; }
     say "pm-heartbeat.timer not enabled on the PM ✓"
 else
-    HB=$($SSHN "qm guest exec $VMID --timeout 30 -- bash -lc 'o=\$(smd admin heartbeat emit --dry-run 2>&1); echo rc=\$?; echo notenabled=\$(printf %s \"\$o\" | grep -ci \"not enabled\")'" 2>&1)
+    HB=$($SSHN "qm guest exec $VMID --timeout 30 -- systemd-run --quiet --wait --pipe --collect /bin/bash -lc 'o=\$(smd admin heartbeat emit --dry-run 2>&1); echo rc=\$?; echo notenabled=\$(printf %s \"\$o\" | grep -ci \"not enabled\")'" 2>&1)
     echo "$HB" | grep -q "rc=0" \
         && say "heartbeat emit --dry-run: exit 0 on the configured station ✓" \
         || { say "FATAL: heartbeat not emitting after the wizard enabled it"; echo "$HB" | head -6; exit 1; }
@@ -2014,7 +2014,7 @@ else
     $SSHN "qm guest exec $VMID --timeout 30 -- bash -lc 'echo HBT-\$(systemctl is-enabled sigmond-heartbeat.timer 2>&1)'" 2>&1 | grep -q "HBT-enabled" \
         && say "sigmond-heartbeat.timer enabled by the wizard ✓" \
         || { say "FATAL: the wizard enabled the heartbeat but not its timer — the station will never report (sigmond#94)"; exit 1; }
-    HBN=$($SSHN "qm guest exec $VMID --timeout 30 -- bash -lc 'smd admin heartbeat emit >/dev/null 2>&1; echo count=\$(ls /var/lib/sigmond/heartbeat/*.json 2>/dev/null | wc -l)'" 2>&1)
+    HBN=$($SSHN "qm guest exec $VMID --timeout 30 -- systemd-run --quiet --wait --pipe --collect /bin/bash -lc 'smd admin heartbeat emit >/dev/null 2>&1; echo count=\$(ls /var/lib/sigmond/heartbeat/*.json 2>/dev/null | wc -l)'" 2>&1)
     echo "$HBN" | grep -qE "count=[1-9][0-9]*" \
         && say "heartbeat emit wrote a spool file in /var/lib/sigmond/heartbeat ✓" \
         || { say "FATAL: heartbeat emit did not write a spool file under /var/lib/sigmond/heartbeat"; echo "$HBN" | head -6; exit 1; }
@@ -2419,7 +2419,7 @@ else
         # nothing in upload mode, so BANNEROFF:0 shows the manifest was
         # regenerated even when it holds no data pipeline.
         say "raising the site sink switch: smd sink upload"
-        UP=$($SSHN "qm guest exec $VMID --timeout 120 -- bash -lc 'smd sink upload 2>&1; M=/etc/hs-uploader/pipelines.toml; echo DISCLEFT:\$(grep -c \"^discard = true\" \$M); echo BANNEROFF:\$(grep -c \"SITE SINK OFF\" \$M); echo PIPES:\$(grep -c \"^\\[\\[pipeline\\]\\]\" \$M); echo HB:\$(grep -c \"^name = .heartbeat.\" \$M); smd sink status 2>&1'" 2>&1)
+        UP=$($SSHN "qm guest exec $VMID --timeout 120 -- systemd-run --quiet --wait --pipe --collect /bin/bash -lc 'smd sink upload 2>&1; M=/etc/hs-uploader/pipelines.toml; echo DISCLEFT:\$(grep -c \"^discard = true\" \$M); echo BANNEROFF:\$(grep -c \"SITE SINK OFF\" \$M); echo PIPES:\$(grep -c \"^\\[\\[pipeline\\]\\]\" \$M); echo HB:\$(grep -c \"^name = .heartbeat.\" \$M); smd sink status 2>&1'" 2>&1)
         echo "$UP" | tail -12
         case "$UP" in
           *"refusing while packaging runs"*)
