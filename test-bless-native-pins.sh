@@ -39,7 +39,7 @@ EOF
 chmod +x "$T/bin/gh"
 export PATH="$T/bin:$PATH"
 
-ONION=de8ea938342b36c28024fd8393ebc27b8442a161
+ONION=124c28c8f74fa73ffa2cc5a3b0273633563be366
 WSJTX=ccdfaf3c1c109010d15399674ce278167cfde848
 UBER=5eeeb53576d8d3f9c73de8b8fa9a3d9a39175395
 OLD=8719788cccccccccccccccccccccccccccccccc1
@@ -59,7 +59,7 @@ git -C "$SIG" commit -qm "pins"
 SIGSHA="$(git -C "$SIG" rev-parse --short=8 HEAD)"
 
 VERSION=v3.94
-scene() { # scene <ubersdr row> <preamble lines> [sigmond row]
+scene() { # scene <ubersdr row> <preamble lines> [sigmond row] [row to omit]
     local rig="$T/rig-$RANDOM"
     mkdir -p "$rig"
     local stem="sigmond-appliance-$VERSION-20261120-release"
@@ -72,11 +72,12 @@ scene() { # scene <ubersdr row> <preamble lines> [sigmond row]
         printf '%b' "$2"
         echo
         echo "components (live):"
-        echo "    callhash         adc9d9d"
-        echo "    onion            ${ONION:0:7}"
-        echo "    sigmond          ${3:-$SIGSHA}"
-        echo "    ubersdr_wsprd    $1"
-        echo "    wsjtx            ${WSJTX:0:9}"
+        {   echo "    callhash         adc9d9d"
+            echo "    onion            ${ONION:0:7}"
+            echo "    sigmond          ${3:-$SIGSHA}"
+            echo "    ubersdr_wsprd    $1"
+            echo "    wsjtx            ${WSJTX:0:9}"
+        } | grep -v "^    ${4:-NOTHING} "
         echo
         echo "what each is at (newest first):"
         echo "    2026-11-17  ubersdr_wsprd     ${1}  build.sh"
@@ -86,12 +87,14 @@ scene() { # scene <ubersdr row> <preamble lines> [sigmond row]
     ROW="$(printf '%s\n' "$OUT" | grep -F '[gate 9 (native pins come from the release)]')"
 }
 
-BUILT="native_built_onion: $ONION\nnative_built_wsjtx: $WSJTX\nnative_built_ubersdr_wsprd: $UBER\n"
+PROV="native_provenance_wsjtx: $WSJTX\nnative_provenance_ubersdr_wsprd: $UBER\n"
+BUILT_ONLY="native_built_onion: $ONION\nnative_built_wsjtx: $WSJTX\nnative_built_ubersdr_wsprd: $UBER\n"
+BUILT="native_built_capture: ok\n$BUILT_ONLY$PROV"
 
 echo "scene 1: checkouts and builds at sigmond's pins"
 scene "${UBER:0:7}" "$BUILT"
 has "gate 9 passes" "$ROW" "PASS"
-has "it counts the three build records" "$ROW" "3 build record(s) match sigmond $SIGSHA"
+has "it counts the build records and provenance" "$ROW" "3 build record(s) and 2 decoder provenance(s) match sigmond $SIGSHA"
 
 echo "scene 2: the image's ubersdr_wsprd checkout trails the pin (SIGMA, 11-20)"
 scene "${OLD:0:7}" "$BUILT"
@@ -101,15 +104,15 @@ has "it says how to fix it" "$ROW" "write the commits into bin/smd's constants i
 has "the bless is blocked" "$OUT" "BLOCKED"
 
 echo "scene 3: the checkout sits at the pin, the build came from elsewhere"
-scene "${UBER:0:7}" "native_built_onion: $ONION\nnative_built_ubersdr_wsprd: $OLD\n"
+scene "${UBER:0:7}" "native_built_capture: ok\nnative_built_onion: $ONION\nnative_built_wsjtx: $WSJTX\nnative_built_ubersdr_wsprd: $OLD\n$PROV"
 has "gate 9 fails" "$ROW" "FAIL"
 has "it names the built commit" "$ROW" "ubersdr_wsprd built from 8719788cc, pin 5eeeb5357"
 
 echo "scene 4: a newest-main candidate whose commits never reached sigmond"
-scene "${UBER:0:7}" "native_built_onion: 124c28c000000000000000000000000000000000\n"
-has "gate 9 fails on onion" "$ROW" "onion built from 124c28c00, pin de8ea9383"
+scene "${UBER:0:7}" "native_built_capture: ok\nnative_built_onion: 9999999000000000000000000000000000000000\nnative_built_wsjtx: $WSJTX\nnative_built_ubersdr_wsprd: $UBER\n$PROV"
+has "gate 9 fails on onion" "$ROW" "onion built from 999999900, pin 124c28c8f"
 
-echo "scene 5: a manifest from before the build-record capture"
+echo "scene 5: a manifest from before the build-record capture (no marker, no lines)"
 scene "${UBER:0:7}" ""
 has "gate 9 warns" "$ROW" "WARN"
 has "it says the builds are unverified" "$ROW" "the built binaries are NOT verified"
@@ -118,6 +121,31 @@ echo "scene 6: the manifest names a sigmond commit the repo lacks"
 scene "${UBER:0:7}" "$BUILT" "0123abcd"
 has "gate 9 fails" "$ROW" "FAIL"
 has "it names the unreadable commit" "$ROW" "cannot read bin/smd at sigmond 0123abcd"
+
+echo "scene 7: the build-record capture failed"
+scene "${UBER:0:7}" "native_built_capture: failed\n"
+has "gate 9 fails" "$ROW" "FAIL"
+has "it names the failed capture" "$ROW" "the build-record capture failed"
+
+echo "scene 8: only some build records (no marker)"
+scene "${UBER:0:7}" "native_built_onion: $ONION\nnative_built_ubersdr_wsprd: $UBER\n"
+has "gate 9 fails" "$ROW" "FAIL"
+has "it counts the lines" "$ROW" "only 2 of 3 native_built_ lines"
+
+echo "scene 9: a native checkout row is missing"
+scene "${UBER:0:7}" "$BUILT" "" wsjtx
+has "gate 9 fails" "$ROW" "FAIL"
+has "it names the missing row" "$ROW" "no wsjtx checkout row"
+
+echo "scene 10: the decoder's .provenance names another commit"
+scene "${UBER:0:7}" "native_built_capture: ok\n$BUILT_ONLY""native_provenance_wsjtx: $WSJTX\nnative_provenance_ubersdr_wsprd: $OLD\n"
+has "gate 9 fails" "$ROW" "FAIL"
+has "it names the provenance" "$ROW" "ubersdr_wsprd decoder provenance 8719788cc, pin 5eeeb5357"
+
+echo "scene 11: a capture marked ok without the provenance lines"
+scene "${UBER:0:7}" "native_built_capture: ok\n$BUILT_ONLY"
+has "gate 9 fails" "$ROW" "FAIL"
+has "it names the missing provenance" "$ROW" "no native_provenance_wsjtx line"
 
 echo
 if [ "$FAIL" -eq 0 ]; then echo "PASS: $PASS checks"; exit 0; fi

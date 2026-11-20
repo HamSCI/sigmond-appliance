@@ -318,25 +318,36 @@ else
     say "WARNING: manifest capture FAILED or truncated ($NCOMP component lines) — image will be unblessable (manifest-raw.txt missing or malformed); build-usb-v3.sh will refuse to ship without it"
     rm -f manifest-raw.txt.new
 fi
-# The commits the native builds actually compiled, from the build records smd
-# writes (/var/lib/sigmond/build-manifest/*.toml).  build-usb-v3.sh puts them
-# in the manifest preamble as native_built_<name>: <sha>, and bless gate 9
-# refuses an image whose built commits differ from sigmond's pins (v3.94:
+# The commits the native builds compiled, from the build records smd writes
+# (/var/lib/sigmond/build-manifest/*.toml), and the commit each decoder's
+# .provenance names.  build-usb-v3.sh puts them in the manifest preamble as
+# native_built_<name>: <sha> and native_provenance_<name>: <sha>, and bless
+# gate 9 refuses an image whose commits differ from sigmond's pins (v3.94:
 # every pin comes from the release; no station keeps a pin file).  The
 # manifest rows only show checkouts, and a checkout can sit at the pin beside
-# a binary built elsewhere.  Best-effort like the manifest: an empty capture
-# leaves no file, and gate 9 then WARNs that the builds went unverified.
+# a binary built elsewhere.  native_built_capture says whether all five lines
+# arrived: ok, or failed (gate 9 FAILs on failed).
 say "capturing the commits the native builds recorded"
-$SSH 'for f in /var/lib/sigmond/build-manifest/*.toml; do [ -f "$f" ] && cat "$f"; done' 2>/dev/null \
-    | awk -F'"' '/^\[\[upstream\]\]/{n=""} /^name *=/{n=$2}
-                 /^sha *=/{ if (n ~ /^(onion|wsjtx|ubersdr_wsprd)$/ && $2 ~ /^[0-9a-f]+$/ && length($2) == 40)
-                                print "native_built_" n ": " $2 }' > native-built.txt.new
-if [ -s native-built.txt.new ]; then
-    say "native build records captured: $(wc -l < native-built.txt.new) line(s)"
+{
+    $SSH 'for f in /var/lib/sigmond/build-manifest/*.toml; do [ -f "$f" ] && cat "$f"; done' 2>/dev/null \
+        | awk -F'"' '/^\[\[upstream\]\]/{n=""} /^name *=/{n=$2}
+                     /^sha *=/{ if (n ~ /^(onion|wsjtx|ubersdr_wsprd)$/ && $2 ~ /^[0-9a-f]+$/ && length($2) == 40)
+                                    print "native_built_" n ": " $2 }'
+    for _d in wsjtx:wsjtx ubersdr:ubersdr_wsprd; do
+        _p="$($SSH "head -1 /usr/local/libexec/sigmond/decoders/${_d%%:*}/.provenance" 2>/dev/null \
+              | grep -oE '\b[0-9a-f]{40}\b' | head -1)"
+        [ -n "$_p" ] && echo "native_provenance_${_d#*:}: $_p"
+    done
+} > native-built.lines.new
+if [ "$(grep -c '^native_built_' native-built.lines.new)" -eq 3 ] \
+   && [ "$(grep -c '^native_provenance_' native-built.lines.new)" -eq 2 ]; then
+    { echo "native_built_capture: ok"; cat native-built.lines.new; } > native-built.txt.new
+    say "native build records captured: $(wc -l < native-built.lines.new) line(s)"
 else
-    say "WARNING: no native build records captured -- bless gate 9 will WARN that the built binaries are unverified"
-    rm -f native-built.txt.new
+    { echo "native_built_capture: failed"; cat native-built.lines.new; } > native-built.txt.new
+    say "WARNING: native build records incomplete ($(wc -l < native-built.lines.new) of 5 lines) -- bless gate 9 will refuse this image"
 fi
+rm -f native-built.lines.new
 
 say "shutting down VM (halt, not reboot — no machine-id now)"
 $SSH "sudo shutdown -h now" 2>/dev/null

@@ -224,8 +224,8 @@ mkscene() {
         local fb; fb="$(sed "s|@@VERSION@@|$v|g" "$S/seed/firstboot-v3.sh" | sha256sum | cut -d' ' -f1)"
         # Gate 9 reads the sigmond row and the native_built_ lines against
         # the scratch sigmond's constants ($SIGFIX).
-        printf 'version: %s\n%bcomponents\n    sigmond  %s\n    hs-uploader  def5678\nfirstboot_sha256: %s\n' \
-            "$v" "$SIGFIX_BUILT" "$SIGFIX_SHA" "$fb" > "$S/rig/$stem.manifest.txt"
+        printf 'version: %s\n%bcomponents\n    sigmond  %s\n    onion  %s\n    wsjtx  %s\n    ubersdr_wsprd  %s\n    hs-uploader  def5678\nfirstboot_sha256: %s\n' \
+            "$v" "$SIGFIX_BUILT" "$SIGFIX_SHA" "${_a40:0:7}" "${_b40:0:9}" "${_c40:0:7}" "$fb" > "$S/rig/$stem.manifest.txt"
         printf 'USB image under test: %s\nPHASE D PASS -- NESTED TEST COMPLETE\n' "$img" > "$S/rig/test-v3.log"
     fi
     cp "$BLESS" "$S/bless/bless-release.sh"; cp "$LIB" "$S/bless/publish-lib.sh"
@@ -255,7 +255,8 @@ printf "_ONION_COMMIT = '%s'\n_WSJTX_COMMIT = '%s'\n_UBERSDR_COMMIT = '%s'\n" \
     "$(printf 'a%.0s' {1..40})" "$(printf 'b%.0s' {1..40})" "$(printf 'c%.0s' {1..40})" > "$SIGFIX/bin/smd"
 git -C "$SIGFIX" add bin/smd && git -C "$SIGFIX" commit -q -m pins
 SIGFIX_SHA="$(git -C "$SIGFIX" rev-parse --short=8 HEAD)"
-SIGFIX_BUILT="native_built_onion: $(printf 'a%.0s' {1..40})\nnative_built_ubersdr_wsprd: $(printf 'c%.0s' {1..40})\n"
+_a40="$(printf 'a%.0s' {1..40})"; _b40="$(printf 'b%.0s' {1..40})"; _c40="$(printf 'c%.0s' {1..40})"
+SIGFIX_BUILT="native_built_capture: ok\nnative_built_onion: $_a40\nnative_built_wsjtx: $_b40\nnative_built_ubersdr_wsprd: $_c40\nnative_provenance_wsjtx: $_b40\nnative_provenance_ubersdr_wsprd: $_c40\n"
 
 # run_bless <scene> <apply 0|1> — sets OUT (CR-stripped) and RC.  --apply runs
 # under script(1) because the confirmation reads /dev/tty and fails closed

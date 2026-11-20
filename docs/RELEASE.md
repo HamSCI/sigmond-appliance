@@ -221,13 +221,22 @@ and the image no longer ships one.
 Gate 9 reads the manifest. Its `sigmond` row names the sigmond commit the
 image carries, and `git show <that commit>:bin/smd`, in the checkout that
 `SIGMOND_REPO` names (default `~/appliance/repos/sigmond`), gives
-`_ONION_COMMIT`, `_WSJTX_COMMIT` and `_UBERSDR_COMMIT`. It passes only when
-each of onion, wsjtx and ubersdr_wsprd matches its constant twice: in its
-checkout row, and in its `native_built_<name>:` preamble line, the commit the
-image's build recorded (`build-golden-vm.sh` captures these from
-`/var/lib/sigmond/build-manifest/`). A manifest without those lines predates
-the capture: the gate checks the checkouts and WARNs that the builds went
-unverified.
+`_ONION_COMMIT`, `_WSJTX_COMMIT` and `_UBERSDR_COMMIT`. Three kinds of line
+must match them:
+
+- the onion, wsjtx and ubersdr_wsprd checkout rows, all three present;
+- `native_built_<name>:` preamble lines, the commits the image's builds
+  recorded in `/var/lib/sigmond/build-manifest/`;
+- `native_provenance_wsjtx:` and `native_provenance_ubersdr_wsprd:`, the
+  commits the decoders' `.provenance` files name.
+
+`build-golden-vm.sh` captures those five lines and writes
+`native_built_capture: ok` when all five arrived, `failed` otherwise;
+`build-usb-v3.sh` writes `failed` for a template with no capture. The gate
+FAILs on `failed`, on a missing line under `ok`, on a missing checkout row,
+and on one or two of the three `native_built_` lines. Only a manifest with no
+marker and no lines, one built before v3.94, gets a WARN: the gate then
+checks the checkouts alone.
 
 A candidate built at newest main (`SIGMOND_TRACK_MAIN=1`) fails gate 9 until
 the commits it built become sigmond's constants. Then rebuild the image from

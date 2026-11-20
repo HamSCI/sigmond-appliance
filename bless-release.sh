@@ -24,8 +24,9 @@
 #      exactly one "## sigmond-appliance <version>" heading, not marked
 #      (draft), with text under it
 #   9. the image's native sources come from the release's pins: the
-#      manifest's onion, wsjtx and ubersdr_wsprd checkouts, and the commits
-#      the image's builds record (native_built_* lines), equal the constants
+#      manifest's onion, wsjtx and ubersdr_wsprd checkouts, the commits the
+#      image's builds record (native_built_* lines) and the decoders'
+#      .provenance commits (native_provenance_* lines) equal the constants
 #      in bin/smd at the manifest's sigmond commit
 #
 # Dry-run by default, matching smd update's contract on this fleet.
@@ -594,25 +595,29 @@ fi
 #
 # WHAT the gate reads: the manifest (gate 4).  Its "sigmond" row names the
 # sigmond commit; `git show <it>:bin/smd` in $SIGMOND_REPO gives the
-# constants.  Each of onion, wsjtx and ubersdr_wsprd must match twice:
-#   - its checkout row in the components block, and
-#   - its native_built_<name>: line in the preamble, the commit the image's
-#     build recorded (/var/lib/sigmond/build-manifest/*.toml, captured by
-#     build-golden-vm.sh).
-# A manifest with no native_built_ lines predates the capture: the gate
-# checks the checkouts and WARNs that the built commits went unverified.
+# constants.  Each must match:
+#   - the onion, wsjtx and ubersdr_wsprd checkout rows (all three present);
+#   - native_built_<name>: preamble lines, the commits the image's builds
+#     recorded in /var/lib/sigmond/build-manifest/*.toml;
+#   - native_provenance_<wsjtx|ubersdr_wsprd>: the commit each decoder's
+#     .provenance file names.
+# build-golden-vm.sh captures those lines and writes native_built_capture:
+# ok when it found all five, failed otherwise; build-usb-v3.sh writes failed
+# when the template carries no capture at all.  failed FAILs.  ok demands
+# all five lines.  No marker means a manifest from before v3.94: the gate
+# checks the checkouts and any lines present, FAILs on one or two of the
+# three native_built_ lines, and WARNs when there are none.
 # ka9q-radio is not checked here: its pin belongs to ka9q-python, and
 # build-golden-vm.sh already refuses a template whose ka9q-radio sits off
 # ka9q-python's compat commit.
 G9_NAME="9 (native pins come from the release)"
 G9_BAD=()
-G9_NOTE=""
 _g9_row(){ # _g9_row <manifest> <name>: the name's commit in the components block
     awk -v n="$2" '/^components/{c=1; next} c && /^[^ ]/{c=0}
                    c && $1==n {print $2; exit}' "$1"
 }
-_g9_built(){ # _g9_built <manifest> <name>: the native_built_<name> preamble value
-    awk -F': *' -v k="native_built_$2" '/^components/{exit} $1==k {print $2; exit}' "$1"
+_g9_pre(){ # _g9_pre <manifest> <key>: a preamble value
+    awk -F': *' -v k="$2" '/^components/{exit} $1==k {print $2; exit}' "$1"
 }
 _g9_same(){ # _g9_same <full> <short-or-full>: one is a prefix of the other
     [ -n "$1" ] && [ -n "$2" ] && { case "$1" in "$2"*) return 0 ;; esac
@@ -636,7 +641,13 @@ else
         if [ -z "$_g9_smd" ]; then
             gate_fail "$G9_NAME" "cannot read bin/smd at sigmond $_g9_sig in $SIGMOND_REPO"
         else
-            _g9_nbuilt=0
+            _g9_mark="$(_g9_pre "$MANIFEST" native_built_capture)"
+            case "$_g9_mark" in
+                ""|ok) ;;
+                failed) G9_BAD+=("the build-record capture failed (native_built_capture: failed) -- the built binaries cannot be checked") ;;
+                *) G9_BAD+=("unknown native_built_capture value '$_g9_mark'") ;;
+            esac
+            _g9_nbuilt=0; _g9_nprov=0
             for _pair in onion:_ONION_COMMIT wsjtx:_WSJTX_COMMIT ubersdr_wsprd:_UBERSDR_COMMIT; do
                 _n="${_pair%%:*}"; _c="${_pair#*:}"
                 _want="$(printf '%s\n' "$_g9_smd" \
@@ -645,27 +656,44 @@ else
                     G9_BAD+=("sigmond $_g9_sig names no $_c"); continue
                 fi
                 _got="$(_g9_row "$MANIFEST" "$_n")"
-                if [ -n "$_got" ] && ! _g9_same "$_want" "$_got"; then
+                if [ -z "$_got" ]; then
+                    G9_BAD+=("no $_n checkout row")
+                elif ! _g9_same "$_want" "$_got"; then
                     G9_BAD+=("$_n checkout ${_got:0:9}, pin ${_want:0:9}")
                 fi
-                _built="$(_g9_built "$MANIFEST" "$_n")"
+                _built="$(_g9_pre "$MANIFEST" "native_built_$_n")"
                 if [ -n "$_built" ]; then
                     _g9_nbuilt=$((_g9_nbuilt+1))
                     _g9_same "$_want" "$_built" \
                         || G9_BAD+=("$_n built from ${_built:0:9}, pin ${_want:0:9}")
+                elif [ "$_g9_mark" = ok ]; then
+                    G9_BAD+=("no native_built_$_n line")
+                fi
+                # onion is a library: no decoder .provenance of its own.
+                [ "$_n" = onion ] && continue
+                _prov="$(_g9_pre "$MANIFEST" "native_provenance_$_n")"
+                if [ -n "$_prov" ]; then
+                    _g9_nprov=$((_g9_nprov+1))
+                    _g9_same "$_want" "$_prov" \
+                        || G9_BAD+=("$_n decoder provenance ${_prov:0:9}, pin ${_want:0:9}")
+                elif [ "$_g9_mark" = ok ]; then
+                    G9_BAD+=("no native_provenance_$_n line")
                 fi
             done
+            if [ "$_g9_mark" != ok ] && [ "$_g9_nbuilt" -gt 0 ] && [ "$_g9_nbuilt" -lt 3 ]; then
+                G9_BAD+=("only $_g9_nbuilt of 3 native_built_ lines")
+            fi
             if [ "${#G9_BAD[@]}" -gt 0 ]; then
                 _g9_join=""
                 for _b in "${G9_BAD[@]}"; do _g9_join="${_g9_join:+$_g9_join; }$_b"; done
                 gate_fail "$G9_NAME" \
                     "$_g9_join -- write the commits into bin/smd's constants in sigmond, rebuild the image from that sigmond, then bless"
-            elif [ "$_g9_nbuilt" -eq 0 ]; then
+            elif [ -z "$_g9_mark" ] && [ "$_g9_nbuilt" -eq 0 ]; then
                 gate_warn "$G9_NAME" \
                     "checkouts match sigmond $_g9_sig's pins, but $(basename "$MANIFEST") predates native_built_ lines -- the built binaries are NOT verified"
             else
                 gate_pass "$G9_NAME" \
-                    "onion, wsjtx, ubersdr_wsprd checkouts and $_g9_nbuilt build record(s) match sigmond $_g9_sig's pins"
+                    "onion, wsjtx, ubersdr_wsprd checkouts, $_g9_nbuilt build record(s) and $_g9_nprov decoder provenance(s) match sigmond $_g9_sig's pins"
             fi
         fi
     fi
