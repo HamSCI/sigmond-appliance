@@ -78,9 +78,11 @@ against its checksum, finds the USB stick by itself, writes it and reads it
 back to compare every byte.  Plug in the stick, then run:
 
 ```
-curl -fsSLO https://raw.githubusercontent.com/HamSCI/sigmond-proxmox/main/sigmond-flash-latest.sh
+curl -fsSLO https://raw.githubusercontent.com/HamSCI/sigmond-appliance/main/sigmond-flash-latest.sh
 bash sigmond-flash-latest.sh
 ```
+
+<!-- The flasher URL stays on the old repo name, which works now and redirects after the rename. Move it to HamSCI/sigmond-proxmox when the mirror ends. -->
 
 It asks its questions first, before the long download: which stick, a `y` to
 erase it, and your password (writing a whole stick needs root).  When it prints `VERIFIED`, go on to §5; if this

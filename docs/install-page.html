@@ -167,8 +167,9 @@ Wi-Fi network you join during setup. Sites with only IPv6 work too.</li>
   <p><b>Easiest, on Linux or a Mac:</b> one script downloads the newest image, checks it
   against its checksum, finds the USB stick by itself, writes it and reads it back to check
   every byte. Plug in the stick, then run:</p>
-  <pre>curl -fsSLO https://raw.githubusercontent.com/HamSCI/sigmond-proxmox/main/sigmond-flash-latest.sh
+  <pre>curl -fsSLO https://raw.githubusercontent.com/HamSCI/sigmond-appliance/main/sigmond-flash-latest.sh
 bash sigmond-flash-latest.sh</pre>
+  <!-- The flasher URL stays on the old repo name, which works now and redirects after the rename. Move it to HamSCI/sigmond-proxmox when the mirror ends. -->
   <p>It asks its questions first, before the long download: which stick, a
   <span class="mono">y</span> to erase it, and your password. When it prints <span class="mono">VERIFIED</span>, go on to section 3.</p>
   <p><b>By hand:</b> your fleet admin sends you two files, or download links for them: the image,

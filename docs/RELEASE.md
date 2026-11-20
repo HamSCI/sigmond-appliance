@@ -4,7 +4,8 @@ The release lives in sigmond now. The process, the rungs, the bless
 step and every release note sit in the sigmond repo:
 
 - Process: [`release/RELEASE.md`](https://github.com/HamSCI/sigmond/blob/main/release/RELEASE.md)
-- History: [`CHANGELOG.md`](https://github.com/HamSCI/sigmond/blob/main/CHANGELOG.md)
+- Older history kept here: [RELEASE-history.md](RELEASE-history.md)
+- Release notes: [`CHANGELOG.md`](https://github.com/HamSCI/sigmond/blob/main/CHANGELOG.md)
 
 This repo, `HamSCI/sigmond-proxmox`, builds and tests the image. The
 build script (`build-usb-v3.sh`) installs the component list from
