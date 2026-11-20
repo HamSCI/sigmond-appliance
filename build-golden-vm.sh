@@ -318,6 +318,25 @@ else
     say "WARNING: manifest capture FAILED or truncated ($NCOMP component lines) — image will be unblessable (manifest-raw.txt missing or malformed); build-usb-v3.sh will refuse to ship without it"
     rm -f manifest-raw.txt.new
 fi
+# The commits the native builds actually compiled, from the build records smd
+# writes (/var/lib/sigmond/build-manifest/*.toml).  build-usb-v3.sh puts them
+# in the manifest preamble as native_built_<name>: <sha>, and bless gate 9
+# refuses an image whose built commits differ from sigmond's pins (v3.94:
+# every pin comes from the release; no station keeps a pin file).  The
+# manifest rows only show checkouts, and a checkout can sit at the pin beside
+# a binary built elsewhere.  Best-effort like the manifest: an empty capture
+# leaves no file, and gate 9 then WARNs that the builds went unverified.
+say "capturing the commits the native builds recorded"
+$SSH 'for f in /var/lib/sigmond/build-manifest/*.toml; do [ -f "$f" ] && cat "$f"; done' 2>/dev/null \
+    | awk -F'"' '/^\[\[upstream\]\]/{n=""} /^name *=/{n=$2}
+                 /^sha *=/{ if (n ~ /^(onion|wsjtx|ubersdr_wsprd)$/ && $2 ~ /^[0-9a-f]+$/ && length($2) == 40)
+                                print "native_built_" n ": " $2 }' > native-built.txt.new
+if [ -s native-built.txt.new ]; then
+    say "native build records captured: $(wc -l < native-built.txt.new) line(s)"
+else
+    say "WARNING: no native build records captured -- bless gate 9 will WARN that the built binaries are unverified"
+    rm -f native-built.txt.new
+fi
 
 say "shutting down VM (halt, not reboot — no machine-id now)"
 $SSH "sudo shutdown -h now" 2>/dev/null
@@ -326,11 +345,12 @@ pgrep -f "name goldenv3" >/dev/null && { say "force stop"; sudo pkill -f "name g
 
 say "compacting template"
 qemu-img convert -O qcow2 -c golden-v3.qcow2 sigmond-decoder-template-v3.qcow2.new \
-    || { say "FATAL: qemu-img convert failed — template NOT replaced"; rm -f sigmond-decoder-template-v3.qcow2.new golden-v3-revs.txt.new manifest-raw.txt.new; exit 1; }
+    || { say "FATAL: qemu-img convert failed — template NOT replaced"; rm -f sigmond-decoder-template-v3.qcow2.new golden-v3-revs.txt.new manifest-raw.txt.new native-built.txt.new; exit 1; }
 mv -f sigmond-decoder-template-v3.qcow2.new sigmond-decoder-template-v3.qcow2
 mv -f golden-v3-revs.txt.new golden-v3-revs.txt
 # The manifest travels with its template: a capture that failed leaves NO
 # manifest (the USB build then refuses), never the previous build's.
 if [ -f manifest-raw.txt.new ]; then mv -f manifest-raw.txt.new manifest-raw.txt; else rm -f manifest-raw.txt; fi
+if [ -f native-built.txt.new ]; then mv -f native-built.txt.new native-built.txt; else rm -f native-built.txt; fi
 ls -la sigmond-decoder-template-v3.qcow2
 say "GOLDEN VM BUILD COMPLETE"

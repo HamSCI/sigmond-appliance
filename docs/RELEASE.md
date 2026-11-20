@@ -210,6 +210,29 @@ section, heading included, and ends with a link to the full `CHANGELOG.md` on
 GitHub. A failed upload warns with a by-hand recipe and leaves the bless at
 exit 0, as for the install files.
 
+**Write the image's native commits into sigmond before you bless** (Michael,
+2026-11-20: "Any pinning or version specifications should reside in the base
+repo and not vary per station"). An image, a bare-metal install and
+`smd align` all carry a station to one sigmond version, so all three must land
+the same pins, and sigmond's own code holds them. No station keeps a pin file:
+from v3.94 smd neither reads nor writes `/etc/sigmond/component-pins.toml`,
+and the image no longer ships one.
+
+Gate 9 reads the manifest. Its `sigmond` row names the sigmond commit the
+image carries, and `git show <that commit>:bin/smd`, in the checkout that
+`SIGMOND_REPO` names (default `~/appliance/repos/sigmond`), gives
+`_ONION_COMMIT`, `_WSJTX_COMMIT` and `_UBERSDR_COMMIT`. It passes only when
+each of onion, wsjtx and ubersdr_wsprd matches its constant twice: in its
+checkout row, and in its `native_built_<name>:` preamble line, the commit the
+image's build recorded (`build-golden-vm.sh` captures these from
+`/var/lib/sigmond/build-manifest/`). A manifest without those lines predates
+the capture: the gate checks the checkouts and WARNs that the builds went
+unverified.
+
+A candidate built at newest main (`SIGMOND_TRACK_MAIN=1`) fails gate 9 until
+the commits it built become sigmond's constants. Then rebuild the image from
+that sigmond and bless it.
+
 ### 4. Rolled
 
 Rolling has the two orientations sigmond's `CONTRIBUTING.md` §3 defines,

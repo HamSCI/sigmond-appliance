@@ -416,6 +416,9 @@ BUILT_UTC="$(date -u -Iseconds)"
     echo "vm6proxy_sha256: $(sha256sum sigmond-vm6proxy | cut -d" " -f1)"
     echo "vm4relay_sha256: $(sha256sum sigmond-vm4relay | cut -d" " -f1)"
     echo "built_utc: $BUILT_UTC"
+    # The commits the native builds compiled (build-golden-vm.sh); bless
+    # gate 9 checks them against sigmond's pins.
+    if [ -s native-built.txt ]; then cat native-built.txt; fi
     # Explained here, not just in this build script's comments, because a
     # field engineer reads THIS file, not build-usb-v3.sh. Sits above the
     # "components (live):" header, so manifest_drift()'s parser -- which
@@ -629,6 +632,9 @@ MANIFEST="${IMG%.img}.manifest.txt"
     echo "vm6proxy_sha256: $(sha256sum sigmond-vm6proxy | cut -d" " -f1)"
     echo "vm4relay_sha256: $(sha256sum sigmond-vm4relay | cut -d" " -f1)"
     echo "built_utc: $BUILT_UTC"
+    # The commits the native builds compiled (build-golden-vm.sh); bless
+    # gate 9 checks them against sigmond's pins.
+    if [ -s native-built.txt ]; then cat native-built.txt; fi
     echo "image_sha256: $(cut -d' ' -f1 < "${IMG%.img}.sha256")"
     echo
     cat manifest-raw.txt

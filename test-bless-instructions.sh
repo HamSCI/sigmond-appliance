@@ -222,7 +222,10 @@ mkscene() {
         printf 'image bytes for %s\n' "$img" > "$S/rig/$img"
         (cd "$S/rig" && sha256sum "$img" > "$stem.sha256")
         local fb; fb="$(sed "s|@@VERSION@@|$v|g" "$S/seed/firstboot-v3.sh" | sha256sum | cut -d' ' -f1)"
-        printf 'version: %s\ncomponents\n    sigmond  abc1234\n    hs-uploader  def5678\nfirstboot_sha256: %s\n' "$v" "$fb" > "$S/rig/$stem.manifest.txt"
+        # Gate 9 reads the sigmond row and the native_built_ lines against
+        # the scratch sigmond's constants ($SIGFIX).
+        printf 'version: %s\n%bcomponents\n    sigmond  %s\n    hs-uploader  def5678\nfirstboot_sha256: %s\n' \
+            "$v" "$SIGFIX_BUILT" "$SIGFIX_SHA" "$fb" > "$S/rig/$stem.manifest.txt"
         printf 'USB image under test: %s\nPHASE D PASS -- NESTED TEST COMPLETE\n' "$img" > "$S/rig/test-v3.log"
     fi
     cp "$BLESS" "$S/bless/bless-release.sh"; cp "$LIB" "$S/bless/publish-lib.sh"
@@ -243,6 +246,17 @@ EOF
     done
 }
 
+# A scratch sigmond whose bin/smd holds the native pins, for gate 9 (every pin
+# comes from the release; test-bless-native-pins.sh covers the gate itself).
+SIGFIX="$T/sigmond-fixture"
+mkdir -p "$SIGFIX/bin"
+git -C "$SIGFIX" init -q
+printf "_ONION_COMMIT = '%s'\n_WSJTX_COMMIT = '%s'\n_UBERSDR_COMMIT = '%s'\n" \
+    "$(printf 'a%.0s' {1..40})" "$(printf 'b%.0s' {1..40})" "$(printf 'c%.0s' {1..40})" > "$SIGFIX/bin/smd"
+git -C "$SIGFIX" add bin/smd && git -C "$SIGFIX" commit -q -m pins
+SIGFIX_SHA="$(git -C "$SIGFIX" rev-parse --short=8 HEAD)"
+SIGFIX_BUILT="native_built_onion: $(printf 'a%.0s' {1..40})\nnative_built_ubersdr_wsprd: $(printf 'c%.0s' {1..40})\n"
+
 # run_bless <scene> <apply 0|1> — sets OUT (CR-stripped) and RC.  --apply runs
 # under script(1) because the confirmation reads /dev/tty and fails closed
 # without one.  The typed phrase goes in through script's stdin.
@@ -251,13 +265,13 @@ run_bless() {
     : > "$S/calls"
     if [ "$apply" = 1 ]; then
         OUT="$(cd "$S" && printf 'publish %s\n' "$SC_VERSION" | env \
-            APPLIANCE_REPO="$S/repo" RIG_DIR="$S/rig" GH_REPO_SLUG=Scratch/appliance \
+            APPLIANCE_REPO="$S/repo" RIG_DIR="$S/rig" GH_REPO_SLUG=Scratch/appliance SIGMOND_REPO="$SIGFIX" \
             STUB_REMOTE="$S/remote" STUB_CALLS="$S/calls" TMPDIR="$S/tmp" PATH="$T/bin:$PATH" \
             script -qefc "bash '$S/bless/bless-release.sh' $SC_VERSION --apply" /dev/null 2>&1)"
         RC=$?
     else
         OUT="$(cd "$S" && env \
-            APPLIANCE_REPO="$S/repo" RIG_DIR="$S/rig" GH_REPO_SLUG=Scratch/appliance \
+            APPLIANCE_REPO="$S/repo" RIG_DIR="$S/rig" GH_REPO_SLUG=Scratch/appliance SIGMOND_REPO="$SIGFIX" \
             STUB_REMOTE="$S/remote" STUB_CALLS="$S/calls" TMPDIR="$S/tmp" PATH="$T/bin:$PATH" \
             bash "$S/bless/bless-release.sh" "$SC_VERSION" 2>&1)"
         RC=$?
@@ -759,7 +773,7 @@ chk   "heading flagged: no Release created"    "$(grep -c 'release create' "$T/c
 run_bless_phrase() { # <scene> <phrase>
     local S="$T/$1"; : > "$S/calls"
     OUT="$(cd "$S" && printf '%s\n' "$2" | env \
-        APPLIANCE_REPO="$S/repo" RIG_DIR="$S/rig" GH_REPO_SLUG=Scratch/appliance \
+        APPLIANCE_REPO="$S/repo" RIG_DIR="$S/rig" GH_REPO_SLUG=Scratch/appliance SIGMOND_REPO="$SIGFIX" \
         STUB_REMOTE="$S/remote" STUB_CALLS="$S/calls" TMPDIR="$S/tmp" PATH="$T/bin:$PATH" \
         script -qefc "bash '$S/bless/bless-release.sh' $SC_VERSION --apply" /dev/null 2>&1)"
     RC=$?; OUT="$(printf '%s' "$OUT" | tr -d '\r')"

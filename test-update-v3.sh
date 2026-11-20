@@ -1269,15 +1269,13 @@ ASSESSED="$(awk '$1=="BEHIND"' "$WORK/e6-behind.out" | awk 'END{print NR}')"
 # ── the INSTALLED UberSDR decoders come from the pin sigmond now names ──
 # The checks above read git; a checkout moved to the new pin beside the old
 # binaries passes all of them.  Read the pin the way smd's _native_pin does:
-# the station pin file's entry first, else _UBERSDR_COMMIT from the guest's
-# own (updated) bin/smd, never from this script, so a later pin bump needs no
-# edit here.  The image build runs under SIGMOND_TRACK_MAIN=1 and records the
-# commit it built in /etc/sigmond/component-pins.toml; from v3.92 that commit
-# lies ahead of the constant, smd update holds the decoders there (HELD), and
-# a constant-only read failed a correct update (2026-11-18 06:12Z).
+# _UBERSDR_COMMIT from the guest's own (updated) bin/smd, never from this
+# script, so a later pin bump needs no edit here.  Since v3.94 every pin comes
+# from the release: smd no longer reads /etc/sigmond/component-pins.toml
+# (images from v3.92 shipped one, and its entry won over the constant), so
+# this check must not read it either.
 gx_ok 120 e6b-decoder-pin '
-P="$(sed -nE "s/^ *\"?ubersdr_wsprd\"? *= *\"([0-9a-f]{40})\".*/\1/p" /etc/sigmond/component-pins.toml 2>/dev/null | head -1)"
-[ -n "$P" ] || P="$(sed -nE "s/^_UBERSDR_COMMIT *= *.([0-9a-f]{40}).*/\1/p" /opt/git/sigmond/sigmond/bin/smd | head -1)"
+P="$(sed -nE "s/^_UBERSDR_COMMIT *= *.([0-9a-f]{40}).*/\1/p" /opt/git/sigmond/sigmond/bin/smd | head -1)"
 printf "PIN %s\n" "$P"
 if [ -d /opt/git/sigmond/ubersdr_wsprd/.git ]; then echo "SRC yes"; else echo "SRC no"; fi
 printf "PROV %s\n" "$(head -1 /usr/local/libexec/sigmond/decoders/ubersdr/.provenance 2>/dev/null)"

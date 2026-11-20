@@ -23,6 +23,10 @@
 #   8. the changelog names this release: origin/main's CHANGELOG.md holds
 #      exactly one "## sigmond-appliance <version>" heading, not marked
 #      (draft), with text under it
+#   9. the image's native sources come from the release's pins: the
+#      manifest's onion, wsjtx and ubersdr_wsprd checkouts, and the commits
+#      the image's builds record (native_built_* lines), equal the constants
+#      in bin/smd at the manifest's sigmond commit
 #
 # Dry-run by default, matching smd update's contract on this fleet.
 # --apply is required to create anything, and even then only after every
@@ -41,6 +45,8 @@
 #   RIG_DIR         build/test staging dir: images, .sha256, .manifest.txt,
 #                    test-v3.log (default: $HOME/appliance/v3)
 #   GH_REPO_SLUG    GitHub repo slug (default: HamSCI/sigmond-appliance)
+#   SIGMOND_REPO    sigmond checkout gate 9 reads bin/smd from (default:
+#                    $HOME/appliance/repos/sigmond)
 set -u
 # systemd-run sets no HOME, and set -u would stop at the first use below.
 # Take the account's home from the password database instead.
@@ -51,6 +57,7 @@ say(){ echo "[bless $(date '+%T')] $*"; }
 REPO="${APPLIANCE_REPO:-$HOME/appliance/repos/sigmond-appliance}"
 RIG_DIR="${RIG_DIR:-$HOME/appliance/v3}"
 GH_REPO="${GH_REPO_SLUG:-HamSCI/sigmond-appliance}"
+SIGMOND_REPO="${SIGMOND_REPO:-$HOME/appliance/repos/sigmond}"
 TESTLOG="$RIG_DIR/test-v3.log"
 
 APPLY=0
@@ -568,6 +575,100 @@ if [ -z "$G8_BAD" ]; then
 else
     gate_fail "$G8_NAME" \
         "$G8_BAD -- $G8_DO, commit and push CHANGELOG.md, then bless (docs/RELEASE.md, rung 3)"
+fi
+
+# ---- Gate 9: the image's native sources come from the release's pins ------
+#
+# Michael, 2026-11-20: "Any pinning or version specifications should reside
+# in the base repo and not vary per station."  The image, a bare-metal
+# install and `smd align` must all land one set of pins, and the base repo
+# holds it: bin/smd's _ONION_COMMIT, _WSJTX_COMMIT and _UBERSDR_COMMIT at
+# the sigmond commit the image carries.  Until v3.94 an image built under
+# SIGMOND_TRACK_MAIN=1 at newest main and shipped those commits in
+# /etc/sigmond/component-pins.toml, a per-station file that won over the
+# constants.  sigmond no longer reads that file, so an image whose natives
+# sit anywhere else would ship binaries that the first `smd align` rebuilds.
+#
+# So a candidate built at newest main gets blessed only once its commits
+# live in sigmond's constants (and the image carries that sigmond).
+#
+# WHAT the gate reads: the manifest (gate 4).  Its "sigmond" row names the
+# sigmond commit; `git show <it>:bin/smd` in $SIGMOND_REPO gives the
+# constants.  Each of onion, wsjtx and ubersdr_wsprd must match twice:
+#   - its checkout row in the components block, and
+#   - its native_built_<name>: line in the preamble, the commit the image's
+#     build recorded (/var/lib/sigmond/build-manifest/*.toml, captured by
+#     build-golden-vm.sh).
+# A manifest with no native_built_ lines predates the capture: the gate
+# checks the checkouts and WARNs that the built commits went unverified.
+# ka9q-radio is not checked here: its pin belongs to ka9q-python, and
+# build-golden-vm.sh already refuses a template whose ka9q-radio sits off
+# ka9q-python's compat commit.
+G9_NAME="9 (native pins come from the release)"
+G9_BAD=()
+G9_NOTE=""
+_g9_row(){ # _g9_row <manifest> <name>: the name's commit in the components block
+    awk -v n="$2" '/^components/{c=1; next} c && /^[^ ]/{c=0}
+                   c && $1==n {print $2; exit}' "$1"
+}
+_g9_built(){ # _g9_built <manifest> <name>: the native_built_<name> preamble value
+    awk -F': *' -v k="native_built_$2" '/^components/{exit} $1==k {print $2; exit}' "$1"
+}
+_g9_same(){ # _g9_same <full> <short-or-full>: one is a prefix of the other
+    [ -n "$1" ] && [ -n "$2" ] && { case "$1" in "$2"*) return 0 ;; esac
+                                    case "$2" in "$1"*) return 0 ;; esac; }
+    return 1
+}
+if [ -z "${MANIFEST:-}" ]; then
+    gate_fail "$G9_NAME" "cannot check -- no manifest (see gate 4)"
+else
+    _g9_sig="$(_g9_row "$MANIFEST" sigmond)"
+    if [ -z "$_g9_sig" ]; then
+        gate_fail "$G9_NAME" "$(basename "$MANIFEST") has no sigmond row -- cannot tell which pins the image carries"
+    elif [ ! -d "$SIGMOND_REPO" ]; then
+        gate_fail "$G9_NAME" "no sigmond checkout at $SIGMOND_REPO (set SIGMOND_REPO)"
+    else
+        if ! git -C "$SIGMOND_REPO" cat-file -e "${_g9_sig}^{commit}" 2>/dev/null; then
+            git -C "$SIGMOND_REPO" fetch --quiet origin 2>/dev/null \
+                || say "WARNING: gate 9 could not fetch origin in $SIGMOND_REPO"
+        fi
+        _g9_smd="$(git -C "$SIGMOND_REPO" show "${_g9_sig}:bin/smd" 2>/dev/null)"
+        if [ -z "$_g9_smd" ]; then
+            gate_fail "$G9_NAME" "cannot read bin/smd at sigmond $_g9_sig in $SIGMOND_REPO"
+        else
+            _g9_nbuilt=0
+            for _pair in onion:_ONION_COMMIT wsjtx:_WSJTX_COMMIT ubersdr_wsprd:_UBERSDR_COMMIT; do
+                _n="${_pair%%:*}"; _c="${_pair#*:}"
+                _want="$(printf '%s\n' "$_g9_smd" \
+                    | sed -nE "s/^${_c} *= *['\"]([0-9a-f]{40})['\"].*/\1/p" | head -1)"
+                if [ -z "$_want" ]; then
+                    G9_BAD+=("sigmond $_g9_sig names no $_c"); continue
+                fi
+                _got="$(_g9_row "$MANIFEST" "$_n")"
+                if [ -n "$_got" ] && ! _g9_same "$_want" "$_got"; then
+                    G9_BAD+=("$_n checkout ${_got:0:9}, pin ${_want:0:9}")
+                fi
+                _built="$(_g9_built "$MANIFEST" "$_n")"
+                if [ -n "$_built" ]; then
+                    _g9_nbuilt=$((_g9_nbuilt+1))
+                    _g9_same "$_want" "$_built" \
+                        || G9_BAD+=("$_n built from ${_built:0:9}, pin ${_want:0:9}")
+                fi
+            done
+            if [ "${#G9_BAD[@]}" -gt 0 ]; then
+                _g9_join=""
+                for _b in "${G9_BAD[@]}"; do _g9_join="${_g9_join:+$_g9_join; }$_b"; done
+                gate_fail "$G9_NAME" \
+                    "$_g9_join -- write the commits into bin/smd's constants in sigmond, rebuild the image from that sigmond, then bless"
+            elif [ "$_g9_nbuilt" -eq 0 ]; then
+                gate_warn "$G9_NAME" \
+                    "checkouts match sigmond $_g9_sig's pins, but $(basename "$MANIFEST") predates native_built_ lines -- the built binaries are NOT verified"
+            else
+                gate_pass "$G9_NAME" \
+                    "onion, wsjtx, ubersdr_wsprd checkouts and $_g9_nbuilt build record(s) match sigmond $_g9_sig's pins"
+            fi
+        fi
+    fi
 fi
 
 # ---- report -----------------------------------------------------------------

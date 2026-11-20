@@ -156,16 +156,25 @@ fi
 echo "### topology covers the dasi2 profile ✓"
 echo "### smd install  (self-elevates; compiles ka9q-radio — long) ..."
 # SIGMOND_TRACK_MAIN=1: onion and ubersdr_wsprd, pinned in code in bin/smd,
-# build from their remote's newest main commit too, and land in
-# /etc/sigmond/component-pins.toml, which the image ships.  ka9q-radio builds
-# at ka9q-python main's compat commit (its one owner), so radiod's newest main
+# build from their remote's newest main commit too.  ka9q-radio builds at
+# ka9q-python main's compat commit (its one owner), so radiod's newest main
 # arrives when ka9q-python's main moves to it.  wsjtx and ft8_lib are
-# fallback decoders, pinned on purpose.  rob, 2026-11-11: each image is the newest main of every
-# repo, tested by the ladder, and stations stay pinned to that set.
+# fallback decoders, pinned on purpose.  rob, 2026-11-11: each image is the
+# newest main of every repo, tested by the ladder.
+#
+# The image ships NO station pin file (v3.94; Michael, 2026-11-20: "Any
+# pinning or version specifications should reside in the base repo and not
+# vary per station").  Every pin comes from sigmond's own code, so the image,
+# a bare-metal install and `smd align` land the same version.  A candidate
+# built here at newest main gets blessed only once sigmond's constants name
+# the commits it built: bless-release.sh gate 9 refuses it until then.
 echo "### SIGMOND_TRACK_MAIN=1: every component at its newest main commit"
 SIGMOND_TRACK_MAIN=1 smd install --yes
 RC=$?
 echo "### smd install exit=$RC"
+# An smd older than v3.94 wrote the pin file under track-main.  Remove any it
+# left, so the image never carries one.
+sudo rm -f /etc/sigmond/component-pins.toml
 # The client installers run as root and leave egg-info / build products
 # root-owned inside checkouts that belong to the client users.  `smd doctor`
 # then flags every one of them on the first boot of every image -- 12 findings

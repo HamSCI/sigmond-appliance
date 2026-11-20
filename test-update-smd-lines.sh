@@ -338,12 +338,14 @@ fi
     && echo "  ok   PHASE E checks the decoder provenance after the update" \
     || { echo "  FAIL PHASE E does not check the decoder provenance after the update"; fail=1; }
 
-# The image build records the decoders' commit in the station pin file under
-# SIGMOND_TRACK_MAIN=1; smd holds them there.  A check that reads only the
-# constant failed a correct v3.92 -> main update (2026-11-18 06:12Z).
-grep -q '/etc/sigmond/component-pins.toml' <(sed -n '/gx_ok 120 e6b-decoder-pin/,/post-update: ubersdr decoder provenance/p' "$SRC") \
-    && echo "  ok   PHASE E reads the decoder pin from the station pin file first" \
-    || { echo "  FAIL PHASE E reads only _UBERSDR_COMMIT, not the station pin file smd honours"; fail=1; }
+# Since v3.94 every pin comes from the release: smd reads _UBERSDR_COMMIT and
+# never the station pin file, so PHASE E must read the same and nothing else.
+_E6B="$(sed -n '/gx_ok 120 e6b-decoder-pin/,/post-update: ubersdr decoder provenance/p' "$SRC")"
+if grep -q '_UBERSDR_COMMIT' <<<"$_E6B" && ! grep -q 'component-pins' <<<"$_E6B"; then
+    echo "  ok   PHASE E reads the decoder pin from sigmond's constant alone"
+else
+    echo "  FAIL PHASE E must read _UBERSDR_COMMIT and never the retired station pin file"; fail=1
+fi
 
 [ "$fail" = 0 ] && echo "PASS: held_names, restore_moved, PANEL_DEFECT_RE, doctor_pairs, manifest_drift, decoder_pin_verdict" || echo "FAILED: held_names, restore_moved, PANEL_DEFECT_RE, doctor_pairs, manifest_drift, decoder_pin_verdict"
 exit "$fail"
