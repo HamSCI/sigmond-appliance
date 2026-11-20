@@ -78,7 +78,7 @@ against its checksum, finds the USB stick by itself, writes it and reads it
 back to compare every byte.  Plug in the stick, then run:
 
 ```
-curl -fsSLO https://raw.githubusercontent.com/HamSCI/sigmond-appliance/main/sigmond-flash-latest.sh
+curl -fsSLO https://raw.githubusercontent.com/HamSCI/sigmond-proxmox/main/sigmond-flash-latest.sh
 bash sigmond-flash-latest.sh
 ```
 
@@ -529,7 +529,7 @@ More symptoms and the decision tree: [operator troubleshooting](https://github.c
 
 *Fleet-internal: blessed images live in the download folder on wd30 and on the
 release Drive folders (untested builds sit in `pending/` until blessed). This
-document lives in the HamSCI/sigmond-appliance repo as `INSTALL.md` — keep it
+document lives in the HamSCI/sigmond-proxmox repo as `INSTALL.md` — keep it
 updated as the wizard changes.*
 
 ---

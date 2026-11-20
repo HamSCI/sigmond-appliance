@@ -14,4 +14,4 @@
 | [flash-usb-mac.md](flash-usb-mac.md) | operator | one-page Mac handout: download the image, flash it with Raspberry Pi Imager |
 | [../QUICKSTART.txt](../QUICKSTART.txt) | operator | on-stick quick-start card (dd, boot, power-off cue) |
 | [../README.md](../README.md) | contributor | build pipeline + packaging rules |
-| [RELEASE.md](RELEASE.md) ★ | contributor | release process: build/test/bless/roll through the four rungs |
+| [RELEASE.md](RELEASE.md) ★ | contributor | pointer to sigmond's release process; this repo builds and tests the image |
