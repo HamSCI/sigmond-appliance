@@ -155,21 +155,25 @@ if [ -n "${MISSING// }" ]; then
 fi
 echo "### topology covers the dasi2 profile ✓"
 echo "### smd install  (self-elevates; compiles ka9q-radio — long) ..."
-# SIGMOND_TRACK_MAIN=1: onion and ubersdr_wsprd, pinned in code in bin/smd,
-# build from their remote's newest main commit too.  ka9q-radio builds at
-# ka9q-python main's compat commit (its one owner), so radiod's newest main
-# arrives when ka9q-python's main moves to it.  wsjtx and ft8_lib are
-# fallback decoders, pinned on purpose.  rob, 2026-11-11: each image is the
-# newest main of every repo, tested by the ladder.
+# The image installs exactly sigmond's release list: release/components.toml
+# at the sigmond commit provision.sh checked out (build-golden-vm.sh chose
+# it).  Every component, native pins included, lands at the commit the list
+# names, so the image, a bare-metal install and `smd align` land the same
+# version.  build-usb-v3.sh refuses an image whose captured manifest differs
+# from the list.
 #
 # The image ships NO station pin file (v3.94; Michael, 2026-11-20: "Any
 # pinning or version specifications should reside in the base repo and not
-# vary per station").  Every pin comes from sigmond's own code, so the image,
-# a bare-metal install and `smd align` land the same version.  A candidate
-# built here at newest main gets blessed only once sigmond's constants name
-# the commits it built: bless-release.sh gate 9 refuses it until then.
-echo "### SIGMOND_TRACK_MAIN=1: every component at its newest main commit"
-SIGMOND_TRACK_MAIN=1 smd install --yes
+# vary per station").
+RELEASE_LIST=/opt/git/sigmond/sigmond/release/components.toml
+if [ ! -f "$RELEASE_LIST" ]; then
+    echo "### FATAL: $RELEASE_LIST absent at sigmond $(git -C /opt/git/sigmond/sigmond rev-parse --short HEAD 2>/dev/null)"
+    echo "###   the golden VM installs the release list and nothing else; commit one"
+    echo "###   (smd admin release-list --write --version vN) and build at that commit"
+    exit 1
+fi
+echo "### installing the release list: $(grep -m1 '^version' "$RELEASE_LIST")"
+smd install --yes --release-list /opt/git/sigmond/sigmond/release/components.toml
 RC=$?
 echo "### smd install exit=$RC"
 # An smd older than v3.94 wrote the pin file under track-main.  Remove any it

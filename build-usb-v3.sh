@@ -2,10 +2,11 @@
 # Sigmond appliance USB image builder v3 — runs on B3 in ~/appliance/v3.
 #
 # v3 over v2:
-#   - EXPLICIT VERSION per image (from the git tag on HEAD, e.g. v3.0) baked
-#     into: the image filename, the Proxmox host fqdn, the decoder VM name,
-#     /etc/motd, QUICKSTART — so test sticks are never confused (rob
-#     2026-07-26; tag-derived since Stage 2 so every image traces to a commit).
+#   - EXPLICIT VERSION per image (the `version` of sigmond's
+#     release/components.toml at the golden VM's sigmond commit, e.g. v3.94)
+#     baked into: the image filename, the Proxmox host fqdn, the decoder VM
+#     name, /etc/motd, QUICKSTART — so test sticks are never confused (rob
+#     2026-07-26; list-derived since v3.94 so every image traces to a release).
 #   - the SIGMOND REPO rides in the payload (host tuning scripts:
 #     host-discover/host-apply/cpu-pin template used by the importer).
 #   - image is UPLOADED TO Google Drive immediately after build, before
@@ -19,10 +20,13 @@
 #   - reboot-mode = "power-off" stays: remove-the-stick cue + loop guard.
 #
 # Usage: build-usb-v3.sh [--release] [--no-ship] [--dev]
-#   Version comes from the git tag on HEAD in the sigmond-appliance checkout
-#   (tag it first: git tag v3.32).  --dev allows an untagged build instead,
-#   stamped v0.0-dev+<sha> so it can never pass as, or be blessed as, a
-#   release.  A dirty working tree aborts unless --dev is given.
+#   Version comes from sigmond's release/components.toml at the commit the
+#   golden VM installed (golden-v3-sigmond-commit.txt).  This checkout's HEAD
+#   must equal the list's sigmond-proxmox row, and the captured manifest must
+#   match the list.  --dev stamps v0.0-dev+<sha> instead, so the build can
+#   never pass as, or be blessed as, a release; it skips the row check and
+#   only warns on a manifest that differs.  A dirty working tree aborts unless
+#   --dev is given.  No tag is needed: bless tags the image repo.
 set -eu
 say(){ echo "[usb $(date '+%T')] $*"; }
 die(){ say "FATAL: $*"; exit 1; }
@@ -46,7 +50,7 @@ exec > >(tee -a "$LOG") 2>&1
 # REPO is the git checkout this script itself ships from -- not $PWD, which
 # is the build rig staging dir ($RIG_ROOT/v3) and isn't under git.
 # Same override pattern as SIGMOND_REPO below.
-REPO="${APPLIANCE_REPO:-$HOME/appliance/repos/sigmond-appliance}"
+REPO="${APPLIANCE_REPO:-$HOME/appliance/repos/sigmond-proxmox}"
 # A bad REPO must abort, not degrade quietly: if $REPO is missing or not a
 # git checkout, `git -C "$REPO" status --porcelain` fails to stderr and the
 # command substitution below captures nothing, which reads as "clean" and
@@ -55,7 +59,11 @@ REPO="${APPLIANCE_REPO:-$HOME/appliance/repos/sigmond-appliance}"
 git -C "$REPO" rev-parse --git-dir >/dev/null 2>&1 \
     || die "not a git checkout: $REPO (check APPLIANCE_REPO)"
 git -C "$REPO" rev-parse --verify -q HEAD >/dev/null \
-    || die "no commits in $REPO — nothing to tag"
+    || die "no commits in $REPO — nothing to build"
+# The release-list helpers come from this checkout, the commit the list's
+# sigmond-proxmox row must name (checked below).
+# shellcheck source=release-home-lib.sh
+. "$REPO/release-home-lib.sh" || die "cannot source $REPO/release-home-lib.sh"
 
 # BUILD_DIR and SIGMOND_REF_DIR are the other two rig siblings this script
 # touches (vmbuild/ belongs to build-golden-vm.sh only). BUILD_DIR must
@@ -73,7 +81,7 @@ for a in "$@"; do
         --release) RELEASE=1 ;;
         --no-ship) SHIP=0 ;;
         --dev) DEV=1 ;;
-        v[0-9]*) die "'$a' looks like the old positional version argument -- version now comes from the git tag on HEAD (git tag $a in $REPO), not from a typed argument. Pass --dev for an untagged build." ;;
+        v[0-9]*) die "'$a' looks like the old positional version argument -- version now comes from sigmond's release/components.toml at the golden VM's sigmond commit, not from a typed argument. Pass --dev for a pipeline test build." ;;
         *) die "unrecognized argument: $a" ;;
     esac
 done
@@ -86,21 +94,41 @@ if [ -n "$DIRTY" ]; then
     (( DEV )) || die "working tree is dirty ($REPO) — commit or stash before building a release image"
 fi
 
-# `describe --tags --exact-match` deterministically prefers an annotated tag
-# over a lightweight one on the same commit, so this isn't a correctness bug
-# today -- but a leftover test tag (see the verification steps for this
-# script) could silently outrank an intended release tag on a later build.
-TAGS_AT_HEAD="$(git -C "$REPO" tag --points-at HEAD)"
-if [ "$(printf '%s\n' "$TAGS_AT_HEAD" | grep -c .)" -gt 1 ]; then
-    say "WARN: multiple tags on HEAD in $REPO ($(printf '%s' "$TAGS_AT_HEAD" | tr '\n' ' ')) — describe prefers the annotated one; delete any stray tag if that's not the intended release"
-fi
+# The sigmond commit the golden VM installed (C4, written by
+# build-golden-vm.sh beside the template) names the release: its
+# release/components.toml holds the version and every component's commit.
+# SIGMOND_REPO is the rig's sigmond checkout; it reads the list (git show at
+# C4) and supplies the wizard, so it must hold C4.
+SIGMOND_REPO="${SIGMOND_REPO:-$HOME/appliance/repos/sigmond}"
+git -C "$SIGMOND_REPO" rev-parse --git-dir >/dev/null 2>&1 \
+    || die "not a git checkout: $SIGMOND_REPO (check SIGMOND_REPO)"
+SIGMOND_COMMIT="$(rh_sigmond_commit "$RIG_ROOT/v3")" \
+    || die "no golden VM sigmond commit -- rebuild the golden VM (./build-golden-vm.sh)"
+git -C "$SIGMOND_REPO" cat-file -e "$SIGMOND_COMMIT^{commit}" 2>/dev/null \
+    || git -C "$SIGMOND_REPO" fetch -q origin >/dev/null 2>&1 \
+    || die "cannot fetch origin in $SIGMOND_REPO, and it lacks sigmond $SIGMOND_COMMIT"
+git -C "$SIGMOND_REPO" cat-file -e "$SIGMOND_COMMIT^{commit}" 2>/dev/null \
+    || die "$SIGMOND_REPO has no commit $SIGMOND_COMMIT (the golden VM's sigmond) -- pushed?"
+LIST_VERSION="$(rh_version "$SIGMOND_REPO" "$SIGMOND_COMMIT")" \
+    || die "cannot read release/components.toml at sigmond $SIGMOND_COMMIT"
+say "golden VM sigmond $SIGMOND_COMMIT: release list $LIST_VERSION"
 
-VERSION="$(git -C "$REPO" describe --tags --exact-match HEAD 2>/dev/null || true)"
-if [ -z "$VERSION" ]; then
-    if (( DEV )); then
-        VERSION="v0.0-dev+$(git -C "$REPO" rev-parse --short HEAD)"
-    else
-        die "HEAD is not tagged. Tag the release first (git tag v3.32) or pass --dev."
+if (( DEV )); then
+    VERSION="v0.0-dev+$(git -C "$REPO" rev-parse --short HEAD)"
+    say "--dev: stamping $VERSION (not $LIST_VERSION); this checkout is not held to the list"
+else
+    VERSION="$LIST_VERSION"
+    # The image repo's own commit is a row of the list like any other, and
+    # the manifest records it as appliance_commit.  Build from that commit or
+    # not at all: anything else ships host files the release never named.
+    _px_row="$(rh_proxmox_row "$SIGMOND_REPO" "$SIGMOND_COMMIT")" \
+        || die "release/components.toml at sigmond $SIGMOND_COMMIT has no readable sigmond-proxmox row"
+    _px_head="$(git -C "$REPO" rev-parse HEAD)"
+    if [ "$_px_head" != "$_px_row" ]; then
+        say "FATAL: $REPO is at $_px_head,"
+        say "  but release/components.toml ($VERSION) names sigmond-proxmox $_px_row."
+        say "  fix: git -C $REPO checkout $_px_row   (or rewrite and recommit the list)"
+        exit 1
     fi
 fi
 case "$VERSION" in v[0-9]*) ;; *) say "FATAL: version must look like v3.0"; exit 1;; esac
@@ -122,16 +150,13 @@ TPL=sigmond-decoder-template-v3.qcow2
 # as of 0774d81.  Take it from the checkout rather than a local copy: it used
 # to live only in this rig, unversioned, and the whole point of putting it in
 # the repo was to stop the rig and the repo drifting.  Refuse to build from a
-# checkout whose wizard is uncommitted, and warn if the checkout is not at
-# origin/main -- the image would otherwise ship something nobody can identify.
-SIGMOND_REPO="${SIGMOND_REPO:-$HOME/appliance/repos/sigmond}"
+# checkout whose wizard is uncommitted, and refuse one not at the golden VM's
+# sigmond commit -- the image would otherwise ship something nobody can identify.
 WIZ_SRC="$SIGMOND_REPO/scripts/proxmox/sigmond-wizard.sh"
 [ -f "$WIZ_SRC" ] || { say "FATAL: wizard missing at $WIZ_SRC"; exit 1; }
 if [ -n "$(git -C "$SIGMOND_REPO" status --porcelain -- scripts/proxmox/sigmond-wizard.sh 2>/dev/null)" ]; then
     say "FATAL: $WIZ_SRC has uncommitted changes — commit and push first"; exit 1
 fi
-git -C "$SIGMOND_REPO" fetch origin >/dev/null 2>&1 \
-    || die "cannot fetch origin in $SIGMOND_REPO — cannot tell whether the wizard is current, and a build must not guess"
 _wiz_head=$(git -C "$SIGMOND_REPO" rev-parse --short HEAD 2>/dev/null || echo unknown)
 _wiz_full=$(git -C "$SIGMOND_REPO" rev-parse HEAD 2>/dev/null || echo unknown)
 # ⛔ REFUSE, do not warn. This was a warning until 2026-09-02, and on that day
@@ -150,11 +175,15 @@ _wiz_full=$(git -C "$SIGMOND_REPO" rev-parse HEAD 2>/dev/null || echo unknown)
 # installed it (AI6VN lab and W3USR-019). The gate below closes that. The manifest records
 # the VM's pins, so it said 161948e while the wizard was 54f4b1c and nothing
 # downstream could tell.
-if [ "$_wiz_full" != "$(git -C "$SIGMOND_REPO" rev-parse origin/main 2>/dev/null)" ]; then
-    say "FATAL: the wizard checkout is not at origin/main."
+#
+# v3.94: the release, not main, names the commit.  The wizard must come from
+# the sigmond commit the golden VM installed, so host and VM run one sigmond.
+if [ "$_wiz_full" != "$SIGMOND_COMMIT" ]; then
+    say "FATAL: the wizard checkout is not at the golden VM's sigmond commit."
     say "  $SIGMOND_REPO is at $_wiz_head"
+    say "  the golden VM installed sigmond $SIGMOND_COMMIT ($VERSION's list)."
     say "  the image would ship that wizard while the manifest records the golden VM's sigmond."
-    say "  fix: git -C $SIGMOND_REPO fetch origin && git -C $SIGMOND_REPO merge --ff-only origin/main"
+    say "  fix: git -C $SIGMOND_REPO checkout $SIGMOND_COMMIT"
     exit 1
 fi
 cp "$WIZ_SRC" sigmond-wizard.sh
@@ -170,7 +199,7 @@ say "wizard sourced from sigmond $_wiz_head ($(wc -l < sigmond-wizard.sh) lines)
 # (c0b10f2 pristine snapshot, 9038623 panel fix) -- while every bless gate
 # passed, because the gates check the REPO's tag and clean tree and the
 # payload came from somewhere else entirely.  The build already refuses to
-# ship a sigmond wizard that is not at origin/main; it has to hold its own
+# ship a sigmond wizard that is not at the golden VM's sigmond commit; it has to hold its own
 # files to the same standard.
 # ...and so must every helper the stick carries into the host and the VM.
 # sigmond-site-timing (T4/VTEC discovery) shipped from the loose rig copy with
@@ -189,39 +218,26 @@ for _f in firstboot-v3.sh QUICKSTART.txt \
 done
 say "appliance inputs sourced from $REPO @ $(git -C "$REPO" rev-parse --short HEAD)"
 
-# ⛔ The GOLDEN VM's sigmond must be current too.
+# ⛔ The GOLDEN VM's sigmond must be the one the release names.
 #
 # That clone is what runs bring-up on a fresh install -- it is the smd the
 # station actually uses to install and start everything. The payload on the
-# stick goes to the Proxmox HOST; it never touches the VM. So a stale
-# template silently ships stale bring-up logic, which is exactly how v3.46
-# reproduced a bug that had been fixed a day earlier.
+# stick goes to the Proxmox HOST; it never touches the VM. A template whose
+# sigmond differs from the release ships bring-up logic nobody blessed,
+# which is how v3.46 reproduced a bug that had been fixed a day earlier.
 #
-# build-golden-vm.sh records every repo's HEAD in golden-v3-revs.txt. Read
-# sigmond's from there and refuse if it is behind origin/main.
+# build-golden-vm.sh records every repo's HEAD in golden-v3-revs.txt and the
+# sigmond commit in golden-v3-sigmond-commit.txt, renamed together once the
+# template is written.  They must agree; a disagreement means one of them
+# belongs to another build.
 _REVS="$RIG_ROOT/v3/golden-v3-revs.txt"
-if [ -r "$_REVS" ]; then
-    _gold_sig=$(awk '$1=="sigmond"{print $2; exit}' "$_REVS")
-    if [ -n "$_gold_sig" ]; then
-        if git -C "$SIGMOND_REPO" merge-base --is-ancestor "$_gold_sig" origin/main 2>/dev/null \
-           && [ "$(git -C "$SIGMOND_REPO" rev-parse --short "$_gold_sig" 2>/dev/null)" \
-                != "$(git -C "$SIGMOND_REPO" rev-parse --short origin/main 2>/dev/null)" ]; then
-            _behind=$(git -C "$SIGMOND_REPO" rev-list --count "$_gold_sig"..origin/main 2>/dev/null || echo "?")
-            say "FATAL: the golden VM's sigmond is $_behind commit(s) behind origin/main."
-            say "  template records sigmond $_gold_sig ($(stat -c %y "$RIG_ROOT/v3/sigmond-decoder-template-v3.qcow2" 2>/dev/null | cut -d. -f1))"
-            say "  that clone RUNS BRING-UP on every fresh install; the stick's payload"
-            say "  goes to the Proxmox host and never reaches the decoder VM."
-            say "  fix: ./build-golden-vm.sh   (then rebuild this image)"
-            say "  override for a deliberate old-template build: GOLDEN_STALE_OK=1"
-            [ "${GOLDEN_STALE_OK:-0}" = 1 ] || exit 1
-            say "  GOLDEN_STALE_OK=1 set — continuing with a stale decoder VM"
-        else
-            say "golden VM sigmond $_gold_sig is current"
-        fi
-    fi
-else
-    say "WARNING: $_REVS absent — cannot verify the golden VM's sigmond"
-fi
+[ -r "$_REVS" ] || die "$_REVS absent -- cannot verify the golden VM's sigmond; rebuild the golden VM"
+_gold_sig=$(awk '$1=="sigmond"{print $2; exit}' "$_REVS")
+case "$SIGMOND_COMMIT" in
+    "$_gold_sig"?*|"$_gold_sig") [ -n "$_gold_sig" ] || die "$_REVS has no sigmond row" ;;
+    *) die "$_REVS records sigmond '$_gold_sig', golden-v3-sigmond-commit.txt $SIGMOND_COMMIT -- one belongs to another build; rebuild the golden VM" ;;
+esac
+say "golden VM sigmond $_gold_sig is the release list's commit"
 
 say "=== building sigmond-appliance $VERSION (tag $VTAG, release=$RELEASE) ==="
 
@@ -437,6 +453,22 @@ BUILT_UTC="$(date -u -Iseconds)"
     cat manifest-raw.txt
 } > manifest-host.txt
 say "host manifest written: manifest-host.txt ($NCOMP_HOST component rows)"
+# ⛔ The image IS the release only if what it captured is what the list names:
+# every component row, and appliance_commit against the sigmond-proxmox row.
+# The golden VM installed the list, and build-golden-vm.sh checked the
+# checkouts; this checks the artefact that ships, after both.
+_rh_rc=0
+_rh_out="$(rh_check_manifest "$SIGMOND_REPO" "$SIGMOND_COMMIT" manifest-host.txt 2>&1)" || _rh_rc=$?
+if [ "$_rh_rc" -ne 0 ]; then
+    printf '%s\n' "$_rh_out" | sed 's/^/  /'
+    if (( DEV )); then
+        say "WARN: --dev: the image differs from release/components.toml ($LIST_VERSION) -- shipping anyway as $VERSION"
+    else
+        die "the image differs from release/components.toml ($VERSION at sigmond $SIGMOND_COMMIT)"
+    fi
+else
+    say "manifest matches release/components.toml ($LIST_VERSION)"
+fi
 
 say "payload ext4 (template + wizard + sigmond + rac + quickstart)"
 PAYSZ_MB=$(( $(stat -c%s "$TPL")/1048576 + $(stat -c%s sigmond.tar.gz)/1048576 + $(stat -c%s sigmond-rac.tar.gz)/1048576 + 320 ))

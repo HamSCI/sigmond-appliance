@@ -4,6 +4,13 @@
 set -e
 exec > "$HOME/provision.log" 2>&1
 echo "### $(date -u) bootstrap start on $(hostname)"
+# The golden VM installs one sigmond commit, chosen and recorded by
+# build-golden-vm.sh: its release/components.toml is the list stage 2
+# installs.  A branch head here would let the list move under the build.
+if ! [[ "${SIGMOND_COMMIT:-}" =~ ^[0-9a-f]{40}$ ]]; then
+    echo "### FATAL: SIGMOND_COMMIT is '${SIGMOND_COMMIT:-unset}', not a full 40-hex commit"
+    exit 1
+fi
 sudo mkdir -p /opt/git/sigmond
 sudo chown "$(id -un)" /opt/git/sigmond
 sudo apt-get update -qq && sudo apt-get install -y -qq git curl >/dev/null && echo "### git installed"
@@ -11,6 +18,11 @@ if [ ! -d /opt/git/sigmond/sigmond/.git ]; then
     git clone https://github.com/HamSCI/sigmond /opt/git/sigmond/sigmond
 fi
 cd /opt/git/sigmond/sigmond
+if ! git checkout -q --detach "$SIGMOND_COMMIT"; then
+    echo "### FATAL: cannot check out sigmond $SIGMOND_COMMIT (pushed to HamSCI/sigmond?)"
+    exit 1
+fi
+echo "### sigmond checked out detached at $SIGMOND_COMMIT"
 # The guest agent goes in BEFORE install.sh: install.sh writes the agent's
 # memory-cap drop-in (MemoryMax=128M, OOMPolicy=continue) only where the
 # agent's unit already exists.  Installed after, the template shipped with no

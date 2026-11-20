@@ -1,7 +1,8 @@
 #!/bin/bash
 # v3 golden decoder VM build driver — runs ON B3, logs to ~/appliance/v3/build.log
-# Same pipeline as v2 (provision.sh clones CURRENT HamSCI main at build time),
-# ssh port 5557 to avoid any stale v2 rig.
+# provision.sh clones HamSCI/sigmond and checks out SIGMOND_COMMIT (default:
+# the head of main, read once here); provision-components.sh installs that
+# commit's release/components.toml.  ssh port 5557 to avoid any stale v2 rig.
 set -u
 say(){ echo "[driver $(date '+%T')] $*"; }
 die(){ say "FATAL: $*"; exit 1; }
@@ -23,6 +24,17 @@ BUILD_DIR="${APPLIANCE_BUILD_DIR:-$RIG_ROOT/build}"
 VMBUILD_DIR="${APPLIANCE_VMBUILD_DIR:-$RIG_ROOT/vmbuild}"
 [ -d "$BUILD_DIR" ] || die "build dir missing: $BUILD_DIR (check APPLIANCE_BUILD_DIR)"
 [ -d "$VMBUILD_DIR" ] || die "vmbuild dir missing: $VMBUILD_DIR (check APPLIANCE_VMBUILD_DIR)"
+# The one sigmond commit this template installs (C4).  Read once, here, so
+# both stages and the record agree; an operator names a candidate's commit
+# with SIGMOND_COMMIT=<40 hex>.  Its release/components.toml is the list the
+# VM installs, so it must be pushed before the build.
+SIGMOND_COMMIT="${SIGMOND_COMMIT:-$(git ls-remote https://github.com/HamSCI/sigmond refs/heads/main | cut -f1)}"
+[[ "$SIGMOND_COMMIT" =~ ^[0-9a-f]{40}$ ]] \
+    || die "SIGMOND_COMMIT is '$SIGMOND_COMMIT', not a full 40-hex commit (set it, or check the network)"
+say "sigmond commit under build: $SIGMOND_COMMIT"
+# .new until the template is written, beside golden-v3-revs.txt.new: a build
+# that fails a gate must leave the old template's record, never this one.
+echo "$SIGMOND_COMMIT" > golden-v3-sigmond-commit.txt.new
 KEY="$BUILD_DIR/applkey"
 SSH="ssh -i $KEY -p 5557 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=5 build@127.0.0.1"
 SCP="scp -i $KEY -P 5557 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
@@ -150,8 +162,8 @@ $SCP wisdomf-ryzen5825u build@127.0.0.1:wisdomf
 # Without this, radiod silently runs FFTW_ESTIMATE plans (see
 # provision-components.sh).
 $SCP wisdom-radiod-plans-ryzen5825u build@127.0.0.1:wisdom-radiod-plans
-say "stage 1: bootstrap (clone HamSCI/sigmond + install.sh)"
-$SSH "chmod +x provision*.sh && setsid ./provision.sh </dev/null >/dev/null 2>&1 &"
+say "stage 1: bootstrap (clone HamSCI/sigmond at $SIGMOND_COMMIT + install.sh)"
+$SSH "chmod +x provision*.sh && SIGMOND_COMMIT=$SIGMOND_COMMIT setsid ./provision.sh </dev/null >/dev/null 2>&1 &"
 for i in $(seq 1 120); do
     $SSH "grep -q 'BOOTSTRAP DONE' provision.log" 2>/dev/null && break
     $SSH "grep -q '^### FATAL' provision.log" 2>/dev/null && break
@@ -182,7 +194,7 @@ $SSH "ls /lib/modules/\$(uname -r)/kernel/drivers/usb/host/ | grep -q xhci" || {
 say "generic kernel active, USB (xhci) modules present"
 
 say "stage 2+3: components + capture-prep (long — ka9q compile)"
-$SSH "setsid ./provision-components.sh </dev/null >/dev/null 2>&1 &"
+$SSH "SIGMOND_COMMIT=$SIGMOND_COMMIT setsid ./provision-components.sh </dev/null >/dev/null 2>&1 &"
 # Poll for the done marker -- but watch for '### FATAL' too.  provision-components.sh
 # redirects its own output into provision.log inside the VM, so nothing it prints
 # ever reaches this log; the driver used to learn about a failure only when this
@@ -221,68 +233,23 @@ $SSH "for d in /opt/git/sigmond/*/; do printf '%s %s\n' \"\$(basename \$d)\" \"\
 # a gate below used to leave fresh revs beside the OLD template, so the stale
 # template passed the USB build's sigmond gate (v3.68 pre-build review).
 
-# ── is every component actually at the LATEST commit? ───────────────────────
-# The whole point of cloning at build time is that the template carries the
-# top of main.  Nothing ever CHECKED that.  A clone can land behind for dull
-# reasons -- a push that lost the race with the build, a component whose
-# default branch is not what we assume, a checkout smd reused instead of
-# refetching -- and the result is an image that looks current, ships, and is
-# quietly a few commits old across 25 repos with no signal anywhere.
-#
-# rob, 2026-09-22: "i'm not worried about recreating an image, just be sure
-# that an image is created with the latest commits."  So: no pinning, no
-# reproducibility machinery -- just ask each remote what its head is, while
-# we are still inside the build VM and the network is up, and refuse to bless
-# a template that is behind.
-say "checking every component against its remote's latest commit"
-# safe.directory: the native sources (onion, wsjtx, ubersdr_wsprd, ft8_lib) are
-# root-owned, and git refused them to this user, so they used to read NOGIT.
-# A detached checkout (ka9q-radio and the natives build at a commit) is
-# compared with its remote's default branch: under SIGMOND_TRACK_MAIN=1 it
-# must sit at that tip like everything else.
-$SSH 'for d in /opt/git/sigmond/*/; do
-        n=$(basename "$d")
-        g="git -c safe.directory=* -C $d"
-        loc=$($g rev-parse HEAD 2>/dev/null) || { printf "%s - - NOGIT\n" "$n"; continue; }
-        # Pinned on purpose (sigmond provenance.PINNED_ON_PURPOSE): fallback
-        # decoders held at one commit; an image never moves them.
-        case "$n" in wsjtx|ft8_lib) printf "%s %.7s - PINNED\n" "$n" "$loc"; continue ;; esac
-        # ka9q-radio has one owner, ka9q-python: it must sit at ka9q-python
-        # main'"'"'s compat commit, which is how radiod'"'"'s newest main reaches an image.
-        if [ "$n" = ka9q-radio ]; then
-            # The file opens with "#" comment lines; the commit sits on its own line.
-            rem=$(grep -v "^[[:space:]]*#" /opt/git/sigmond/ka9q-python/ka9q_radio_compat 2>/dev/null | tr -d "[:space:]")
-            if [ -z "$rem" ]; then printf "%s %.7s - UNREACHABLE\n" "$n" "$loc"
-            elif [ "$loc" = "$rem" ]; then printf "%s %.7s %.7s CURRENT\n" "$n" "$loc" "$rem"
-            else printf "%s %.7s %.7s BEHIND\n" "$n" "$loc" "$rem"; fi
-            continue
-        fi
-        br=$($g symbolic-ref --short HEAD 2>/dev/null)
-        if [ -z "$br" ]; then ref=HEAD; else ref="refs/heads/$br"; fi
-        rem=$($g ls-remote origin "$ref" 2>/dev/null | awk "{print \$1; exit}")
-        if [ -z "$rem" ]; then printf "%s %.7s - UNREACHABLE\n" "$n" "$loc"; continue; fi
-        if [ "$loc" = "$rem" ]; then printf "%s %.7s %.7s CURRENT\n" "$n" "$loc" "$rem"
-        else printf "%s %.7s %.7s BEHIND\n" "$n" "$loc" "$rem"; fi
-      done' > golden-v3-freshness.txt 2>/dev/null
-if [ -s golden-v3-freshness.txt ]; then
-    awk '{printf "  %-18s %-9s %-9s %s\n", $1, $2, $3, $4}' golden-v3-freshness.txt
-    _behind=$(awk '$4=="BEHIND"{print $1}' golden-v3-freshness.txt)
-    _blind=$(awk '$4=="UNREACHABLE"||$4=="DETACHED"||$4=="NOGIT"{print $1}' golden-v3-freshness.txt)
-    [ -n "$_blind" ] && say "NOTE: not verifiable: $(echo $_blind | tr '\n' ' ')"
-    if [ -n "$_behind" ]; then
-        say "FATAL: these components are NOT at their remote's latest commit:"
-        for c in $_behind; do say "         $c"; done
-        say "  The template would ship stale code.  Usually this means a push"
-        say "  landed after the clone -- rerun ./build-golden-vm.sh."
-        say "  Deliberate old-code build: GOLDEN_ALLOW_BEHIND=1"
-        [ "${GOLDEN_ALLOW_BEHIND:-0}" = 1 ] || exit 1
-        say "  GOLDEN_ALLOW_BEHIND=1 — continuing with stale components"
-    else
-        say "all verifiable components are at their remote's latest commit"
-    fi
-else
-    say "WARNING: freshness check produced nothing — components NOT verified"
+# ── does every checkout sit at the release list's commit? ───────────────
+# The template installs sigmond's release/components.toml at $SIGMOND_COMMIT,
+# not the top of main.  Ask the VM's own smd to compare every checkout with
+# that list (the smd at that commit reads its own release/components.toml).
+# --require-all: a listed row with no checkout is a mismatch too, so a
+# component that never installed cannot pass as "not checked".
+say "checking every checkout against release/components.toml at $SIGMOND_COMMIT"
+$SSH 'smd admin release-list --check --require-all' > golden-v3-freshness.txt 2>&1
+_rc=$?
+sed 's/^/  /' golden-v3-freshness.txt
+if [ "$_rc" -ne 0 ]; then
+    say "FATAL: the template's checkouts differ from release/components.toml (exit $_rc)"
+    say "  the image would not be the release it names; see golden-v3-freshness.txt"
+    rm -f golden-v3-sigmond-commit.txt.new golden-v3-revs.txt.new
+    exit 1
 fi
+say "every listed component sits at its release-list commit"
 
 # The manifest that build-usb-v3.sh ships with the image and that a Release
 # attaches — this is the only point in the pipeline where components are
@@ -356,9 +323,10 @@ pgrep -f "name goldenv3" >/dev/null && { say "force stop"; sudo pkill -f "name g
 
 say "compacting template"
 qemu-img convert -O qcow2 -c golden-v3.qcow2 sigmond-decoder-template-v3.qcow2.new \
-    || { say "FATAL: qemu-img convert failed — template NOT replaced"; rm -f sigmond-decoder-template-v3.qcow2.new golden-v3-revs.txt.new manifest-raw.txt.new native-built.txt.new; exit 1; }
+    || { say "FATAL: qemu-img convert failed — template NOT replaced"; rm -f sigmond-decoder-template-v3.qcow2.new golden-v3-revs.txt.new golden-v3-sigmond-commit.txt.new manifest-raw.txt.new native-built.txt.new; exit 1; }
 mv -f sigmond-decoder-template-v3.qcow2.new sigmond-decoder-template-v3.qcow2
 mv -f golden-v3-revs.txt.new golden-v3-revs.txt
+mv -f golden-v3-sigmond-commit.txt.new golden-v3-sigmond-commit.txt
 # The manifest travels with its template: a capture that failed leaves NO
 # manifest (the USB build then refuses), never the previous build's.
 if [ -f manifest-raw.txt.new ]; then mv -f manifest-raw.txt.new manifest-raw.txt; else rm -f manifest-raw.txt; fi
