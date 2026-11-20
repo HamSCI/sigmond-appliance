@@ -1944,11 +1944,20 @@ echo "$KR" | grep -q TESTPRIV && echo "$KR" | grep -qE "(hsupload|root):sigmond"
     && say "site-keys restored from stick with correct ownership ✓" \
     || { say "FATAL: site-keys restore path failed"; echo "$KR" | head -5; exit 1; }
 say "── location authority: fake GPSDO announces Scranton (FN21ej)"
-LC=$($SSHN "qm guest exec $VMID --timeout 120 -- bash -lc 'test -x /usr/local/sbin/sigmond-location-check || { echo NOT-STAGED; exit 0; }; mkdir -p /run/gpsdo && printf \"{\\\"health\\\": {\\\"latitude\\\": 41.4, \\\"longitude\\\": -75.66, \\\"gps_fix\\\": \\\"3D\\\", \\\"sats_used\\\": 8, \\\"fix_age_sec\\\": 1}}\" > /run/gpsdo/TEST.json; /usr/local/sbin/sigmond-location-check; grep -E \"grid_square|latitude|longitude\" /etc/sigmond/site-profile.toml | head -3'" 2>&1)
+# The check skips its tick while an smd lifecycle verb holds the lifecycle
+# lock (0af16c3), so wait up to 5 min for the lock first; LOCKWAIT says how
+# many 5 s steps that took (61 = still held).
+LC=$($SSHN "qm guest exec $VMID --timeout 420 -- bash -lc 'test -x /usr/local/sbin/sigmond-location-check || { echo NOT-STAGED; exit 0; }; for i in \$(seq 60); do flock -n /var/lib/sigmond/lifecycle.lock true && break; sleep 5; i=61; done; echo LOCKWAIT=\$i; mkdir -p /run/gpsdo && printf \"{\\\"health\\\": {\\\"latitude\\\": 41.4, \\\"longitude\\\": -75.66, \\\"gps_fix\\\": \\\"3D\\\", \\\"sats_used\\\": 8, \\\"fix_age_sec\\\": 1}}\" > /run/gpsdo/TEST.json; /usr/local/sbin/sigmond-location-check; grep -E \"grid_square|latitude|longitude\" /etc/sigmond/site-profile.toml | head -3'" 2>&1)
 echo "$LC" | grep -q NOT-STAGED && { say "FATAL: sigmond-location-check not staged"; exit 1; }
-echo "$LC" | grep -q 'FN21ej' && echo "$LC" | grep -q '41.4' \
-    && say "location authority re-gridded the station from the (fake) GPSDO ✓" \
-    || { say "FATAL: location authority did not apply GPSDO position"; echo "$LC" | head -4; exit 1; }
+say "location check lock wait: $(echo "$LC" | grep -o 'LOCKWAIT=[0-9]*' | head -1)"
+if echo "$LC" | grep -q 'FN21ej' && echo "$LC" | grep -q '41.4'; then
+    say "location authority re-gridded the station from the (fake) GPSDO ✓"
+else
+    say "FATAL: location authority did not apply GPSDO position"; echo "$LC" | head -6
+    # Post-mortem: what the check said, and who holds the lifecycle lock.
+    $SSHN "qm guest exec $VMID --timeout 30 -- bash -lc 'journalctl -t sigmond-location-check -n 15 --no-pager; fuser -v /var/lib/sigmond/lifecycle.lock 2>&1; ps -eo pid,etimes,args | grep -E \"[s]md |[b]ringup|[a]lign\" | head -8'" 2>&1 | head -40
+    exit 1
+fi
 say "── fleet awareness: heartbeat CLI contract on a CONFIGURED station"
 # The original contract (fleet-awareness plan, Phase 6) asserted exit 2 +
 # "not enabled", because no wizard had ever written a [heartbeat] block and
