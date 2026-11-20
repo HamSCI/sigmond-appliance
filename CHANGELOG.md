@@ -54,20 +54,41 @@ what has run on real hardware.  A release that no station has yet installed says
 Read these before the roll.  The first `smd align --apply` on each station does more
 than it did before.
 
-- **Rebuilds.**  The first align rebuilds ka9q-web, and onion with it, on every station.
-  Where radiod's binary trails its checkout, as on B4, align also rebuilds radiod once.
+- **The v3.93 dry run does not show this.**  A station at v3.93 runs its own smd for
+  `smd align`, and that smd knows none of v3.94's new steps, so its dry run lists none of
+  them.  `smd align --apply` moves sigmond first, re-runs itself from v3.94's smd, and
+  then does them.  To preview them, run v3.94's smd from a temporary checkout, dry run
+  only, as the operator without sudo.  `smd align --release v3.94` names the sigmond
+  commit on its `sigmond` line:
+
+  ```bash
+  git clone -q https://github.com/HamSCI/sigmond ~/smd-preview
+  git -C ~/smd-preview checkout -q <sigmond commit>
+  ~/smd-preview/bin/smd align --release v3.94
+  rm -rf ~/smd-preview
+  ```
+
+  sigmond's docs/admin/README.md describes this.  `smd update --apply` runs none of
+  these steps; only `smd align --apply` does.
+- **Rebuilds.**  The first align rebuilds ka9q-web, and onion with it, on every station,
+  and restarts ka9q-web.  A ka9q-web build that fails leaves the old one running; align
+  finishes the rest and exits 1.  On B4, on 2026-11-19, the ka9q-radio checkout had
+  moved and the radiod binary had not.  Where radiod's binary trails its checkout that
+  way, align rebuilds radiod once.
   Each radiod restart leaves a recording gap of about 60 seconds.  The dry run says
   `REBUILDS and RESTARTS radiod`.  A radiod that the site profile marks
   `locally_managed` never rebuilds.
 - **Pins.**  SIGMA, KFS-MAIN and AC1SN keep a station pin file that held the decoders
   back.  Align retires that file, and their decoders and onion rebuild to the release.
   Every pin now comes from the release.
-- **Timers you disabled by hand.**  Align enables the declared units of running
-  components and the timers sigmond's install enables.  Before a station with
+- **Timers you disabled by hand.**  Align enables the declared timers of running
+  components and the timers sigmond's install enables, and starts them after its
+  restarts.  It enables no service, and no hf-timestd timer that hf-timestd's service
+  profile leaves off.  Before a station with
   hand-disabled timers runs align, record `smd align --accept unit:<timer>` for each
   one.  B4's A/B experiments need this.  Otherwise align enables them again.
-- **Magnetometers.**  A station without a magnetometer sees its mag clients switched
-  off.  A magnetometer that is missing but recorded before raises a fault in
+- **Magnetometers.**  A station without a magnetometer sees its magnetometer clients
+  switched off.  A magnetometer that is missing but recorded before raises a fault in
   `smd check`, and align leaves the client alone.
 - **Deploy order.**  wd30 must apply the `station_drift` `sender` column before the
   fleet board export runs.  The export selects that column and fails without it.
