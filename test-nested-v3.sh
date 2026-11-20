@@ -392,6 +392,7 @@ fi
 if [ -r "$S" ]; then
     echo "SIGTOML:1"
     echo "HBSIG:$(grep -cE '^name = "heartbeat"$' "$S")"
+    echo "DRIFTSIG:$(grep -cE '^name = "sigmond-sigmondb-drift"$' "$S")"
     echo "UNGOVERNED:$(grep -cE '^governed = false$' "$S")"
 else
     echo "SIGTOML:0"
@@ -512,12 +513,17 @@ _sp2_verdict_body() {
     v="$(_sp2t HBLEG)"
     [ "$v" = 0 ] || echo "FAIL: the heartbeat still sits in the legacy manifest"
     # SP2_NO_HEARTBEAT=1: the station enables no heartbeat (a v3.84 wizard asks
-    # nothing about it).  sigmond then writes no sigmond.toml, since the file
-    # holds the heartbeat and nothing else (uploader_manifest.py,
-    # sigmond_pipeline_file).
+    # nothing about it).  Since v3.94 sigmond.toml also carries the daily drift
+    # row's pipeline (uploader_manifest.py sigmond_pipeline_file, drift_pipeline)
+    # when hs-uploader offers the drift features, so the file may exist; it must
+    # then hold no heartbeat and exactly one drift pipeline.
     if [ "${SP2_NO_HEARTBEAT:-0}" = 1 ]; then
-        [ "$(_sp2t SIGTOML)" = 1 ] \
-            && echo "FAIL: pipelines.d/sigmond.toml exists on a station that enables no heartbeat (heartbeat x$(_sp2t HBSIG))"
+        if [ "$(_sp2t SIGTOML)" = 1 ]; then
+            [ "$(_sp2t HBSIG)" = 0 ] \
+                || echo "FAIL: pipelines.d/sigmond.toml carries a heartbeat on a station that enables none (heartbeat x$(_sp2t HBSIG))"
+            [ "$(_sp2t DRIFTSIG)" = 1 ] \
+                || echo "FAIL: pipelines.d/sigmond.toml exists with no heartbeat and no drift pipeline (drift x$(_sp2t DRIFTSIG))"
+        fi
     elif [ "$(_sp2t SIGTOML)" != 1 ]; then
         echo "FAIL: no pipelines.d/sigmond.toml; the heartbeat has no home"
     else

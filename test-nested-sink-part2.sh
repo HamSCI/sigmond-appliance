@@ -152,9 +152,19 @@ has "no sigmond.toml"              "$T/part1.verdict" "no pipelines.d/sigmond.to
 SP2_NO_HEARTBEAT=1 guest nohb "$FX/pipelines_gate.toml" - 1 "$FX/manifest_step_part2.txt" "$FX/sink_status_site-off.json"
 check "no heartbeat: no sigmond.toml read"  0 "$(tk nohb SIGTOML)"
 check "no heartbeat: the verdict finds nothing" "VERDICT:done" "$(cat "$T/nohb.verdict")"
-# Its positive control: the same expectation fails when the file is there.
+# Its positive control: a sigmond.toml that carries a heartbeat fails.
 SP2_NO_HEARTBEAT=1 guest nohbsig "$FX/pipelines_gate.toml" "$FX/sigmond_gate.toml" 1 "$FX/manifest_step_part2.txt" "$FX/sink_status_site-off.json"
-has "no heartbeat, yet a sigmond.toml: fails" "$T/nohbsig.verdict" "sigmond.toml exists on a station that enables no heartbeat"
+has "no heartbeat, yet a heartbeat in sigmond.toml: fails" "$T/nohbsig.verdict" "carries a heartbeat on a station that enables none"
+# Since v3.94 sigmond.toml also holds the daily drift pipeline, so a station
+# with no heartbeat may have the file, holding the drift pipeline alone.
+printf '[[pipeline]]\nname = "sigmond-sigmondb-drift"\n' > "$T/sigmond_drift_only.toml"
+SP2_NO_HEARTBEAT=1 guest nohbdrift "$FX/pipelines_gate.toml" "$T/sigmond_drift_only.toml" 1 "$FX/manifest_step_part2.txt" "$FX/sink_status_site-off.json"
+check "no heartbeat, drift-only sigmond.toml: drift counted" 1 "$(tk nohbdrift DRIFTSIG)"
+check "no heartbeat, drift-only sigmond.toml: the verdict finds nothing" "VERDICT:done" "$(cat "$T/nohbdrift.verdict")"
+# And a sigmond.toml holding neither fails.
+printf '# empty\n' > "$T/sigmond_empty.toml"
+SP2_NO_HEARTBEAT=1 guest nohbempty "$FX/pipelines_gate.toml" "$T/sigmond_empty.toml" 1 "$FX/manifest_step_part2.txt" "$FX/sink_status_site-off.json"
+has "no heartbeat, empty sigmond.toml: fails" "$T/nohbempty.verdict" "exists with no heartbeat and no drift pipeline"
 # And without the flag, the same station without the file still fails.
 guest hbmiss "$FX/pipelines_gate.toml" - 1 "$FX/manifest_step_part2.txt" "$FX/sink_status_site-off.json"
 has "a heartbeat station without sigmond.toml: fails" "$T/hbmiss.verdict" "no pipelines.d/sigmond.toml; the heartbeat has no home"
