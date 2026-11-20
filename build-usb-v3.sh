@@ -49,8 +49,16 @@ exec > >(tee -a "$LOG") 2>&1
 
 # REPO is the git checkout this script itself ships from -- not $PWD, which
 # is the build rig staging dir ($RIG_ROOT/v3) and isn't under git.
-# Same override pattern as SIGMOND_REPO below.
-REPO="${APPLIANCE_REPO:-$HOME/appliance/repos/sigmond-proxmox}"
+# Same override pattern as SIGMOND_REPO below.  The repo becomes
+# sigmond-proxmox at the rename; until a rig's checkout carries that name,
+# the old one serves, so this script works on either side of the rename.
+if [ -n "${APPLIANCE_REPO:-}" ]; then
+    REPO="$APPLIANCE_REPO"
+elif git -C "$HOME/appliance/repos/sigmond-proxmox" rev-parse --git-dir >/dev/null 2>&1; then
+    REPO="$HOME/appliance/repos/sigmond-proxmox"
+else
+    REPO="$HOME/appliance/repos/sigmond-appliance"
+fi
 # A bad REPO must abort, not degrade quietly: if $REPO is missing or not a
 # git checkout, `git -C "$REPO" status --porcelain` fails to stderr and the
 # command substitution below captures nothing, which reads as "clean" and
@@ -293,11 +301,14 @@ if grep -v '^[[:space:]]*#' sigmond-wizard-rendered.sh | grep -q '120'; then
 fi
 
 say "sigmond repo payload (host tuning scripts ride on the stick)"
-if [ ! -d "$SIGMOND_REF_DIR/.git" ]; then
-    git clone -q --depth 1 git@github.com:HamSCI/sigmond "$SIGMOND_REF_DIR"
-fi
-git -C "$SIGMOND_REF_DIR" pull -q 2>/dev/null || true
+# The host's sigmond is the release's sigmond: the golden VM's commit (C4),
+# never main's head.  rh_seat fetches it into the shallow clone and checks
+# it out detached; a pull would carry whatever main reads at build time.
+rh_seat "$SIGMOND_REF_DIR" git@github.com:HamSCI/sigmond "$SIGMOND_COMMIT" \
+    || die "cannot seat the sigmond payload at $SIGMOND_COMMIT"
 SIGREV=$(git -C "$SIGMOND_REF_DIR" rev-parse --short HEAD)
+[ "$(git -C "$SIGMOND_REF_DIR" rev-parse HEAD)" = "$SIGMOND_COMMIT" ] \
+    || die "the sigmond payload sits at $SIGREV, not the release's $SIGMOND_COMMIT"
 # `tar -C ..` is the same physical-vs-logical trap as a bare "../X": it
 # changes tar's cwd to the physical parent of the process cwd, not the
 # logical one. Use SIGMOND_REF_DIR's own parent/basename instead so this
@@ -335,10 +346,14 @@ SIGMOND_TAR_ENTRIES=$(tar tzf sigmond.tar.gz | wc -l)
 say "sigmond payload @ $SIGREV ($SIGMOND_TAR_BYTES bytes, $SIGMOND_TAR_ENTRIES entries)"
 
 say "sigmond-rac payload"
-if [ ! -d sigmond-rac ]; then
-    git clone -q https://github.com/HamSCI/sigmond-rac sigmond-rac
-fi
-git -C sigmond-rac pull -q 2>/dev/null || true
+# sigmond-rac ships at the list's sigmond-rac row, never main's head.
+RAC_ROW="$(rh_row "$SIGMOND_REPO" "$SIGMOND_COMMIT" sigmond-rac)" \
+    || die "release/components.toml at sigmond $SIGMOND_COMMIT has no readable sigmond-rac row"
+rh_seat sigmond-rac https://github.com/HamSCI/sigmond-rac "$RAC_ROW" \
+    || die "cannot seat the sigmond-rac payload at $RAC_ROW"
+[ "$(git -C sigmond-rac rev-parse HEAD)" = "$RAC_ROW" ] \
+    || die "the sigmond-rac payload sits at $(git -C sigmond-rac rev-parse HEAD), not the list's $RAC_ROW"
+say "sigmond-rac payload @ ${RAC_ROW:0:7} (the list's row)"
 tar czf sigmond-rac.tar.gz sigmond-rac
 # sigmond-rac is a fresh git clone directly under $PWD (not a rig-sibling
 # path that can be a symlink), but the same broken-payload class of bug is

@@ -50,16 +50,48 @@ rh_check_manifest() {
     printf '%s\n' "$text" | _rh_py "$1" -m sigmond.release_list check --list - --manifest "$3"
 }
 
-# rh_proxmox_row <sigmond_repo> <commit>: the list's sigmond-proxmox commit.
-rh_proxmox_row() {
+# rh_row <sigmond_repo> <commit> <name>: the list's commit for one row.
+rh_row() {
     local text
     text="$(rh_list_text "$1" "$2")" || return 1
     printf '%s\n' "$text" | _rh_py "$1" -c '
 import sys
-from sigmond.release_list import PROXMOX_ROW, ReleaseListError, parse_list
+from sigmond.release_list import ReleaseListError, parse_list
 try:
-    print(parse_list(sys.stdin.read()).components[PROXMOX_ROW])
+    rows = parse_list(sys.stdin.read()).components
 except ReleaseListError as e:
     sys.exit("release_list: %s" % e)
-'
+if sys.argv[1] not in rows:
+    sys.exit("release_list: no row %s" % sys.argv[1])
+print(rows[sys.argv[1]])
+' "$3"
+}
+
+# rh_proxmox_row <sigmond_repo> <commit>: the list's sigmond-proxmox commit.
+rh_proxmox_row() { rh_row "$1" "$2" sigmond-proxmox; }
+
+# rh_seat <dir> <url> <commit>: leave <dir> a clean checkout of <url> at
+# <commit>, detached, or fail with a reason.  Clones when <dir> holds none
+# (shallow: only the commit's tree ships), fetches the commit when absent
+# (a shallow clone has only its own tip), and never pulls a branch.
+rh_seat() {
+    local dir="$1" url="$2" commit="$3" head
+    if [ ! -d "$dir/.git" ]; then
+        git clone -q --depth 1 "$url" "$dir" \
+            || { echo "release-home: cannot clone $url into $dir" >&2; return 1; }
+    fi
+    if ! git -C "$dir" cat-file -e "$commit^{commit}" 2>/dev/null; then
+        git -C "$dir" fetch -q --depth 1 origin "$commit" 2>/dev/null \
+            || { echo "release-home: cannot fetch $commit into $dir (pushed?)" >&2; return 1; }
+    fi
+    git -C "$dir" checkout -q --detach "$commit" 2>/dev/null \
+        || { echo "release-home: cannot check out $commit in $dir" >&2; return 1; }
+    head="$(git -C "$dir" rev-parse HEAD)"
+    if [ "$head" != "$commit" ]; then
+        echo "release-home: $dir sits at $head, not $commit" >&2; return 1
+    fi
+    if [ -n "$(git -C "$dir" status --porcelain --untracked-files=no)" ]; then
+        echo "release-home: $dir has local changes; the payload would not be $commit" >&2
+        return 1
+    fi
 }
