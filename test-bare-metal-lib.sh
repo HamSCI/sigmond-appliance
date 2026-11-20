@@ -125,6 +125,7 @@ doc 1 > "$S/docs/install-bare-metal.md"
 g init -q -b main
 g add lib release docs; g commit -q -m "v3.94 list and doc"
 SC="$(g rev-parse HEAD)"
+echo "$SC" > "$T/sc"   # what the fake VM's checkout reports by default
 git init -q --bare "$O"
 g remote add origin "$O"; g push -q origin main
 
@@ -177,6 +178,8 @@ case "$cmd" in
     *"/sys/bus/usb/devices"*) [ "${FAKE_NO_USB:-0}" = 1 ] || echo /sys/bus/usb/devices/usb1 ;;
     *rac-endpoint.env*) echo PIN:OK ;;
     *bm-install.sh*) echo "install ran"; exit "${FAKE_INSTALL_RC:-0}" ;;
+    *"cat /tmp/bm-sigmond-head"*) [ "${FAKE_NO_HEAD:-0}" = 1 ] && exit 1
+        echo "${FAKE_HEAD:-$(cat "$FAKE_DIR/sc")}" ;;
     *bm-bringup.sh*) echo "bringup ran"; exit "${FAKE_BRINGUP_RC:-0}" ;;
     *"release-list --check"*) echo "release list v3.94: matches (live)"; exit "${FAKE_LIST_RC:-0}" ;;
     *"check --json"*) cat "$FAKE_CHECK_JSON"; exit "${FAKE_CHECK_RC:-2}" ;;
@@ -322,6 +325,23 @@ r="$(newest_rec)"
     && ok "a failed doc step writes FAIL (smd_check_exit -1)" || bad "bring-up failure" "rc=$rc $(tr '\n' ' ' < "$r")"
 grep -q 'check --json' "$T/ssh.log" && bad "judged smd check after a failed bring-up" \
     || ok "no verdict taken after a failed doc step"
+
+grep -qx "git -C /opt/git/sigmond/sigmond rev-parse HEAD > /tmp/bm-sigmond-head" "$T/vmfs/bm-install.sh" 2>/dev/null \
+    && ok "the VM's install part writes the checkout's commit" || bad "no head line in the install part" "$(cat "$T/vmfs/bm-install.sh" 2>&1)"
+
+# the checkout in the VM stands at another commit -> no record (a rig fault)
+before="$(nrec)"
+out="$(FAKE_HEAD="$(printf '9%.0s' {1..40})" run v3.94 --commit "$SC")"; rc=$?
+[ "$rc" != 0 ] && [ "$(nrec)" = "$before" ] && grep -q "not $SC" <<< "$out" \
+    && ok "a VM checkout at another commit writes no record, exits non-zero" || bad "wrong head" "rc=$rc $(tail -5 <<< "$out")"
+grep -q 'check --json' "$T/ssh.log" && bad "judged smd check after a wrong head" \
+    || ok "no verdict taken after a wrong head"
+before="$(nrec)"
+out="$(FAKE_NO_HEAD=1 run v3.94 --commit "$SC")"; rc=$?
+[ "$rc" != 0 ] && [ "$(nrec)" = "$before" ] && grep -q "stands at 'nothing'" <<< "$out" \
+    && ok "a VM with no head file writes no record" || bad "no head file" "rc=$rc $(tail -5 <<< "$out")"
+pid="$(cat "$T/vm.pid" 2>/dev/null)"
+! kill -0 "$pid" 2>/dev/null && ok "the VM is stopped after a wrong head" || bad "VM left running after wrong head"
 
 # the VM never answers ssh -> no record (not a verdict on the release)
 before="$(nrec)"

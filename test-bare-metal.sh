@@ -50,6 +50,8 @@
 # bare-metal-lib.sh); a doc command that fails writes result: FAIL with
 # smd_check_exit: -1.  A rig fault before the doc runs (VM never boots, no
 # ssh, no USB bus) writes no record: it says nothing about the release.
+# Neither does an install whose sigmond checkout ends at a commit other than
+# the one under test (/tmp/bm-sigmond-head in the VM).
 # The log: $RIG_DIR/bare-metal/<version>-<stamp>.log.  Expect it to take as
 # long as a bring-up, up to an hour.
 #
@@ -253,7 +255,17 @@ record(){   # record <list_rc> <check_exit> <judge_rc>: write C2, print it, exit
 }
 
 STEP_FAIL=""
+vm "rm -f /tmp/bm-sigmond-head" || true
 run_part install || STEP_FAIL=install
+# The install part's last line writes the commit the doc's checkout stands at
+# (sigmond's bare_metal_doc adds it).  A record must never vouch for code that
+# did not run: a checkout at any other commit is a rig fault, not a verdict.
+if [ -z "$STEP_FAIL" ]; then
+    GOT_HEAD="$(vm "cat /tmp/bm-sigmond-head" 2>/dev/null | tr -d '[:space:]')"
+    [ "$GOT_HEAD" = "$COMMIT" ] \
+        || die "the VM's sigmond checkout stands at '${GOT_HEAD:-nothing}', not $COMMIT (no record: a rig fault)"
+    say "the VM's sigmond checkout stands at $COMMIT"
+fi
 [ -z "$STEP_FAIL" ] && { run_part bringup || STEP_FAIL=bringup; }
 if [ -n "$STEP_FAIL" ]; then
     say "the doc's $STEP_FAIL commands failed; smd check below is for the log only"
