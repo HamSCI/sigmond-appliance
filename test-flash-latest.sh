@@ -38,7 +38,8 @@ case "\$*" in
   *embeddedfolderview*id=PENDID*)
     printf '%s' '<div class="flip-entry" id="entry-PIMGID"><div class="flip-entry-title">$PSTEM.img</div></div>'
     printf '%s' '<div class="flip-entry" id="entry-PSHAID"><div class="flip-entry-title">$PSTEM.sha256</div></div>' ;;
-  *embeddedfolderview*)
+  *embeddedfolderview*) if [ -n "\${FAKE_NAMES:-}" ]; then
+      for n in \$FAKE_NAMES; do printf '<div class="flip-entry" id="entry-ID_%s"><div class="flip-entry-title">%s</div></div>' "\${n//[^A-Za-z0-9]/_}" "\$n"; done; exit 0; fi
     [ -n "\${FAKE_FLASHER:-}" ] && printf '%s' '<div class="flip-entry" id="entry-FLASHID"><div class="flip-entry-title">sigmond-flash-latest.sh</div></div>'
     printf '%s' '<div class="flip-entry" id="entry-PENDID"><div class="flip-entry-title">pending</div></div>'
     printf '%s' '<div class="flip-entry" id="entry-IMGID"><div class="flip-entry-title">$STEM.img</div></div>'
@@ -210,6 +211,42 @@ runu "$(mkpub 2000.1.1.1)" --list;        expect "an older published copy marks 
 runu "$(mkpub 2999.1.1.1)" --list;        expect "a newer published copy replaces this one and asks for a rerun" 0 "a newer version of this script \(2999\.1\.1\.1; you had $THIS_V\)"
 grep -q '^FLASH_VERSION=2999.1.1.1' "$W/flash.sh" && ok "the copy was replaced" || bad "the copy was not replaced"
 runu "" --list;                           expect "no published copy keeps the could-not-check line" 0 "could not check for a newer version of this script \(no copy of this script"
+
+echo "both stems"
+# A folder holding a pre-rename pair and a post-rename pair: the higher version wins, whatever its stem.
+OLDS=sigmond-appliance-v3.93-20261120-release NEWS=sigmond-v3.94-20261121-release
+bothrun(){ local names=$1; shift; printf '%s\n' "$SYS" > "$W/disks"; : > "$W/calls"
+    OUT=$(FAKE_NAMES="$names" FAKE_DISKS="$W/disks" FAKE_ROOT=/dev/sda1 CALLS="$W/calls" PATH="$BIN:$PATH" \
+          SIGMOND_IMAGE_DIR="$IMGS" SIGMOND_NO_UPDATE=1 DRY_RUN=1 timeout 20 bash "$REPO/sigmond-flash-latest.sh" "$@" </dev/null 2>&1); RC=$?; }
+bothrun "$OLDS.img $OLDS.sha256 $NEWS.img $NEWS.sha256" --list
+printf '%s' "$OUT" | grep -q 'v3\.93 20261120' && printf '%s' "$OUT" | grep -q 'v3\.94 20261121' && ok "--list shows both stems' versions" || bad "--list missed a stem: $OUT"
+bothrun "$OLDS.img $OLDS.sha256 $NEWS.img $NEWS.sha256"
+printf '%s' "$OUT" | grep -q "selected: $NEWS.img" && ok "both stems: picks v3.94 on the new stem" || bad "both stems: wrong pick: $OUT"
+bothrun "$NEWS.img $NEWS.sha256 $OLDS.img $OLDS.sha256" --version v3.93
+printf '%s' "$OUT" | grep -q "selected: $OLDS.img" && ok "both stems: --version v3.93 picks the old-stem image" || bad "both stems: old stem not pickable: $OUT"
+bothrun "$OLDS.img $OLDS.sha256 sigmond-appliance-v3.95-20261122-release.img sigmond-v3.94-20261121-release.img $NEWS.sha256"
+printf '%s' "$OUT" | grep -q "selected: $NEWS.img" && ok "an image without its checksum is skipped on either stem" || bad "unchecksummed image was picked: $OUT"
+# prune: both stems, keeps the new version and the newest older one
+PD=$W/prune; mkdir -p "$PD"; for v in v3.91 v3.92 v3.93; do : > "$PD/sigmond-appliance-$v-20261101-release.img"; : > "$PD/sigmond-appliance-$v-20261101-release.sha256"; done
+: > "$PD/sigmond-v3.94-20261121-release.img"
+ok_prune=1
+sed -n '/^prune_old_images(){/,/^}/p' sigmond-flash-latest.sh > "$W/prune.fn"
+( IMG_DIR=$PD VER=v3.94; say(){ :; }; fsize(){ echo 1; }; . "$W/prune.fn"; prune_old_images )
+[ ! -e "$PD/sigmond-appliance-v3.91-20261101-release.img" ] && [ -e "$PD/sigmond-appliance-v3.93-20261101-release.img" ] && [ -e "$PD/sigmond-v3.94-20261121-release.img" ] \
+    && ok "prune keeps the new-stem image and the newest older old-stem one, drops the rest" || bad "prune mishandled the stems: $(ls "$PD")"
+: > "$PD/sigmond-v3.92-20261101-release.img"; : > "$PD/sigmond-v3.93-20261120-release.img"
+( IMG_DIR=$PD VER=v3.94; say(){ :; }; fsize(){ echo 1; }; . "$W/prune.fn"; prune_old_images )
+[ ! -e "$PD/sigmond-v3.92-20261101-release.img" ] && [ ! -e "$PD/sigmond-appliance-v3.92-20261101-release.img" ] && ok "prune removes a lower version on either stem" || bad "prune left a lower version: $(ls "$PD")"
+
+echo "version bumped"
+[ "$(printf '%s\n%s\n' 2026.11.13.1 "$THIS_V" | sort -V | tail -1)" = "$THIS_V" ] && [ "$THIS_V" != 2026.11.13.1 ] \
+    && ok "FLASH_VERSION $THIS_V sorts above 2026.11.13.1, so held copies replace themselves" || bad "FLASH_VERSION $THIS_V does not exceed 2026.11.13.1"
+# the held copy (old version) must see this one as newer
+runu "$(mkpub "$THIS_V")" --list
+cp sigmond-flash-latest.sh "$W/held.sh"; sed -i 's/^FLASH_VERSION=.*/FLASH_VERSION=2026.11.13.1/' "$W/held.sh"
+OUT=$(FAKE_DISKS="$W/disks" FAKE_ROOT=/dev/sda1 CALLS="$W/calls" FAKE_FLASHER="$REPO/sigmond-flash-latest.sh" PATH="$BIN:$PATH" SIGMOND_IMAGE_DIR="$IMGS" DRY_RUN=1 \
+      timeout 20 bash "$W/held.sh" --list </dev/null 2>&1)
+printf '%s' "$OUT" | grep -qF "a newer version of this script ($THIS_V; you had 2026.11.13.1)" && ok "a held 2026.11.13.1 copy replaces itself with this one" || bad "held copy did not update: $OUT"
 
 echo "--about"
 runu "$(mkpub "$THIS_V")" --about;        expect "--about names this script" 0 "this script: +sigmond-flash-latest.sh $THIS_V"

@@ -77,6 +77,16 @@ chk "v3.9 IS superseded by v3.61 (numeric, not lexical, compare)" \
 chk "v4.0 is NOT superseded by v3.61" \
     "$(pub_superseded "$V361.img" "$V4.img")" ""
 
+# ── both stems: the rename must not strand old-stem builds ──────────────────
+N394=sigmond-v3.94-20261121-release
+chk "new-stem blessed supersedes an old-stem lower build" \
+    "$(pub_superseded "$N394.img" "$V361.img" "$V361.sha256")" "$V361.img
+$V361.sha256"
+chk "new-stem blessed keeps its own files and a higher new-stem build" \
+    "$(pub_superseded "$N394.img" "$N394.sha256" sigmond-v3.95-20261122-release.img)" ""
+chk "old-stem blessed supersedes a new-stem lower build" \
+    "$(pub_superseded "$V361.img" sigmond-v3.60-20261001-release.img)" "sigmond-v3.60-20261001-release.img"
+
 echo
 printf '%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

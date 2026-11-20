@@ -38,8 +38,8 @@ WANT_DEV="${2:-}"
 
 # ── 1. the image ────────────────────────────────────────────────────────────
 if [ -z "$IMG" ]; then
-    IMG=$(ls -1t ./sigmond-appliance-*-release.img 2>/dev/null | head -1)
-    [ -n "$IMG" ] || die "no image given and no ./sigmond-appliance-*-release.img here"
+    IMG=$(ls -1t ./sigmond-*-release.img 2>/dev/null | head -1)
+    [ -n "$IMG" ] || die "no image given and no ./sigmond-*-release.img here"
     say "no image named — using the newest one here:"
 fi
 [ -f "$IMG" ] || die "no such image: $IMG"

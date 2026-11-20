@@ -1283,8 +1283,8 @@ SSHPW="sshpass -p $SSHPASSWORD ssh $SSHOPTS"
 SSHN=""  # resolved once by resolve_ssh(); every call site below reads $SSHN
 OVMF_CODE=/usr/share/OVMF/OVMF_CODE_4M.fd
 [ -f "$OVMF_CODE" ] || OVMF_CODE=/usr/share/OVMF/OVMF_CODE_4M.secboot.fd
-USBIMG="${USBIMG:-$(ls -t sigmond-appliance-v3*.img 2>/dev/null | head -1)}"
-[ -n "$USBIMG" ] || { say "FATAL: no sigmond-appliance-v3*.img found"; exit 1; }
+USBIMG="${USBIMG:-$(ls -t sigmond-v3*.img sigmond-appliance-v3*.img 2>/dev/null | head -1)}"
+[ -n "$USBIMG" ] || { say "FATAL: no sigmond-v3*.img or sigmond-appliance-v3*.img found"; exit 1; }
 
 # USBIMG may arrive as a bare filename (the default, found relative to $PWD)
 # or as an absolute path from a caller that resolved it already.  Normalise

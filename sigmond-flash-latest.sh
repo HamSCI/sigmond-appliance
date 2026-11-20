@@ -55,7 +55,7 @@ set -uo pipefail
 
 # Bump on every published change: the self-update below compares this, and
 # bless-release.sh will not publish a changed copy whose number did not go up.
-FLASH_VERSION=2026.11.13.1
+FLASH_VERSION=2026.11.20.1
 
 FOLDER_ID="${SIGMOND_IMAGE_FOLDER:-1Eym7xsP_qVvbGOVmlXER73K3jx6J7dQs}"
 IMG_DIR="${SIGMOND_IMAGE_DIR:-$HOME/sigmond-images}"
@@ -117,18 +117,18 @@ need curl awk sed sort
 
 # After a new image has downloaded and verified, keep it and the newest older
 # version (the last good one) and delete every older one with its .sha256 and
-# any .part.  Only sigmond-appliance-v*-release files in IMG_DIR are touched,
+# any .part.  Only sigmond-v*-release and sigmond-appliance-v*-release files in IMG_DIR are touched,
 # and nothing newer than the image just fetched (--version may pick an old one).
 prune_old_images(){
     local keep_prev old f n=0 freed=0
     keep_prev=$(ls "$IMG_DIR" 2>/dev/null \
-        | sed -nE 's/^sigmond-appliance-(v[0-9.]+)-[0-9]{8}-release\..*/\1/p' | sort -uV \
+        | sed -nE 's/^sigmond(-appliance)?-(v[0-9.]+)-[0-9]{8}-release\..*/\2/p' | sort -uV \
         | awk -v v="$VER" '$0!=v' | while read -r o; do
               [ "$(printf '%s\n%s\n' "$o" "$VER" | sort -V | tail -1)" = "$VER" ] && echo "$o"
           done)
     old=$(printf '%s\n' "$keep_prev" | sed '$d')     # all but the newest older one
     for o in $old; do
-        for f in "$IMG_DIR"/sigmond-appliance-"$o"-*-release.*; do
+        for f in "$IMG_DIR"/sigmond-"$o"-*-release.* "$IMG_DIR"/sigmond-appliance-"$o"-*-release.*; do
             [ -f "$f" ] || continue
             freed=$(( freed + $(fsize "$f") )); rm -f "$f" && n=$((n+1))
         done
@@ -237,10 +237,10 @@ self_update(){
 newest_of(){
     local names=$1
     printf '%s\n' "$names" \
-        | sed -nE 's/^sigmond-appliance-(v[0-9.]+)-([0-9]{8})-release\.img$/\1 \2/p' \
+        | sed -nE 's/^sigmond(-appliance)?-(v[0-9.]+)-([0-9]{8})-release\.img$/\2 \3/p' \
         | while read -r v d; do
-              printf '%s\n' "$names" | grep -qxF "sigmond-appliance-$v-$d-release.sha256" && echo "$v $d"
-          done | sort -V | tail -1
+              printf '%s\n' "$names" | grep -qxE "sigmond(-appliance)?-$v-$d-release.sha256" && echo "$v $d"
+          done | sort -uV | tail -1
 }
 # --about: where this flasher stands and what it would fetch.  Reads the
 # folder listings and the published copy of this script; replaces nothing and
@@ -306,19 +306,30 @@ is_pending(){
     printf '%s\n' "$PENDING_NAMES" | grep -qxF "$1" && ! printf '%s\n' "$PUB_NAMES" | grep -qxF "$1"
 }
 
-# Versions with BOTH an image and its checksum, newest last.
+# Image files carry one of two stems: sigmond-<v>-<date>-release (new) or
+# sigmond-appliance-<v>-<date>-release (before the rename).  Both are read.
+# stem_for <v> <date> — the stem whose .sha256 is listed; the new one wins a tie.
+stem_for(){
+    local s
+    for s in sigmond sigmond-appliance; do
+        [ -n "$(id_of "$s-$1-$2-release.sha256")" ] && { echo "$s-$1-$2-release"; return 0; }
+    done
+    return 1
+}
+# Versions with BOTH an image and its checksum, newest last: version first,
+# then date, so the highest version wins across both stems.
 VERSIONS=$(printf '%s\n' "$ENTRIES" | awk '{print $2}' \
-    | sed -nE 's/^sigmond-appliance-(v[0-9.]+)-([0-9]{8})-release\.img$/\1 \2/p' \
+    | sed -nE 's/^sigmond(-appliance)?-(v[0-9.]+)-([0-9]{8})-release\.img$/\2 \3/p' \
     | while read -r v d; do
-          [ -n "$(id_of "sigmond-appliance-$v-$d-release.sha256")" ] && echo "$v $d"
-      done | sort -V)
+          [ -n "$(stem_for "$v" "$d")" ] && echo "$v $d"
+      done | sort -uV)
 [ -n "$VERSIONS" ] || die "no published image with a checksum found"
 
 if [ "$LIST_ONLY" = 1 ]; then
     if [ "$PENDING" = 1 ]; then say "published and pending images (newest last):"
     else say "published images (newest last):"; fi
     printf '%s\n' "$VERSIONS" | while read -r v d; do
-        if is_pending "sigmond-appliance-$v-$d-release.img"; then
+        if is_pending "$(stem_for "$v" "$d").img"; then
             echo "          $v $d  PENDING (untested)"
         else
             echo "          $v $d"
@@ -334,7 +345,7 @@ else
     PICK=$(printf '%s\n' "$VERSIONS" | tail -1)
 fi
 VER=${PICK% *}; DATE=${PICK#* }
-STEM="sigmond-appliance-$VER-$DATE-release"
+STEM=$(stem_for "$VER" "$DATE")
 IMG_NAME="$STEM.img"
 say "selected: $IMG_NAME  (version $VER, built $DATE)"
 is_pending "$IMG_NAME" \

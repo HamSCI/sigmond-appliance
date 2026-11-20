@@ -40,6 +40,15 @@ check "keeps 3.100 (numeric, not lexical)"  '! grep -q "v3.100" <<<"$D"'
 check "leaves unversioned files alone"      '! grep -q "notes.txt" <<<"$D"'
 check "exactly five deletions"              '[ "$(wc -l <<<"$D")" = 5 ]'
 
+echo "both stems:"
+check "_pub_version reads the new stem"  '[ "$(_pub_version sigmond-v3.94-20261121-release.img)" = 3.94 ]'
+check "_pub_version reads the old stem"  '[ "$(_pub_version sigmond-appliance-v3.93-20261120-release.img)" = 3.93 ]'
+D2="$(pub_superseded sigmond-v3.94-20261121-release.img sigmond-appliance-v3.93-20261120-release.img sigmond-appliance-v3.93-20261120-release.sha256 sigmond-v3.94-20261121-release.img sigmond-v3.95-20261122-release.img)"
+check "new stem blessed: deletes the old-stem lower build" 'grep -qx "sigmond-appliance-v3.93-20261120-release.sha256" <<<"$D2"'
+check "new stem blessed: keeps itself and a higher one"    '[ "$(wc -l <<<"$D2")" = 2 ]'
+D3="$(pub_superseded sigmond-appliance-v3.93-20261120-release.img sigmond-v3.92-20261119-release.img sigmond-v3.94-20261121-release.img)"
+check "old stem blessed: deletes the new-stem lower build, keeps the higher" '[ "$D3" = sigmond-v3.92-20261119-release.img ]'
+
 echo "transports:"
 : > "$T/calls"
 pub_delete_pending "ssh:wd30:" a.img b.sha256

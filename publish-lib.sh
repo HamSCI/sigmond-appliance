@@ -113,9 +113,10 @@ pub_purge_pending() {
 # rob installed v3.59 by accident on 2026-09-30 because it was the file on his
 # stick.  The bless therefore removes what the blessed image supersedes.
 
-# _pub_version <name> — "sigmond-appliance-v3.61-20260930-release.img" → "3.61"
+# _pub_version <name> — "sigmond-v3.94-20261121-release.img" or the older
+# "sigmond-appliance-v3.61-20260930-release.img" → "3.94" / "3.61"
 _pub_version() {
-    printf '%s\n' "$1" | sed -nE 's/^sigmond-appliance-v([0-9]+(\.[0-9]+)+)-.*/\1/p'
+    printf '%s\n' "$1" | sed -nE 's/^sigmond(-appliance)?-v([0-9]+(\.[0-9]+)+)-.*/\2/p'
 }
 
 # pub_superseded <blessed-img-basename> <name>... — print the names to delete.

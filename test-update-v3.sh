@@ -164,7 +164,7 @@ usage(){
 usage: test-update-v3.sh [--image <release.img>] [--target <git-ref>] [--resume]
 
   --image   release image to roll forward FROM (default: the newest
-            sigmond-appliance-*-release.img in the rig dir)
+            sigmond-*-release.img in the rig dir)
   --target  git ref the guest must end up level with (default: origin/main)
   --resume  skip the install phases and reuse the nested production PM/VM
             left running by a previous run (probed, never assumed)
@@ -694,8 +694,8 @@ if [ -n "$IMGARG" ]; then
     IMGBASE="$(basename "$IMGARG")"
     [ -f "$RIG_DIR/$IMGBASE" ] || fatal - "--image $IMGARG: not found in the rig dir ($RIG_DIR/$IMGBASE)"
 else
-    IMGBASE="$(ls -t sigmond-appliance-*-release.img 2>/dev/null | head -1)"
-    [ -n "$IMGBASE" ] || fatal - "no sigmond-appliance-*-release.img in $RIG_DIR (pass --image, or build a release image first)"
+    IMGBASE="$(ls -t sigmond-*-release.img sigmond-appliance-*-release.img 2>/dev/null | head -1)"
+    [ -n "$IMGBASE" ] || fatal - "no sigmond-*-release.img (or sigmond-appliance-*) in $RIG_DIR (pass --image, or build a release image first)"
     say "no --image given; chose the newest release image in the rig dir"
 fi
 say "image under test (roll FROM): $IMGBASE"
@@ -950,7 +950,7 @@ else
         # Under --resume the image was chosen by mtime, so a mismatch is a
         # bookkeeping accident, not necessarily a defect: look for the
         # rig-dir manifest that DOES match and switch to it, loudly.
-        for cand in "$RIG_DIR"/sigmond-appliance-*.manifest.txt; do
+        for cand in "$RIG_DIR"/sigmond-*-release.manifest.txt "$RIG_DIR"/sigmond-appliance-*.manifest.txt; do
             [ -f "$cand" ] || continue
             components_rows "$cand" "$WORK/cand.rows"
             [ "$(rows_count "$WORK/cand.rows")" -ge "$MIN_ROWS" ] || continue

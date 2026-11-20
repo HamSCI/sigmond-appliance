@@ -42,7 +42,7 @@ mkdisk(){
 run(){   # run <label> <setup-fn>
     local root="$W/root"; rm -rf "$root"; mkdir -p "$root/sys" "$root/build" "$root/bin"
     "$2" "$root"
-    : > "$root/build/sigmond-appliance-v9.99-20260101-release.img"
+    : > "$root/build/${RIG_IMG_NAME:-sigmond-appliance-v9.99-20260101-release.img}"
     printf '#!/bin/bash\necho "  DD-CALLED $*" >> "$W/ddlog"\nexit 0\n' > "$root/bin/dd"
     printf '#!/bin/bash\nexit 0\n' > "$root/bin/umount"
     printf '#!/bin/bash\nexit 0\n' > "$root/bin/sync"
@@ -125,6 +125,11 @@ setup_microsd(){ mkdisk "$1" sda 0 ata 976773168; mkdisk "$1" sdb 1 usb 50011819
 out=$(run "238 GiB microSD" setup_microsd)
 case "$out" in *"target /dev/sdb"*) ok "a 238 GiB card qualifies" ;;
                *) bad "a 238 GiB card qualifies: $(echo "$out" | tail -1)" ;; esac
+
+# ── both stems: the rename must not hide the image from the rig ────────────
+out=$(RIG_IMG_NAME=sigmond-v9.99-20260101-release.img run "new stem" setup_with_stick)
+case "$out" in *"image: "*"sigmond-v9.99-20260101-release.img"*) ok "finds an image on the new stem" ;;
+               *) bad "finds an image on the new stem: $(echo "$out" | head -3)" ;; esac
 
 echo; printf '%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

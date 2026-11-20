@@ -33,7 +33,7 @@ die(){ ts "FATAL: $*"; exit 1; }
 
 IMG="${1:-}"
 if [ -z "$IMG" ]; then
-    IMG=$(ls -1t "$BUILD"/sigmond-appliance-v*-release.img 2>/dev/null | head -1)
+    IMG=$(ls -1t "$BUILD"/sigmond-v*-release.img "$BUILD"/sigmond-appliance-v*-release.img 2>/dev/null | head -1)
 fi
 [ -n "$IMG" ] && [ -f "$IMG" ] || die "no image found (looked in $BUILD)"
 SHA_FILE="${IMG%.img}.sha256"

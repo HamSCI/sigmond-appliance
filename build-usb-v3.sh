@@ -462,7 +462,7 @@ BUILT_UTC="$(date -u -Iseconds)"
     echo "#   checksum would just be wrong the moment it was written. This is"
     echo "#   not corruption. For the image checksum, see the Release-attached"
     echo "#   manifest for this exact build (same appliance_commit + built_utc"
-    echo "#   above): sigmond-appliance-${VERSION}-<stamp>.manifest.txt on the"
+    echo "#   above): sigmond-${VERSION}-<stamp>.manifest.txt on the"
     echo "#   GitHub Release, or the artifact store."
     echo
     cat manifest-raw.txt
@@ -578,7 +578,7 @@ umount /tmp/sigpay.$$; rmdir /tmp/sigpay.$$
 
 STAMP="$(date +%Y%m%d)"
 SUFFIX=""; [ "$RELEASE" = 1 ] && SUFFIX="-release"
-IMG="sigmond-appliance-${VERSION}-${STAMP}${SUFFIX}.img"
+IMG="sigmond-${VERSION}-${STAMP}${SUFFIX}.img"
 say "assemble USB image (pristine ISO + payload at aligned volsize offset) -> $IMG"
 VB=$(od -An -tu4 -j $((16*2048+80)) -N4 pve-sc-v3.iso | tr -d ' ')
 OFF=$(( VB*2048 )); OFF=$(( (OFF+1048575)/1048576*1048576 ))
