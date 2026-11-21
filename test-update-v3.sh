@@ -3086,7 +3086,15 @@ gx_ok 120 gb1-split "$UPL_SPLIT" "G-bis: the pipelines the restored smd rendered
 sed 's/^/      /' "$GX_OUT"
 GB_P_OLD="$(gx_tok "$GX_OUT" PIPE_OLD)"; GB_P_PSK="$(gx_tok "$GX_OUT" PIPE_PSK)"; GB_P_MS="$(gx_tok "$GX_OUT" PIPE_MS)"
 [ -n "$GB_P_OLD" ] && [ -n "$GB_P_PSK" ] && [ -n "$GB_P_MS" ] || fatal "$GX_OUT" "G-bis: the pipeline probe returned no answer (not a verdict)"
-if [ "${EB_SPLIT_PSK:-0}" -ge 1 ] || [ "${EB_SPLIT_MS:-0}" -ge 1 ]; then
+# The shared pipeline's identity is the first radiod status DNS.  In a nest
+# with no radiod the restored smd skips it ("unresolved identity:
+# radiod_status") while the newer split pipeline renders without one, so x0
+# is the right answer there and the expectation goes unevaluated.
+if { [ "${EB_SPLIT_PSK:-0}" -ge 1 ] || [ "${EB_SPLIT_MS:-0}" -ge 1 ]; } \
+   && [ "$GB_P_OLD" = 0 ] \
+   && grep -q "skipping pipeline psk-pskreporter .*unresolved identity: radiod_status" "$WORK/gb1-manifest-check.out" 2>/dev/null; then
+    say "⚠ NOT EVALUATED: the shared psk-pskreporter pipeline after the rollback (this nest runs no radiod, so the restored smd cannot resolve its radiod_status identity)"
+elif [ "${EB_SPLIT_PSK:-0}" -ge 1 ] || [ "${EB_SPLIT_MS:-0}" -ge 1 ]; then
     [ "$GB_P_OLD" = 1 ] || fatal "$GX_OUT" "after the rollback pipelines.toml holds psk-pskreporter x$GB_P_OLD, want 1: the restored smd did not render the shared pipeline again"
     [ "$GB_P_PSK" = 0 ] && [ "$GB_P_MS" = 0 ] || fatal "$GX_OUT" "after the rollback pipelines.toml still holds a split pipeline (psk-recorder-pskreporter x$GB_P_PSK, meteor-scatter-pskreporter x$GB_P_MS)"
     say "after the rollback the manifest renders psk-pskreporter again, and no split pipeline ✓"
