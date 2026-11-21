@@ -1661,6 +1661,16 @@ for key, p in (('LEG', etc + '/pipelines.toml'),
     n = heartbeats(p)
     print('%sFILE:%d' % (key, n is not None))
     print('HB%s:%d' % (key, n or 0))
+def drifts(p):
+    # v3.94: sigmond.toml also carries the daily drift row's pipeline.
+    try:
+        with open(p, 'rb') as fh:
+            d = tomllib.load(fh)
+    except (OSError, ValueError):
+        return 0
+    return sum(1 for x in d.get('pipeline') or []
+               if isinstance(x, dict) and x.get('name') == 'sigmond-sigmondb-drift')
+print('DRIFTSIG:%d' % drifts(etc + '/pipelines.d/sigmond.toml'))
 def state_of(p):
     if kind(p) is None:
         return 'missing'
@@ -1854,9 +1864,14 @@ _sp2u_placed() {
     local g="$1" w="$2" gate="$3" v want
     if [ "${SP2_NO_HEARTBEAT:-0}" = 1 ]; then
         # A station that enables no heartbeat (a v3.84+ install, HB_PRE=0):
-        # sigmond writes no sigmond.toml, and neither file carries one.
-        [ "$(sp2_tok "$g" SIGFILE)" = 0 ] \
-            || echo "FAIL: $w: pipelines.d/sigmond.toml exists on a station that enables no heartbeat"
+        # neither file carries one.  Since v3.94 sigmond.toml also holds the
+        # daily drift pipeline, so it may exist, holding that pipeline alone.
+        if [ "$(sp2_tok "$g" SIGFILE)" = 1 ]; then
+            [ "$(sp2_tok "$g" HBSIG)" = 0 ] \
+                || echo "FAIL: $w: pipelines.d/sigmond.toml carries a heartbeat on a station that enables none"
+            [ "$(sp2_tok "$g" DRIFTSIG)" = 1 ] \
+                || echo "FAIL: $w: pipelines.d/sigmond.toml exists with no heartbeat and no drift pipeline"
+        fi
         v="$(sp2_tok "$g" HBLEG)"
         [ "$v" = 0 ] || echo "FAIL: $w: the legacy manifest carries a heartbeat the station never enabled (x${v:-?})"
         if [ "$gate" = 1 ]; then
