@@ -201,6 +201,9 @@ say "VM up"
 
 # Machine prep, not the doc: the generic kernel (see the header).
 say "prep: swap the cloud kernel for the generic one (the cloud kernel has no USB stack)"
+# A fresh cloud image ships with no package lists.
+vm "sudo DEBIAN_FRONTEND=noninteractive apt-get update -qq >/dev/null" \
+    || die "prep: apt-get update failed"
 vm "sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq linux-image-amd64 >/dev/null" \
     || die "prep: apt-get install linux-image-amd64 failed"
 CLOUDPKGS="$(vm "dpkg -l | awk '/^ii  linux-image.*cloud/{print \$2}' | tr '\n' ' '")"
