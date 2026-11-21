@@ -69,10 +69,11 @@ bm_newest() {
 # _bringup_finish; bare-metal v3.94 run 2, 2026-11-21).  Narrow on purpose:
 # exit 3 without that line, any other exit, and a PARTIAL run that also
 # reports a failed step (smd returns 3 for it too) all stay a failed doc step.
-BM_PARTIAL_NO_SDR="' PARTIAL — no SDR, so radiod and the radiod-bound clients are installed but not configured or started."
+# One line must carry the whole of it (grep -E on a single line).
+BM_PARTIAL_NO_SDR_RE="bringup '[^']+' PARTIAL — no SDR, so radiod and the radiod-bound clients are installed but not configured or started\."
 bm_bringup_partial_ok() {
     local rc="$1" out="$2"
     [ "$rc" = 3 ] && [ -r "$out" ] || return 1
-    grep -qF "bringup '" "$out" && grep -qF -- "$BM_PARTIAL_NO_SDR" "$out" || return 1
+    grep -qE -- "$BM_PARTIAL_NO_SDR_RE" "$out" || return 1
     ! grep -qF 'bring-up step(s) FAILED' "$out"
 }

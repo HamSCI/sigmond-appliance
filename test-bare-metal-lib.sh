@@ -336,6 +336,8 @@ PARTIAL_LINE="  ⚠  bringup 'dasi2' PARTIAL — no SDR, so radiod and the radio
 printf '\033[33m%s\033[0m\n     plug in the SDR: first-run bring-up completes on its own\n' "$PARTIAL_LINE" > "$T/partial.out"
 { printf '  ✗  1 bring-up step(s) FAILED:\n  ✗    start igmp-querier (exit 1)\n'; cat "$T/partial.out"; } > "$T/partial-failed.out"
 printf 'bringup dasi2 PARTIAL\n' > "$T/partial-other.out"
+# the two halves of the line on separate lines (fix round 1, M3)
+printf "bringup 'dasi2' was run\n%s\n" "' PARTIAL — no SDR, so radiod and the radiod-bound clients are installed but not configured or started." > "$T/partial-split.out"
 
 if type bm_bringup_partial_ok >/dev/null 2>&1; then
     bm_bringup_partial_ok 3 "$T/partial.out" && ok "bm_bringup_partial_ok: exit 3 + the PARTIAL line" \
@@ -344,6 +346,8 @@ if type bm_bringup_partial_ok >/dev/null 2>&1; then
         || ok "bm_bringup_partial_ok: a failed step under PARTIAL stays a failure"
     bm_bringup_partial_ok 3 "$T/partial-other.out" && bad "bm_bringup_partial_ok took another PARTIAL text" \
         || ok "bm_bringup_partial_ok: exit 3 without the no-SDR line stays a failure"
+    bm_bringup_partial_ok 3 "$T/partial-split.out" && bad "bm_bringup_partial_ok took the line split in two" \
+        || ok "bm_bringup_partial_ok: the PARTIAL line must be one line"
     bm_bringup_partial_ok 1 "$T/partial.out" && bad "bm_bringup_partial_ok took exit 1" \
         || ok "bm_bringup_partial_ok: exit 1 stays a failure, line or not"
     bm_bringup_partial_ok 3 "$T/no-such-file" && bad "bm_bringup_partial_ok took a missing output" \
