@@ -1952,9 +1952,12 @@ _sp2u_gbis_part2() {
     v="$(sp2u_num "$(sp2_tok "$g" ASIDEN)")"; d="$(sp2u_num "$(sp2_tok "$e" ASIDEN)")"
     [ -n "$v" ] && [ -n "$d" ] && [ "$v" = "$d" ] \
         || echo "FAIL: G-bis: the restored sigmond carries part 2, so the rolled-back marker count should stay as at E-bis (${d:-?}); it reads ${v:-?}"
-    if [ "$(sp2_tok "$e" SIGFILE)" = 1 ]; then
+    # Only a heartbeat keeps sigmond.toml across the restore.  A file that held
+    # the v3.94 drift pipeline alone goes when the older sigmond re-renders: it
+    # knows no drift pipeline and writes no sigmond.toml without a heartbeat.
+    if [ "$(sp2_tok "$e" SIGFILE)" = 1 ] && [ "$(sp2_tok "$e" HBSIG)" = 1 ]; then
         [ "$(sp2_tok "$g" SIGFILE)" = 1 ] \
-            || echo "FAIL: G-bis: the restored sigmond carries part 2, so pipelines.d/sigmond.toml should still stand; it is gone"
+            || echo "FAIL: G-bis: the restored sigmond carries part 2, so pipelines.d/sigmond.toml (holding the heartbeat) should still stand; it is gone"
     fi
     if [ "$(sp2_tok "$g" MARKER)" = 1 ] && [ "$(sp2_tok "$g" SIGFILE)" = 1 ]; then
         echo "OK: G-bis: the restored sigmond carries part 2, and the restore left the marker and pipelines.d/sigmond.toml standing"

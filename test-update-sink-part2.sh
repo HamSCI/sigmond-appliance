@@ -341,8 +341,12 @@ has   "G-bis part 2: a move line fails" "$T/v" "so the restore should print no '
 has   "G-bis part 2: ... a removal line fails" "$T/v" "so the restore should print no 'removed .../pipelines.d/sigmond.toml' line"
 sp2u_gbis_verdict "$T/e.st" "$T/rp2.f" "$T/g.st" 1 1 > "$T/v"
 has   "G-bis part 2: the marker gone fails" "$T/v" "so the carry-over marker should still stand as a regular file"
-has   "G-bis part 2: ... sigmond.toml gone fails" "$T/v" "so pipelines.d/sigmond.toml should still stand; it is gone"
+has   "G-bis part 2: ... sigmond.toml gone fails" "$T/v" "(holding the heartbeat) should still stand; it is gone"
 has   "G-bis part 2: ... a new aside fails" "$T/v" "so the rolled-back marker count should stay as at E-bis (0); it reads 1"
+# v3.94: a sigmond.toml that held the drift pipeline alone goes when the older
+# sigmond re-renders; its absence after the restore is no finding.
+sp2u_gbis_verdict "$T/nohbd.st" "$T/rp2.f" "$T/nohb.st" 1 1 > "$T/v"
+hasnt "G-bis part 2: a drift-only sigmond.toml gone is no finding" "$T/v" "should still stand; it is gone"
 sp2u_gbis_verdict "$T/e.st" "$T/rp2.f" "$T/e.st" 1 0 > "$T/v"
 has   "G-bis: the probe flipped to below part 2 fails on the same state" "$T/v" "the carry-over marker still stands after the restore to a release below part 2"
 sp2u_gbis_verdict "$T/e.st" "$T/rp2.f" "$T/e.st" 1 "" > "$T/v"
