@@ -48,7 +48,8 @@
 # Exit 0 only on result: PASS.  A run that reaches the doc's commands writes
 # one record, $RIG_DIR/bare-metal/<version>-<stamp>.record (contract C2,
 # bare-metal-lib.sh); a doc command that fails writes result: FAIL with
-# smd_check_exit: -1.  A rig fault before the doc runs (VM never boots, no
+# smd_check_exit: -1.  Bring-up's exit 3 with its PARTIAL-for-no-SDR line
+# counts as success (the VM has no RX888), and the checks then run as usual.  A rig fault before the doc runs (VM never boots, no
 # ssh, no USB bus) writes no record: it says nothing about the release.
 # Neither does an install whose sigmond checkout ends at a commit other than
 # the one under test (/tmp/bm-sigmond-head in the VM).
@@ -236,13 +237,19 @@ to_vm "$WORK/bm-install.sh" /tmp/bm-install.sh || die "cannot copy the install p
 to_vm "$WORK/bm-bringup.sh" /tmp/bm-bringup.sh || die "cannot copy the bring-up part into the VM"
 
 # run_part <name>: one ssh session, a login shell, no stdin.  255 is ssh's own
-# failure, not the doc's.
+# failure, not the doc's.  The output also lands in $WORK/bm-<name>.out.
 run_part(){
     local rc
     say "--- $1 part ---"
-    vm "env $RACENV bash -l /tmp/bm-$1.sh </dev/null"; rc=$?
+    vm "env $RACENV bash -l /tmp/bm-$1.sh </dev/null" | tee "$WORK/bm-$1.out"; rc=${PIPESTATUS[0]}
     say "--- $1 part exit $rc ---"
     [ "$rc" = 255 ] && die "ssh failed during the $1 part (no record: a rig fault)"
+    # The VM has no RX888: bring-up defers the radio half and exits 3 PARTIAL.
+    # That, and only that, is the doc's success (bm_bringup_partial_ok).
+    if [ "$1" = bringup ] && bm_bringup_partial_ok "$rc" "$WORK/bm-$1.out"; then
+        say "bring-up ended PARTIAL for want of an SDR (exit 3): the doc's success on a VM with no RX888"
+        return 0
+    fi
     return "$rc"
 }
 record(){   # record <list_rc> <check_exit> <judge_rc>: write C2, print it, exit

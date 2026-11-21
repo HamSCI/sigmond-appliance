@@ -180,7 +180,8 @@ case "$cmd" in
     *bm-install.sh*) echo "install ran"; exit "${FAKE_INSTALL_RC:-0}" ;;
     *"cat /tmp/bm-sigmond-head"*) [ "${FAKE_NO_HEAD:-0}" = 1 ] && exit 1
         echo "${FAKE_HEAD:-$(cat "$FAKE_DIR/sc")}" ;;
-    *bm-bringup.sh*) echo "bringup ran"; exit "${FAKE_BRINGUP_RC:-0}" ;;
+    *bm-bringup.sh*) echo "bringup ran"; [ -n "${FAKE_BRINGUP_OUT:-}" ] && cat "$FAKE_BRINGUP_OUT"
+        exit "${FAKE_BRINGUP_RC:-0}" ;;
     *"release-list --check"*) echo "release list v3.94: matches (live)"; exit "${FAKE_LIST_RC:-0}" ;;
     *"check --json"*) cat "$FAKE_CHECK_JSON"; exit "${FAKE_CHECK_RC:-2}" ;;
     *"smd check"*) echo "text check"; exit "${FAKE_CHECK_RC:-2}" ;;
@@ -325,6 +326,53 @@ r="$(newest_rec)"
     && ok "a failed doc step writes FAIL (smd_check_exit -1)" || bad "bring-up failure" "rc=$rc $(tr '\n' ' ' < "$r")"
 grep -q 'check --json' "$T/ssh.log" && bad "judged smd check after a failed bring-up" \
     || ok "no verdict taken after a failed doc step"
+
+# ── bring-up PARTIAL for want of an SDR (exit 3) is the doc's success ──
+# The rig's VM has no RX888, so bring-up defers the radio half, prints its
+# PARTIAL line and exits 3 (bare-metal v3.94 run 2, 2026-11-21).  That alone
+# passes; exit 3 without the line, any other exit, or a PARTIAL run with a
+# failed step stays a failed doc step.
+PARTIAL_LINE="  ⚠  bringup 'dasi2' PARTIAL — no SDR, so radiod and the radiod-bound clients are installed but not configured or started."
+printf '\033[33m%s\033[0m\n     plug in the SDR: first-run bring-up completes on its own\n' "$PARTIAL_LINE" > "$T/partial.out"
+{ printf '  ✗  1 bring-up step(s) FAILED:\n  ✗    start igmp-querier (exit 1)\n'; cat "$T/partial.out"; } > "$T/partial-failed.out"
+printf 'bringup dasi2 PARTIAL\n' > "$T/partial-other.out"
+
+if type bm_bringup_partial_ok >/dev/null 2>&1; then
+    bm_bringup_partial_ok 3 "$T/partial.out" && ok "bm_bringup_partial_ok: exit 3 + the PARTIAL line" \
+        || bad "bm_bringup_partial_ok rejects the real PARTIAL line"
+    bm_bringup_partial_ok 3 "$T/partial-failed.out" && bad "bm_bringup_partial_ok took a PARTIAL with a failed step" \
+        || ok "bm_bringup_partial_ok: a failed step under PARTIAL stays a failure"
+    bm_bringup_partial_ok 3 "$T/partial-other.out" && bad "bm_bringup_partial_ok took another PARTIAL text" \
+        || ok "bm_bringup_partial_ok: exit 3 without the no-SDR line stays a failure"
+    bm_bringup_partial_ok 1 "$T/partial.out" && bad "bm_bringup_partial_ok took exit 1" \
+        || ok "bm_bringup_partial_ok: exit 1 stays a failure, line or not"
+    bm_bringup_partial_ok 3 "$T/no-such-file" && bad "bm_bringup_partial_ok took a missing output" \
+        || ok "bm_bringup_partial_ok: no output stays a failure"
+else
+    bad "bm_bringup_partial_ok is defined in bare-metal-lib.sh"
+fi
+
+out="$(FAKE_BRINGUP_RC=3 FAKE_BRINGUP_OUT="$T/partial.out" run v3.94 --commit "$SC")"; rc=$?
+r="$(newest_rec)"
+[ "$rc" = 0 ] && [ "$(key "$r" result)" = PASS ] && [ "$(key "$r" smd_check_exit)" = 2 ] \
+    && ok "bring-up PARTIAL for no SDR (exit 3) goes on to the checks and can PASS" \
+    || bad "PARTIAL no-SDR run" "rc=$rc $(tr '\n' ' ' < "$r") $(tail -5 <<< "$out")"
+grep -q 'check --json' "$T/ssh.log" && ok "smd check is judged after a no-SDR PARTIAL" \
+    || bad "no verdict after a no-SDR PARTIAL"
+out="$(FAKE_BRINGUP_RC=3 FAKE_BRINGUP_OUT="$T/partial.out" FAKE_CHECK_JSON="$T/bad.json" FAKE_CHECK_RC=1 run v3.94 --commit "$SC")"; rc=$?
+r="$(newest_rec)"
+[ "$rc" = 1 ] && [ "$(key "$r" result)" = FAIL ] && [ "$(key "$r" smd_check_exit)" = 1 ] \
+    && ok "after a no-SDR PARTIAL a failing check still FAILs" || bad "PARTIAL then bad check" "rc=$rc $(tr '\n' ' ' < "$r")"
+for case in partial-failed partial-other; do
+    out="$(FAKE_BRINGUP_RC=3 FAKE_BRINGUP_OUT="$T/$case.out" run v3.94 --commit "$SC")"; rc=$?
+    r="$(newest_rec)"
+    [ "$rc" = 1 ] && [ "$(key "$r" smd_check_exit)" = -1 ] && ! grep -q 'check --json' "$T/ssh.log" \
+        && ok "exit 3 with $case output stays a failed doc step" || bad "exit 3 $case" "rc=$rc $(tr '\n' ' ' < "$r")"
+done
+out="$(FAKE_BRINGUP_RC=1 FAKE_BRINGUP_OUT="$T/partial.out" run v3.94 --commit "$SC")"; rc=$?
+r="$(newest_rec)"
+[ "$rc" = 1 ] && [ "$(key "$r" smd_check_exit)" = -1 ] \
+    && ok "exit 1 with the PARTIAL line stays a failed doc step" || bad "exit 1 + PARTIAL" "rc=$rc $(tr '\n' ' ' < "$r")"
 
 grep -qx "git -C /opt/git/sigmond/sigmond rev-parse HEAD > /tmp/bm-sigmond-head" "$T/vmfs/bm-install.sh" 2>/dev/null \
     && ok "the VM's install part writes the checkout's commit" || bad "no head line in the install part" "$(cat "$T/vmfs/bm-install.sh" 2>&1)"
